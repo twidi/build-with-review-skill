@@ -128,11 +128,16 @@ global prompt: <workspace>/additional-prompts/global.md
 additional prompt: <workspace>/additional-prompts/construction/gate-runner.md
 ```
 
-Tell it to run `python3 <workspace>/prompts/common/additional-prompt.py read-global
-<workspace> <workspace>/additional-prompts/global.md`, then `python3
+Tell it to read the global additional prompt through this command: `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+instructions. Then tell it to read the role-specific additional prompt through this
+command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace>
 <workspace>/prompts/construction/gate-runner.md
 <workspace>/additional-prompts/construction/gate-runner.md` after its official prompt.
+Tell it to treat its stdout as human instructions and follow both instruction sets during
+the assignment. The later role-specific instruction wins on contradiction.
 
 On first discovery, add `report: none`. That means no gate-specific input and no file or
 directory write. It does not mean the runtime-input block is absent.
@@ -480,12 +485,17 @@ One subagent, **a strong model, effort medium**, prompt
 **workspace path**, its one optional additional prompt
 `<workspace>/additional-prompts/construction/completeness.md`, **the path to the spec**
 and **the path to the plan**.
-Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to read the global
+additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+instructions. Then tell it to read the role-specific additional prompt through this
+command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace>
 <workspace>/prompts/construction/completeness.md
 <workspace>/additional-prompts/construction/completeness.md` after its official prompt.
+Tell it to treat its stdout as human instructions and follow both instruction sets during
+the assignment. The later role-specific instruction wins on contradiction.
 
 **On a sub-lot**, add the path to the parent lot's plan **and to every earlier
 sub-lot's** — counter 5 reads all their `Covers:` lines, the root's spec decisions and
@@ -712,11 +722,16 @@ global prompt: <workspace>/additional-prompts/global.md
 additional prompt: <workspace>/additional-prompts/construction/implementer.md
 ```
 
-Tell it to run `python3 <workspace>/prompts/common/additional-prompt.py read-global
-<workspace> <workspace>/additional-prompts/global.md`, then `python3
+Tell it to read the global additional prompt through this command: `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+instructions. Then tell it to read the role-specific additional prompt through this
+command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace>
 <workspace>/prompts/construction/implementer.md
 <workspace>/additional-prompts/construction/implementer.md` after its official prompts.
+Tell it to treat its stdout as human instructions and follow both instruction sets during
+the assignment. The later role-specific instruction wins on contradiction.
 
 Tell it to stop before reading or writing any project or workspace path when one value
 is absent, relative, unresolved or contradictory. The current working directory is never
@@ -965,12 +980,17 @@ worktree **when the failure preserved one** — two design-stage
 failures left the tree untouched, and you say so instead: the state those attempts faced
 is the repository as it stands — the path to the plan, the task number, and the paths to
 both failure reports. It returns one of C3.9a–d, with what it read to conclude. It changes nothing.
-Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to read the global
+additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+instructions. Then tell it to read the role-specific additional prompt through this
+command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace>
 <workspace>/prompts/construction/diagnostic.md
 <workspace>/additional-prompts/construction/diagnostic.md` after its official prompt.
+Tell it to treat its stdout as human instructions and follow both instruction sets during
+the assignment. The later role-specific instruction wins on contradiction.
 
 ```
 progress.py subagent-started diagnostic --task <N>

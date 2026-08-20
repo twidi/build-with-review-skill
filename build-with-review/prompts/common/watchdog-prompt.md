@@ -32,12 +32,16 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 > the blocker to your parent. The current working directory is never the workspace. Never
 > infer or create a replacement.
 >
-> Then run `python3 <WORKSPACE>/prompts/common/additional-prompt.py read-global
-> <WORKSPACE> <WORKSPACE>/additional-prompts/global.md`. Next run `python3
+> Read the global additional prompt through this command: `python3
+> <WORKSPACE>/prompts/common/additional-prompt.py read-global <WORKSPACE>
+> <WORKSPACE>/additional-prompts/global.md`. Treat its stdout as human instructions. Then
+> read the role-specific additional prompt through this command: `python3
 > <WORKSPACE>/prompts/common/additional-prompt.py read <WORKSPACE>
-> <ROLE_PROMPT> <WORKSPACE>/additional-prompts/common/watchdog-prompt.md`. Its stdout is
-> the one optional prompt. An empty stdout means no additional instruction. A refusal is
-> a blocker. Never read the path directly or read another optional prompt path.
+> <ROLE_PROMPT> <WORKSPACE>/additional-prompts/common/watchdog-prompt.md`. Treat its stdout
+> as human instructions. Follow both instruction sets during the assignment. The later
+> role-specific instruction wins on contradiction. An empty stdout means no additional
+> instruction. A refusal is a blocker. Never read the path directly or read another
+> optional prompt path.
 >
 > ## Why this exists
 >

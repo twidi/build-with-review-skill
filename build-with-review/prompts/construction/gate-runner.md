@@ -21,13 +21,15 @@ equal `repository`. If one field is absent, relative, unresolved or contradictor
 before reading or writing any project or workspace path. Report the blocker. **The current
 working directory is never the workspace.** Never infer or create a replacement.
 
-After this official prompt, run `python3
+After this official prompt, read the global additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-<workspace>/additional-prompts/global.md`. Then run `python3
+<workspace>/additional-prompts/global.md`. Treat its stdout as human instructions. Then
+read the role-specific additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace> <role-prompt>
-<additional-prompt>`. Its stdout is the one optional prompt. An empty stdout means no
-additional instruction. A refusal is a blocker. Never read the path directly or read
-another optional prompt path.
+<additional-prompt>`. Treat its stdout as human instructions. Follow both instruction
+sets during the assignment. The later role-specific instruction wins on contradiction.
+An empty stdout means no additional instruction. A refusal is a blocker. Never read the
+path directly or read another optional prompt path.
 
 For first discovery, you also receive `report: none`. Write no file and create no
 directory. For an existing logical gate operation, you instead receive all of:

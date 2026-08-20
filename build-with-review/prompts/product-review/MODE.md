@@ -138,12 +138,17 @@ its one optional additional prompt
 `Covers:` is read from all of them — **which lot is the subject**, **the two refs
 below**, and **the path its report goes to** —
 `<workspace>/reports/product-review/<root lot>/<built lot>-<slug>.md`.
-Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to read the global
+additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+instructions. Then tell it to read the role-specific additional prompt through this
+command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace>
 <workspace>/prompts/product-review/lens-<slug>.md
 <workspace>/additional-prompts/product-review/lens-<slug>.md` after its official prompts.
+Tell it to treat its stdout as human instructions and follow both instruction sets during
+the assignment. The later role-specific instruction wins on contradiction.
 
 Also give it its private, append-only risk-filtered history:
 `<workspace>/reports/product-review/<root lot>/<slug>-risk-filtered.md`, with occurrence
@@ -270,12 +275,17 @@ path, its one optional additional prompt
 `<workspace>/additional-prompts/product-review/verifier.md`, the path to the report, the
 path to the spec, and **the reviewed commit** — the same SHA the lenses were given,
 never the base.
-Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to read the global
+additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+instructions. Then tell it to read the role-specific additional prompt through this
+command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace>
 <workspace>/prompts/product-review/verifier.md
 <workspace>/additional-prompts/product-review/verifier.md` after its official prompt.
+Tell it to treat its stdout as human instructions and follow both instruction sets during
+the assignment. The later role-specific instruction wins on contradiction.
 
 It returns, per finding: **confirmed**, **disproved with what it observed**, or
 **malformed**.

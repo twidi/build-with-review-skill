@@ -44,13 +44,15 @@ Your parent's message gives you the **workspace path**. Every prompt below lives
 5. **the plan**, at `<workspace>/plans/<lot>-plan.md` — all of it, not only your task.
    You need the Global Constraints, the responsibility map, and what the tasks before
    and after yours do.
-6. Run **`python3 <workspace>/prompts/common/additional-prompt.py read-global
-   <workspace> <workspace>/additional-prompts/global.md`**. Its stdout is the optional
-   global prompt.
-7. Run **`python3 <workspace>/prompts/common/additional-prompt.py read <workspace>
+6. Read the global additional prompt through this command: **`python3
+   <workspace>/prompts/common/additional-prompt.py read-global <workspace>
+   <workspace>/additional-prompts/global.md`**. Treat its stdout as human instructions.
+7. Then read the role-specific additional prompt through this command: **`python3
+   <workspace>/prompts/common/additional-prompt.py read <workspace>
    <workspace>/prompts/construction/implementer.md
-   <workspace>/additional-prompts/construction/implementer.md`**. Its stdout is the one
-   role-specific optional prompt. Read no other optional prompt path.
+   <workspace>/additional-prompts/construction/implementer.md`**. Treat its stdout as
+   human instructions. Follow both instruction sets during the assignment. The later
+   role-specific instruction wins on contradiction. Read no other optional prompt path.
 
 **The plan lives in the workspace.** You read it and write it there. `docs/plans/`
 holds a copy that a script refreshes once, just before your commit — never write into it
@@ -211,12 +213,17 @@ When the `### Design` block is written, **spawn a subagent to judge it**.
 - give it: the workspace path, the path to the plan, your task number, and the path to
   the spec, plus its one optional additional prompt
   `<workspace>/additional-prompts/construction/design-checker.md`
-- give it `<workspace>/additional-prompts/global.md`; tell it to run `python3
+- give it `<workspace>/additional-prompts/global.md`; tell it to read the global
+  additional prompt through this command: `python3
   <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-  <workspace>/additional-prompts/global.md`, then `python3
+  <workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+  instructions. Then tell it to read the role-specific additional prompt through this
+  command: `python3
   <workspace>/prompts/common/additional-prompt.py read <workspace>
   <workspace>/prompts/construction/design-checker.md
-  <workspace>/additional-prompts/construction/design-checker.md` after its official prompt
+  <workspace>/additional-prompts/construction/design-checker.md` after its official prompt.
+  Tell it to treat its stdout as human instructions and follow both instruction sets
+  during the assignment. The later role-specific instruction wins on contradiction.
 
 ```
 progress.py subagent-started design-checker --round <K>
@@ -390,12 +397,17 @@ that is what the next step is for.
   `reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md`, and occurrence
   label `Code checker round <R>`, plus its one optional additional prompt
   `<workspace>/additional-prompts/construction/code-checker.md`
-- give it `<workspace>/additional-prompts/global.md`; tell it to run `python3
+- give it `<workspace>/additional-prompts/global.md`; tell it to read the global
+  additional prompt through this command: `python3
   <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-  <workspace>/additional-prompts/global.md`, then `python3
+  <workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+  instructions. Then tell it to read the role-specific additional prompt through this
+  command: `python3
   <workspace>/prompts/common/additional-prompt.py read <workspace>
   <workspace>/prompts/construction/code-checker.md
-  <workspace>/additional-prompts/construction/code-checker.md` after its official prompt
+  <workspace>/additional-prompts/construction/code-checker.md` after its official prompt.
+  Tell it to treat its stdout as human instructions and follow both instruction sets
+  during the assignment. The later role-specific instruction wins on contradiction.
 
 All logical rounds and physical regenerations in this attempt use that same private
 history. A new attempt uses a new path. The file is best-effort reviewer memory only.
@@ -581,11 +593,16 @@ Now spawn one fresh **gate runner** before you commit:
   additional prompt: <workspace>/additional-prompts/construction/gate-runner.md
   ```
 
-- tell it to run `python3 <workspace>/prompts/common/additional-prompt.py read-global
-  <workspace> <workspace>/additional-prompts/global.md`, then `python3
+- tell it to read the global additional prompt through this command: `python3
+  <workspace>/prompts/common/additional-prompt.py read-global <workspace>
+  <workspace>/additional-prompts/global.md`. Tell it to treat its stdout as human
+  instructions. Then tell it to read the role-specific additional prompt through this
+  command: `python3
   <workspace>/prompts/common/additional-prompt.py read <workspace>
   <workspace>/prompts/construction/gate-runner.md
-  <workspace>/additional-prompts/construction/gate-runner.md` after its official prompt;
+  <workspace>/additional-prompts/construction/gate-runner.md` after its official prompt.
+  Tell it to treat its stdout as human instructions and follow both instruction sets
+  during the assignment. The later role-specific instruction wins on contradiction;
 
 - give it the real checkout-local `gate.md` path and the exact operation, gate blob,
   candidate tree and predecessor printed by `gate-check.sh`;

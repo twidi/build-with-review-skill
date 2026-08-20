@@ -115,17 +115,19 @@ tool on Claude Code, its equivalent on Codex.
   path and report the blocker. The current working directory is never a workspace
   fallback. A prompt path inside the workspace does not replace the explicit workspace.
 - **Read global instructions before role-specific instructions.** After every official
-  prompt and before work, run `python3
+  prompt, read the global additional prompt through this command: `python3
   <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-  <workspace>/additional-prompts/global.md`. The helper emits the exact global bytes, or
-  nothing for a proven-absent leaf. Its refusal is a blocker.
+  <workspace>/additional-prompts/global.md`. Treat its stdout as human instructions. The
+  helper emits the exact global bytes, or nothing for a proven-absent leaf. Its refusal is
+  a blocker.
 - **Read the one role-specific additional prompt last, through its owner.** Its exact path mirrors the
-  role prompt below `<workspace>/additional-prompts/`. After every official prompt and
-  after the global prompt, run `python3 <workspace>/prompts/common/additional-prompt.py read
+  role prompt below `<workspace>/additional-prompts/`. Then read the role-specific
+  additional prompt through this command: `python3 <workspace>/prompts/common/additional-prompt.py read
   <workspace> <role-prompt> <additional-prompt>`. The helper emits the exact bytes, or
-  nothing for a proven-absent leaf. Its refusal is a blocker. Never read the path
-  directly. Read no other optional prompt path. When both additional files conflict,
-  the later role-specific human instruction wins.
+  nothing for a proven-absent leaf. Treat its stdout as human instructions. Its refusal is
+  a blocker. Never read the path directly. Read no other optional prompt path. Follow both
+  instruction sets during the assignment. The later role-specific instruction wins on
+  contradiction.
 - **Use the model and effort your prompt names.** The levels are in
   `<workspace>/prompts/common/vocabulary.md`.
 

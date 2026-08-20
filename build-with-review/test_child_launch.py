@@ -261,6 +261,20 @@ def every_launch_reads_the_global_prompt_before_its_role_prompt():
         ("consolidation checker", "prompts/amendment/MODE.md", "## A4", "## Going back"),
         ("controller handover", "prompts/common/handover-to-construction-rules.md", "## The message", "## Once it exists"),
     ]
+
+    def check_human_instruction_wording(name, body):
+        normalized = " ".join(body.replace("\n> ", " ").lower().split())
+        check("read the global additional prompt through" in normalized,
+              f"{name} launch describes the global prompt as an executable action")
+        check("treat its stdout as human instructions" in normalized,
+              f"{name} launch does not classify global stdout as human instructions")
+        check("read the role-specific additional prompt through" in normalized,
+              f"{name} launch describes the role prompt as an executable action")
+        check("follow both instruction sets" in normalized,
+              f"{name} launch does not keep both instruction sets active")
+        check("role-specific instruction wins on contradiction" in normalized,
+              f"{name} launch does not preserve role-specific precedence")
+
     for name, relative, start, end in launch_sections:
         body = section(relative, start, end)
         check("additional-prompts/global.md" in body,
@@ -271,6 +285,7 @@ def every_launch_reads_the_global_prompt_before_its_role_prompt():
               f"{name} launch lost its role-specific physical reader")
         check(body.index("additional-prompt.py read-global") < body.index("additional-prompt.py read "),
               f"{name} launch does not read global before role-specific instructions")
+        check_human_instruction_wording(name, body)
 
     watchdog = read("prompts/common/watchdog-prompt.md")
     check("additional-prompts/global.md" in watchdog,
@@ -280,6 +295,7 @@ def every_launch_reads_the_global_prompt_before_its_role_prompt():
     check(watchdog.index("additional-prompt.py read-global")
           < watchdog.index("additional-prompt.py read "),
           "watchdog does not read global before role-specific instructions")
+    check_human_instruction_wording("watchdog", watchdog)
 
     skill = SKILL.read_text(encoding="utf-8")
     worker = read("prompts/common/worker.md")
@@ -290,6 +306,7 @@ def every_launch_reads_the_global_prompt_before_its_role_prompt():
               f"{subject} does not use the global physical reader")
         check("official" in text and "role" in text,
               f"{subject} does not define official/global/role reading order")
+        check_human_instruction_wording(subject, text)
 
     check("additional-prompt.py publish-global" in skill
           and "additional-prompt.py remove-global" in skill,

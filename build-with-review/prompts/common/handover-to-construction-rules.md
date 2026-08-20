@@ -154,13 +154,16 @@ replacement.
 Invoke the `build-with-review` skill and read what it tells you to read. You are
 entering MODE CONSTRUCTION, to build <lot>.
 
-After the skill and official role prompt, run `python3
+After the skill and official role prompt, read the global additional prompt through this
+command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
-<workspace>/additional-prompts/global.md`. Then run `python3
+<workspace>/additional-prompts/global.md`. Treat its stdout as human instructions. Then
+read the role-specific additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace>
 <workspace>/prompts/construction/MODE.md
-<workspace>/additional-prompts/construction/MODE.md`. Its stdout is the one optional
-prompt. Read no other optional prompt path.
+<workspace>/additional-prompts/construction/MODE.md`. Treat its stdout as human
+instructions. Follow both instruction sets during the assignment. The later role-specific
+instruction wins on contradiction. Read no other optional prompt path.
 
 WHERE THINGS STAND
 <the variable block — see below>

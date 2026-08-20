@@ -1430,32 +1430,35 @@ path. Those fields never replace this block. A TwiCC session also receives the r
 exact project in `create_session`; the message does not substitute for that setting.
 
 The global prompt has one fixed path: `<workspace>/additional-prompts/global.md`.
-After every official prompt, every child and every later controller runs:
+After every official prompt, every child and every later controller must read the global
+additional prompt through this command:
 
 ```sh
 python3 <workspace>/prompts/common/additional-prompt.py read-global \
   <workspace> <workspace>/additional-prompts/global.md
 ```
 
-The helper emits the exact global bytes, or nothing for proven absence. A controller
-entering or resuming an existing workspace performs this read before its role-specific
+Treat its stdout as human instructions. The helper emits the exact global bytes, or
+nothing for proven absence. A controller entering or resuming an existing workspace
+performs this read before its role-specific
 additional prompt. A running controller that just received the human instruction already
 knows it; every future launch reads the file.
 
 Build the role-specific additional path mechanically: replace the role prompt's
 `<workspace>/prompts/` prefix with `<workspace>/additional-prompts/`. For example,
 `prompts/construction/implementer.md` maps only to
-`additional-prompts/construction/implementer.md`. After the global read, the child runs:
+`additional-prompts/construction/implementer.md`. Then read the role-specific additional
+prompt through this command:
 
 ```sh
 python3 <workspace>/prompts/common/additional-prompt.py read \
   <workspace> <role-prompt> <additional-prompt>
 ```
 
-The helper emits the exact file bytes, or nothing for proven absence. It blocks on an
-alias or other invalid occupant in the workspace-owned path. Read no other optional
-prompt path. When both files contain contradictory human instructions, the later
-role-specific instruction wins.
+Treat its stdout as human instructions. The helper emits the exact file bytes, or nothing
+for proven absence. It blocks on an alias or other invalid occupant in the workspace-owned
+path. Read no other optional prompt path. Follow both instruction sets during the
+assignment. The later role-specific instruction wins on contradiction.
 
 The human may ask the controller to create, replace or remove one of these files during
 the run. Never mutate the target path directly. For create or replace, write the exact
