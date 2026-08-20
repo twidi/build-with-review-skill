@@ -124,7 +124,15 @@ RUNTIME INPUTS
 repository: <absolute repository root>
 workspace: <absolute workspace path>
 role prompt: <workspace>/prompts/construction/gate-runner.md
+global prompt: <workspace>/additional-prompts/global.md
+additional prompt: <workspace>/additional-prompts/construction/gate-runner.md
 ```
+
+Tell it to run `python3 <workspace>/prompts/common/additional-prompt.py read-global
+<workspace> <workspace>/additional-prompts/global.md`, then `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace>
+<workspace>/prompts/construction/gate-runner.md
+<workspace>/additional-prompts/construction/gate-runner.md` after its official prompt.
 
 On first discovery, add `report: none`. That means no gate-specific input and no file or
 directory write. It does not mean the runtime-input block is absent.
@@ -469,7 +477,15 @@ says what the plan said at that moment.
 
 One subagent, **a strong model, effort medium**, prompt
 **`<workspace>/prompts/construction/completeness.md`**. Give it that path, the
-**workspace path**, **the path to the spec** and **the path to the plan**.
+**workspace path**, its one optional additional prompt
+`<workspace>/additional-prompts/construction/completeness.md`, **the path to the spec**
+and **the path to the plan**.
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace>
+<workspace>/prompts/construction/completeness.md
+<workspace>/additional-prompts/construction/completeness.md` after its official prompt.
 
 **On a sub-lot**, add the path to the parent lot's plan **and to every earlier
 sub-lot's** — counter 5 reads all their `Covers:` lines, the root's spec decisions and
@@ -692,7 +708,15 @@ RUNTIME INPUTS
 repository: <absolute repository root>
 workspace: <absolute workspace path>
 role prompt: <workspace>/prompts/construction/implementer.md
+global prompt: <workspace>/additional-prompts/global.md
+additional prompt: <workspace>/additional-prompts/construction/implementer.md
 ```
+
+Tell it to run `python3 <workspace>/prompts/common/additional-prompt.py read-global
+<workspace> <workspace>/additional-prompts/global.md`, then `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace>
+<workspace>/prompts/construction/implementer.md
+<workspace>/additional-prompts/construction/implementer.md` after its official prompts.
 
 Tell it to stop before reading or writing any project or workspace path when one value
 is absent, relative, unresolved or contradictory. The current working directory is never
@@ -934,11 +958,19 @@ own failure, and you route on that. It exists for the case below, and for the hu
 same way trigger one outside diagnosis. Repetition does not prove which classification is
 correct: both attempts can implement a sound design incorrectly in the same way. Spawn a
 diagnostic subagent, **a strong model, effort high**, prompt
-`<workspace>/prompts/construction/diagnostic.md`, and give it: the workspace path, the
-path to the detached worktree **when the failure preserved one** — two design-stage
+`<workspace>/prompts/construction/diagnostic.md`, and give it: the workspace path, its
+one optional additional prompt
+`<workspace>/additional-prompts/construction/diagnostic.md`, the path to the detached
+worktree **when the failure preserved one** — two design-stage
 failures left the tree untouched, and you say so instead: the state those attempts faced
 is the repository as it stands — the path to the plan, the task number, and the paths to
 both failure reports. It returns one of C3.9a–d, with what it read to conclude. It changes nothing.
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace>
+<workspace>/prompts/construction/diagnostic.md
+<workspace>/additional-prompts/construction/diagnostic.md` after its official prompt.
 
 ```
 progress.py subagent-started diagnostic --task <N>

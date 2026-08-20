@@ -106,12 +106,26 @@ tool on Claude Code, its equivalent on Codex.
   repository: <absolute repository path>
   workspace: <absolute workspace path>
   role prompt: <absolute role-prompt path>
+  global prompt: <workspace>/additional-prompts/global.md
+  additional prompt: <workspace>/additional-prompts/<role-prompt path below prompts/>
   ```
 
   Include the same refusal in its message: if one field is absent, relative, unresolved
   or contradictory, it must stop before reading or writing any project or workspace
   path and report the blocker. The current working directory is never a workspace
   fallback. A prompt path inside the workspace does not replace the explicit workspace.
+- **Read global instructions before role-specific instructions.** After every official
+  prompt and before work, run `python3
+  <workspace>/prompts/common/additional-prompt.py read-global <workspace>
+  <workspace>/additional-prompts/global.md`. The helper emits the exact global bytes, or
+  nothing for a proven-absent leaf. Its refusal is a blocker.
+- **Read the one role-specific additional prompt last, through its owner.** Its exact path mirrors the
+  role prompt below `<workspace>/additional-prompts/`. After every official prompt and
+  after the global prompt, run `python3 <workspace>/prompts/common/additional-prompt.py read
+  <workspace> <role-prompt> <additional-prompt>`. The helper emits the exact bytes, or
+  nothing for a proven-absent leaf. Its refusal is a blocker. Never read the path
+  directly. Read no other optional prompt path. When both additional files conflict,
+  the later role-specific human instruction wins.
 - **Use the model and effort your prompt names.** The levels are in
   `<workspace>/prompts/common/vocabulary.md`.
 

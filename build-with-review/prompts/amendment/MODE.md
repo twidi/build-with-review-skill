@@ -374,6 +374,11 @@ Then create the fixer, and **whether or not the sweep finds anything**:
 > Read `<workspace>/prompts/spec/fixer.md`,
 > `<workspace>/prompts/spec/fixer-completion.md` and
 > `<workspace>/prompts/spec/completion-rules.md` in full before doing anything.
+> Then run `python3 <workspace>/prompts/common/additional-prompt.py read-global
+> <workspace> <workspace>/additional-prompts/global.md`. Next run `python3
+> <workspace>/prompts/common/additional-prompt.py read <workspace>
+> <workspace>/prompts/spec/fixer.md <workspace>/additional-prompts/spec/fixer.md`.
+> Its stdout is the one optional prompt. Read no other optional prompt.
 
 Then what varies: **the amendment path, `<workspace>/amendments/<N>.md` — the document it
 writes, and the only one until A4** — the spec path, **which it reads and does not touch**,
@@ -455,6 +460,12 @@ One session per sweep, **fresh every time**: the provider chosen for the sweep, 
 > 2. `<workspace>/prompts/amendment/reviewer-reach.md`
 > 3. `<workspace>/prompts/amendment/reviewer-reach-completion.md`
 > 4. `<workspace>/prompts/spec/completion-rules.md`
+> 5. Run `python3 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
+>    <workspace>/additional-prompts/global.md`. Its stdout is the optional global prompt.
+> 6. Run `python3 <workspace>/prompts/common/additional-prompt.py read <workspace>
+>    <workspace>/prompts/amendment/reviewer-reach.md
+>    <workspace>/additional-prompts/amendment/reviewer-reach.md`. Its stdout is the one
+>    optional prompt.
 
 Then what varies: the repository path, the spec path, the amendment path
 (`<workspace>/amendments/<N>.md`), the workspace path, the sweep number, its report file
@@ -715,9 +726,16 @@ task, the plan being written; the run resumes where it stood.
 
    **a strong model, effort medium**, prompt
    `<workspace>/prompts/amendment/consolidation.md`. Give it that path, the workspace path,
-   the amendment path (`<workspace>/amendments/<N>.md`), the spec path, and the base
-   commit. It answers one question:
+   its one optional additional prompt
+   `<workspace>/additional-prompts/amendment/consolidation.md`, the amendment path
+   (`<workspace>/amendments/<N>.md`), the spec path, and the base commit. It answers one question:
    **is the spec now exactly the old spec plus the amendment, no more and no less?**
+   Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+   <workspace>/prompts/common/additional-prompt.py read-global <workspace>
+   <workspace>/additional-prompts/global.md`, then `python3
+   <workspace>/prompts/common/additional-prompt.py read <workspace>
+   <workspace>/prompts/amendment/consolidation.md
+   <workspace>/additional-prompts/amendment/consolidation.md` after its official prompt.
 
    *It gets margin on a closed task for the usual reason: nothing downstream catches its
    mistake. A wrong consolidation puts text nobody decided into the document that every

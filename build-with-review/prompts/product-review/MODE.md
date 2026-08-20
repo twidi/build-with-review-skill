@@ -132,10 +132,18 @@ Then, per lens: `progress.py session-started <id>`.
 
 The message gives it: **the workspace path**, the prompt to read first
 (`<workspace>/prompts/product-review/<its lens>.md`), **the path to the current spec**,
+its one optional additional prompt
+`<workspace>/additional-prompts/product-review/lens-<slug>.md`,
 **the path to every plan of the subject** — the root lot's and each sub-lot's, since
 `Covers:` is read from all of them — **which lot is the subject**, **the two refs
 below**, and **the path its report goes to** —
 `<workspace>/reports/product-review/<root lot>/<built lot>-<slug>.md`.
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace>
+<workspace>/prompts/product-review/lens-<slug>.md
+<workspace>/additional-prompts/product-review/lens-<slug>.md` after its official prompts.
 
 Also give it its private, append-only risk-filtered history:
 `<workspace>/reports/product-review/<root lot>/<slug>-risk-filtered.md`, with occurrence
@@ -258,8 +266,16 @@ with two findings.
 
 **a light model, effort medium**, prompt
 **`<workspace>/prompts/product-review/verifier.md`**. Give it that path, the workspace
-path, the path to the report, the path to the spec, and **the reviewed commit** — the
-same SHA the lenses were given, never the base.
+path, its one optional additional prompt
+`<workspace>/additional-prompts/product-review/verifier.md`, the path to the report, the
+path to the spec, and **the reviewed commit** — the same SHA the lenses were given,
+never the base.
+Also give it `<workspace>/additional-prompts/global.md`. Tell it to run `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`, then `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace>
+<workspace>/prompts/product-review/verifier.md
+<workspace>/additional-prompts/product-review/verifier.md` after its official prompt.
 
 It returns, per finding: **confirmed**, **disproved with what it observed**, or
 **malformed**.

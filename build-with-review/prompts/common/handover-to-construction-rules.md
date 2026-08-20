@@ -143,14 +143,24 @@ RUNTIME INPUTS
 repository: <absolute repository root>
 workspace: <absolute workspace path>
 role prompt: <workspace>/prompts/construction/MODE.md
+global prompt: <workspace>/additional-prompts/global.md
+additional prompt: <workspace>/additional-prompts/construction/MODE.md
 
-Resolve all three runtime inputs first. If one is absent, relative, unresolved or
+Resolve all five runtime inputs first. If one is absent, relative, unresolved or
 contradictory, stop before reading or writing any project or workspace path and tell the
 human. The current working directory is never the workspace. Never infer or create a
 replacement.
 
 Invoke the `build-with-review` skill and read what it tells you to read. You are
 entering MODE CONSTRUCTION, to build <lot>.
+
+After the skill and official role prompt, run `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`. Then run `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace>
+<workspace>/prompts/construction/MODE.md
+<workspace>/additional-prompts/construction/MODE.md`. Its stdout is the one optional
+prompt. Read no other optional prompt path.
 
 WHERE THINGS STAND
 <the variable block — see below>

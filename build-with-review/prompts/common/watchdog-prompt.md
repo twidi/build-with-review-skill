@@ -22,13 +22,22 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 >     repository: <REPOSITORY>
 >     workspace: <WORKSPACE>
 >     role prompt: <ROLE_PROMPT>
+>     global prompt: <WORKSPACE>/additional-prompts/global.md
+>     additional prompt: <WORKSPACE>/additional-prompts/common/watchdog-prompt.md
 >
-> Resolve all three absolute paths first. `<ROLE_PROMPT>` must be the real source template
+> Resolve all five absolute paths first. `<ROLE_PROMPT>` must be the real source template
 > at `<WORKSPACE>/prompts/common/watchdog-prompt.md`. The workspace's physical Git
 > repository must equal `<REPOSITORY>`. If one value is absent, relative, unresolved or
 > contradictory, stop before reading or writing any project or workspace path and report
 > the blocker to your parent. The current working directory is never the workspace. Never
 > infer or create a replacement.
+>
+> Then run `python3 <WORKSPACE>/prompts/common/additional-prompt.py read-global
+> <WORKSPACE> <WORKSPACE>/additional-prompts/global.md`. Next run `python3
+> <WORKSPACE>/prompts/common/additional-prompt.py read <WORKSPACE>
+> <ROLE_PROMPT> <WORKSPACE>/additional-prompts/common/watchdog-prompt.md`. Its stdout is
+> the one optional prompt. An empty stdout means no additional instruction. A refusal is
+> a blocker. Never read the path directly or read another optional prompt path.
 >
 > ## Why this exists
 >

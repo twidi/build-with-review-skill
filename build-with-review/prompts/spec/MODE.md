@@ -233,6 +233,12 @@ the mandate's preset, **question widget disabled**.
 > 3. `<workspace>/prompts/spec/reviewer-<slug>.md`
 > 4. `<workspace>/prompts/spec/reviewer-<slug>-completion.md`
 > 5. `<workspace>/prompts/spec/completion-rules.md`
+> 6. Run `python3 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
+>    <workspace>/additional-prompts/global.md`. Its stdout is the optional global prompt.
+> 7. Run `python3 <workspace>/prompts/common/additional-prompt.py read <workspace>
+>    <workspace>/prompts/spec/reviewer-<slug>.md
+>    <workspace>/additional-prompts/spec/reviewer-<slug>.md`. Its stdout is the one
+>    role-specific optional prompt; empty stdout means no additional instruction.
 >
 > They define your mandate, your report format and the completion block you must return.
 > Everything below is specific to this round.
@@ -301,7 +307,13 @@ preset `Fixer`, **question widget disabled**.
 **Its prompt opens the same way:**
 
 > Read `<workspace>/prompts/spec/fixer.md`, `<workspace>/prompts/spec/fixer-completion.md`
-> and `<workspace>/prompts/spec/completion-rules.md` in full before doing anything.
+> and `<workspace>/prompts/spec/completion-rules.md` in full. Then run `python3
+> <workspace>/prompts/common/additional-prompt.py read-global <workspace>
+> <workspace>/additional-prompts/global.md`. Next run `python3
+> <workspace>/prompts/common/additional-prompt.py read <workspace>
+> <workspace>/prompts/spec/fixer.md <workspace>/additional-prompts/spec/fixer.md`.
+> Its stdout is the one optional prompt. Read no other optional prompt. Do this before
+> anything else.
 
 **Then what varies:** the spec path — **the document it writes, and the only one** — the
 workspace path, the round number, its decisions log at

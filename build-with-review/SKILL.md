@@ -1141,7 +1141,7 @@ this run's own prompts, journal and reports into a commit that claims to carry a
 # Creation is built whole under a staging name the existence check cannot
 # match, then renamed once complete: a copy that dies halfway must never leave
 # a directory a later session adopts as a complete workspace.
-mkdir -p <staging>/{plans,amendments,reports/{spec-review,amendment,construction,product-review}}
+mkdir -p <staging>/{plans,amendments,additional-prompts,reports/{spec-review,amendment,construction,product-review}}
 cp -r <skill dir>/prompts <staging>/prompts
 cp <skill dir>/SKILL.md <staging>/SKILL.md
 cp -r <skill dir>/dashboard <staging>/dashboard
@@ -1255,6 +1255,7 @@ What it holds:
 |---|---|
 | `SKILL.md` | the frozen copy of this file |
 | `prompts/` | the frozen copy of every role prompt |
+| `additional-prompts/` | optional human runtime instructions: `global.md`, then one exact mirror path per role |
 | `plans/` | **where every plan actually lives** — see below |
 | `amendments/` | and every amendment, for the same reason |
 | `progress.jsonl` | the run's journal, written **only** through `prompts/common/progress.py` |
@@ -1420,11 +1421,76 @@ RUNTIME INPUTS
 repository: <absolute repository path>
 workspace: <absolute workspace path>
 role prompt: <absolute role-prompt path>
+global prompt: <workspace>/additional-prompts/global.md
+additional prompt: <absolute mirrored additional-prompt path>
 ```
 
 The role's own launch contract adds its assignment, document paths, identities and output
 path. Those fields never replace this block. A TwiCC session also receives the repository's
 exact project in `create_session`; the message does not substitute for that setting.
+
+The global prompt has one fixed path: `<workspace>/additional-prompts/global.md`.
+After every official prompt, every child and every later controller runs:
+
+```sh
+python3 <workspace>/prompts/common/additional-prompt.py read-global \
+  <workspace> <workspace>/additional-prompts/global.md
+```
+
+The helper emits the exact global bytes, or nothing for proven absence. A controller
+entering or resuming an existing workspace performs this read before its role-specific
+additional prompt. A running controller that just received the human instruction already
+knows it; every future launch reads the file.
+
+Build the role-specific additional path mechanically: replace the role prompt's
+`<workspace>/prompts/` prefix with `<workspace>/additional-prompts/`. For example,
+`prompts/construction/implementer.md` maps only to
+`additional-prompts/construction/implementer.md`. After the global read, the child runs:
+
+```sh
+python3 <workspace>/prompts/common/additional-prompt.py read \
+  <workspace> <role-prompt> <additional-prompt>
+```
+
+The helper emits the exact file bytes, or nothing for proven absence. It blocks on an
+alias or other invalid occupant in the workspace-owned path. Read no other optional
+prompt path. When both files contain contradictory human instructions, the later
+role-specific instruction wins.
+
+The human may ask the controller to create, replace or remove one of these files during
+the run. Never mutate the target path directly. For create or replace, write the exact
+content to one fresh real non-symlink draft with the file-editing tool, then run:
+
+```sh
+python3 <workspace>/prompts/common/additional-prompt.py publish \
+  <workspace> <role-prompt> <additional-prompt> <draft-file>
+```
+
+Remove the draft after success. For removal, run:
+
+```sh
+python3 <workspace>/prompts/common/additional-prompt.py remove \
+  <workspace> <role-prompt> <additional-prompt>
+```
+
+The helper validates every physical path component and owns the atomic mutation. The
+content is the human's runtime instruction; this workflow does not constrain it, journal
+it or make it authority. It applies to future launches that read it. The directory moves
+and disappears with the workspace.
+
+The global file uses the same draft and owner. Create or replace it with:
+
+```sh
+python3 <workspace>/prompts/common/additional-prompt.py publish-global \
+  <workspace> <workspace>/additional-prompts/global.md <draft-file>
+```
+
+Remove the draft after success. Remove the global file with:
+
+```sh
+python3 <workspace>/prompts/common/additional-prompt.py remove-global \
+  <workspace> <workspace>/additional-prompts/global.md
+```
 
 **The current working directory is never the workspace.** Never omit the workspace because
 the role prompt sits inside it or because the child opens in the repository. Tell every

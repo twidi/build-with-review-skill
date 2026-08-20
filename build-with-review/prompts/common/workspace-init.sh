@@ -226,7 +226,7 @@ disposable_ground_prepare "$REPO"
 WORKSPACE="$REPO/.superpowers/bwr/$(date +%F)-$FEATURE"
 STAGE="$WORKSPACE.partial"
 rm -rf "$STAGE"
-mkdir -p "$STAGE"/{plans,amendments,reports/{spec-review,amendment,construction,product-review}}
+mkdir -p "$STAGE"/{plans,amendments,additional-prompts,reports/{spec-review,amendment,construction,product-review}}
 cp -r "$SKILL/prompts"   "$STAGE/prompts"
 cp    "$SKILL/SKILL.md"  "$STAGE/SKILL.md"
 cp -r "$SKILL/dashboard" "$STAGE/dashboard"

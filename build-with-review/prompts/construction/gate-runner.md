@@ -11,6 +11,8 @@ RUNTIME INPUTS
 repository: <absolute repository root>
 workspace: <absolute workspace path>
 role prompt: <workspace>/prompts/construction/gate-runner.md
+global prompt: <workspace>/additional-prompts/global.md
+additional prompt: <workspace>/additional-prompts/construction/gate-runner.md
 ```
 
 The role prompt must be that exact real file inside the workspace. The workspace must
@@ -18,6 +20,14 @@ contain its frozen `SKILL.md` and `prompts/`, and its physical repository ancest
 equal `repository`. If one field is absent, relative, unresolved or contradictory, stop
 before reading or writing any project or workspace path. Report the blocker. **The current
 working directory is never the workspace.** Never infer or create a replacement.
+
+After this official prompt, run `python3
+<workspace>/prompts/common/additional-prompt.py read-global <workspace>
+<workspace>/additional-prompts/global.md`. Then run `python3
+<workspace>/prompts/common/additional-prompt.py read <workspace> <role-prompt>
+<additional-prompt>`. Its stdout is the one optional prompt. An empty stdout means no
+additional instruction. A refusal is a blocker. Never read the path directly or read
+another optional prompt path.
 
 For first discovery, you also receive `report: none`. Write no file and create no
 directory. For an existing logical gate operation, you instead receive all of:
