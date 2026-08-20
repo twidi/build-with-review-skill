@@ -139,6 +139,16 @@ Everything between the fences, with every `<…>` replaced:
 You are taking over a feature that is already under way, and you face the human
 directly. They drive this. You never report back to the session that created you.
 
+RUNTIME INPUTS
+repository: <absolute repository root>
+workspace: <absolute workspace path>
+role prompt: <workspace>/prompts/construction/MODE.md
+
+Resolve all three runtime inputs first. If one is absent, relative, unresolved or
+contradictory, stop before reading or writing any project or workspace path and tell the
+human. The current working directory is never the workspace. Never infer or create a
+replacement.
+
 Invoke the `build-with-review` skill and read what it tells you to read. You are
 entering MODE CONSTRUCTION, to build <lot>.
 

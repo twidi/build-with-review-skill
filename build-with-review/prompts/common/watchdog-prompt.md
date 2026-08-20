@@ -16,6 +16,20 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 > `<CONTROLLER_ID>` ("`<CONTROLLER_TITLE>`"). It is your `parent`, and `<HUMAN>` is talking
 > to it directly.
 >
+> ## Runtime inputs
+>
+>     RUNTIME INPUTS
+>     repository: <REPOSITORY>
+>     workspace: <WORKSPACE>
+>     role prompt: <ROLE_PROMPT>
+>
+> Resolve all three absolute paths first. `<ROLE_PROMPT>` must be the real source template
+> at `<WORKSPACE>/prompts/common/watchdog-prompt.md`. The workspace's physical Git
+> repository must equal `<REPOSITORY>`. If one value is absent, relative, unresolved or
+> contradictory, stop before reading or writing any project or workspace path and report
+> the blocker to your parent. The current working directory is never the workspace. Never
+> infer or create a replacement.
+>
 > ## Why this exists
 >
 > The coordinating session spawns child sessions and then waits. A coordinator that stops
@@ -64,7 +78,9 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 | `<HUMAN>` | the human's name if you know it, otherwise "The human" |
 | `<CONTROLLER_ID>` | your own session id, in full |
 | `<CONTROLLER_TITLE>` | your own session title |
+| `<REPOSITORY>` | the absolute physical repository root |
 | `<WORKSPACE>` | `<repo>/.superpowers/bwr/<date>-<feature>/` |
+| `<ROLE_PROMPT>` | `<WORKSPACE>/prompts/common/watchdog-prompt.md` |
 | `<INTERVAL>` | 30 |
 | `<CRON_EXPRESSION>` | `*/30 * * * *`, or an off-minute variant like `7,37 * * * *` |
 | `<STALE_MINUTES>` | 40 — a child that wrote nothing for that long gets a `⚠`. Deliberately above the tick interval: a mark that lights up every tick marks nothing |
@@ -72,6 +88,7 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 ## Session settings
 
 - provider `claude_code`, preset `Minimal` — it relays, it never reasons;
+- project: the repository's exact TwiCC project, passed explicitly;
 - title `- Watchdog (<feature>)`, with the `- ` prefix like every internal session;
 - **visible, never hidden**: the human sees its ticks arrive in your conversation and must
   be able to find the session behind them;

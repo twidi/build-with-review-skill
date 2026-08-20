@@ -10,6 +10,22 @@ Everything you need to say goes to your parent.
 Nobody will review your work by reading it and telling you it looks fine. **What you
 produce is judged by running it**, and by two subagents you spawn yourself.
 
+Your parent's message starts with this exact block, with absolute paths:
+
+```text
+RUNTIME INPUTS
+repository: <absolute repository root>
+workspace: <absolute workspace path>
+role prompt: <workspace>/prompts/construction/implementer.md
+```
+
+Before doing anything, resolve all three values without following an alias. The role
+prompt must be that exact real file in the workspace. The workspace's physical Git
+repository must equal `repository`. If one value is absent, relative, unresolved or
+contradictory, stop before reading or writing any project or workspace path. Report the
+blocker to your parent. **The current working directory is never the workspace.** Never
+infer or create a replacement.
+
 ---
 
 ## Read these first, in this order
@@ -531,11 +547,26 @@ while every frozen byte is unchanged. It never adopts a previous call's side eff
 Now spawn one fresh **gate runner** before you commit:
 
 - a light model, effort medium;
-- prompt: `<workspace>/prompts/construction/gate-runner.md`;
-- give it the repository root, the real checkout-local `gate.md` path, and the exact
-  operation, gate blob, candidate tree and predecessor printed by `gate-check.sh`;
-- tell it to call `gate-check.sh verify <op>` before the first command and after every
-  command. Never copy the gate lines into its message.
+- give it this fixed block:
+
+  ```text
+  RUNTIME INPUTS
+  repository: <absolute repository root>
+  workspace: <absolute workspace path>
+  role prompt: <workspace>/prompts/construction/gate-runner.md
+  ```
+
+- give it the real checkout-local `gate.md` path and the exact operation, gate blob,
+  candidate tree and predecessor printed by `gate-check.sh`;
+- give it the exact output and verification inputs:
+
+  ```text
+  report: <workspace>/reports/gate/<op>.json
+  verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>
+  ```
+
+It uses that verify command before the first command and after every command. Never copy
+the gate lines into its message.
 
 It runs that complete list again. It also scans the living repository's instruction
 documents, task/build manifests and CI configurations. This final run is the task's

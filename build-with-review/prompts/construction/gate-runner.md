@@ -4,11 +4,28 @@ You run this project's full verification suite and report what came back. **You 
 nothing and change no project file.** Your only write is the canonical physical-result
 artifact described under **Reporting**.
 
-You are given a repository root and either nothing, for first discovery, or all of:
+You are given this exact block, with absolute paths:
+
+```text
+RUNTIME INPUTS
+repository: <absolute repository root>
+workspace: <absolute workspace path>
+role prompt: <workspace>/prompts/construction/gate-runner.md
+```
+
+The role prompt must be that exact real file inside the workspace. The workspace must
+contain its frozen `SKILL.md` and `prompts/`, and its physical repository ancestor must
+equal `repository`. If one field is absent, relative, unresolved or contradictory, stop
+before reading or writing any project or workspace path. Report the blocker. **The current
+working directory is never the workspace.** Never infer or create a replacement.
+
+For first discovery, you also receive `report: none`. Write no file and create no
+directory. For an existing logical gate operation, you instead receive all of:
 
 - the **real checkout-local `gate.md` path** and its expected Git blob identity;
 - one logical gate operation, candidate tree and predecessor commit;
-- the exact `gate-check.sh verify <op>` command.
+- `report: <workspace>/reports/gate/<op>.json`;
+- `verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>`.
 
 Never accept a copied command list. For an existing gate, prove that the real file is one
 regular non-symlink leaf and has the expected blob identity. Read every command directly

@@ -99,8 +99,19 @@ tool on Claude Code, its equivalent on Codex.
 - **Run it in the background if your provider offers the option.** On Claude Code, say
   so explicitly. On Codex, nothing to do. Otherwise you are frozen until it answers.
 - **Give it a path, never a file's contents.** It can read.
-- **Give it the workspace path**, so it can find the prompts it needs under
-  `<workspace>/prompts/`.
+- **Give it this fixed block**, with absolute paths, before its role-specific inputs:
+
+  ```text
+  RUNTIME INPUTS
+  repository: <absolute repository path>
+  workspace: <absolute workspace path>
+  role prompt: <absolute role-prompt path>
+  ```
+
+  Include the same refusal in its message: if one field is absent, relative, unresolved
+  or contradictory, it must stop before reading or writing any project or workspace
+  path and report the blocker. The current working directory is never a workspace
+  fallback. A prompt path inside the workspace does not replace the explicit workspace.
 - **Use the model and effort your prompt names.** The levels are in
   `<workspace>/prompts/common/vocabulary.md`.
 

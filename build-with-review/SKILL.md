@@ -1411,6 +1411,27 @@ paste is an id they will paste wrong.
 **Every document you hand to a session or a subagent, you hand as a path.** The spec, the
 plan, a role prompt, a report — always the path, never the text.
 
+### Every child receives its runtime inputs
+
+Every session and subagent message carries this fixed block, with absolute paths:
+
+```text
+RUNTIME INPUTS
+repository: <absolute repository path>
+workspace: <absolute workspace path>
+role prompt: <absolute role-prompt path>
+```
+
+The role's own launch contract adds its assignment, document paths, identities and output
+path. Those fields never replace this block. A TwiCC session also receives the repository's
+exact project in `create_session`; the message does not substitute for that setting.
+
+**The current working directory is never the workspace.** Never omit the workspace because
+the role prompt sits inside it or because the child opens in the repository. Tell every
+child to stop before reading or writing any project or workspace path when one runtime
+input is absent, relative, unresolved or contradictory. It reports the blocker to its
+parent. It never guesses, derives or creates a replacement workspace.
+
 ---
 
 ## Sessions
@@ -1867,6 +1888,8 @@ send as the creation prompt.
 - **Always `claude_code`, preset `Minimal`**, whatever provider the human chose for
   everything else: the cron it schedules is a Claude Code mechanism, and it relays without
   ever reasoning.
+- **Pass the repository's exact TwiCC project explicitly.** The watchdog's whole message
+  carries the fixed repository, workspace and source-role identity from its template.
 - **Visible, never hidden**, with the `- ` prefix like every internal session. The human
   sees its ticks arrive in your conversation and must be able to find the session behind
   them.

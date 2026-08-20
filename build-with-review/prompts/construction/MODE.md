@@ -117,8 +117,17 @@ discovery — C0.4 and C0.5 apply.
 ### C0.3 · Spawn the gate runner
 
 One subagent, **a light model, effort medium**, prompt
-**`<workspace>/prompts/construction/gate-runner.md`**. Give it that path, the
-repository root, and nothing on first discovery.
+**`<workspace>/prompts/construction/gate-runner.md`**. Its message carries:
+
+```text
+RUNTIME INPUTS
+repository: <absolute repository root>
+workspace: <absolute workspace path>
+role prompt: <workspace>/prompts/construction/gate-runner.md
+```
+
+On first discovery, add `report: none`. That means no gate-specific input and no file or
+directory write. It does not mean the runtime-input block is absent.
 
 Bracket that first, non-authoritative discovery call only:
 
@@ -138,11 +147,17 @@ bash <workspace>/prompts/construction/gate-check.sh open baseline \
 ```
 
 Give the runner the real gate path and the operation, gate blob, candidate tree and
-predecessor printed by that call. Never copy a command list into its message. The runner
-reads the exact physical gate and calls `gate-check.sh verify <op>` before the first
-command and after every command.
+predecessor printed by that call. Also give these two exact values:
 
-It writes the whole canonical result to `reports/gate/<op>.json`. That artifact contains
+```text
+report: <workspace>/reports/gate/<op>.json
+verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>
+```
+
+Never copy a command list into its message. The runner reads the exact physical gate and
+uses that verify command before the first command and after every command.
+
+It writes the whole canonical result to `<workspace>/reports/gate/<op>.json`. That artifact contains
 every exact gate command in order, one result per command, the completed cleanliness
 comparison and the completed gate-surface scan. Its final message is only a readable
 view of the same result. It fixes nothing.
@@ -664,18 +679,28 @@ refused before any session or mutable start state exists.
 **Then create the session.** `mcp__twicc__create_session`, one call carrying everything:
 
 - preset **`Implementer`**, the provider the human chose, **question widget disabled**
+- project: the repository's exact TwiCC project, passed explicitly
 - title `- Task <N> attempt <K> (<feature>)`
 - annotations: `bwr.schema=1` · `bwr.job=implementer` · `bwr.mode=construction` ·
   `bwr.feature=<feature>` · `bwr.lot=<lot>` · `bwr.task=<N>` · `bwr.attempt=<K>` ·
   `bwr.status=working`
 
-The message gives it, and nothing more:
+The message starts with this fixed block, with absolute paths:
 
-1. **the workspace path**, and the prompt to read first:
-   `<workspace>/prompts/construction/implementer.md`
-2. **the lot** and **the task number**
-3. the attempt number
-4. on a retry: **which of C3.9a–d it was classified as**, and **the path to the failure
+```text
+RUNTIME INPUTS
+repository: <absolute repository root>
+workspace: <absolute workspace path>
+role prompt: <workspace>/prompts/construction/implementer.md
+```
+
+Tell it to stop before reading or writing any project or workspace path when one value
+is absent, relative, unresolved or contradictory. The current working directory is never
+the workspace. After that block, the message gives these role inputs, and nothing more:
+
+1. **the lot** and **the task number**
+2. the attempt number
+3. on a retry: **which of C3.9a–d it was classified as**, and **the path to the failure
    report — the path the failed attempt reported, passed on as it is** — **when there is
    one.** The file carries its *writer's* task and attempt, so a path rebuilt from this
    launch's own numbers names a file that does not exist: an ordinary retry reads its
