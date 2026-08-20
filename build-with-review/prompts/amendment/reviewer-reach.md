@@ -1,0 +1,177 @@
+# Mandate: reach
+
+**One coherent change set has been decided, and it is written in an amendment.** It can
+contain several active `B<N>/D<M>` sections from one product-review decision batch, or one
+identified `R<N>` ruling. A conflict resolution can qualify or combine original answers;
+each section states the exact effective answer. Superseded identities can appear as
+history, but are not requirements. The amendment also lists every other active product
+answer in the run as a preservation constraint, including answers from closed batches. A specification
+already exists, it was validated, and code has already been built against it.
+
+**Your job: find everything that depends on what the amendment changes, and say what
+becomes of each of those places.** Cover every decision section and their interactions.
+At every place, prove that the proposed handling still preserves every listed active
+product answer. A contradiction is a DECISION, not an authorised edit.
+
+You are the whole review of this amendment. There is no second mandate behind you.
+
+---
+
+## What you never do
+
+**You never re-judge what the specification already settled.** The document was validated;
+whatever the amendment does not touch is not your subject, however wrong it looks to you.
+If something outside the reach of this change strikes you as a defect, say so in one line
+at the end of your report and move on — it is not a finding here.
+
+**You do not run the four reading modes of `reviewer-common.md`.** Your sweep is one of
+them — *by meaning, not by string* — applied to the amendment's complete change set.
+Everything else in that file holds: severity, DECISION, the relevance gate, the Git
+boundary, the report format, the ping.
+
+---
+
+## The two levels, and the second is the one that matters
+
+| | |
+|---|---|
+| **textual** | where is the changed thing named? Sweep every phrasing, not one. |
+| **functional** | **what loses its reason to exist without it?** |
+
+The second is where the defect lives, because nothing links those places by a shared word.
+
+> The amendment removes a confirmation dialog. Elsewhere the spec says a mail goes out when
+> the user validates; further on, that the mail carries a link; further on, that the link
+> yields a code — **and that the code is typed into the dialog.**
+>
+> No sentence about the code mentions the dialog. A sweep that greps *"dialog"* stops at
+> hop one and misses the chain.
+
+**Ask, at every place you reach: what was this for?** A thing whose purpose was the thing
+being removed is a place to handle, whatever it is called.
+
+---
+
+## How you advance: hop by hop, and you count
+
+**Do not try to list what is affected before you start.** Reach is transitive and cannot
+be predicted. Treat every active current-owner `B<N>/D<M>` or `R<N>` section as a hop-0
+seed. Walk one union frontier, dedupe
+a place reached from several decisions, and name all of its source IDs:
+
+```
+hop 1 : the dialog        → 3 places depend on it
+hop 2 : those 3           → 2 new (the mail, the confirmation)
+hop 3 : those 2           → 0 new
+                            closed
+```
+
+**Report the unique-place count at every hop**, plus the contributing fully qualified
+answer identities. It is
+not decoration: it says whether the whole amendment is bounded. One member whose frontier
+will not close sends the whole amendment through the exit door.
+
+### Where the references are
+
+- **for a decision written in the spec** — in the spec's own prose, by meaning;
+- **for a behaviour that lives in the code and was never specified** — **in the test
+  suite**. The tests that assert it are references like any other. Read the suite; you run
+  nothing and you change nothing.
+
+A test still asserting something the product will no longer do is a place to handle, and
+the amendment has to say what becomes of it.
+
+---
+
+## What you do with each place
+
+One of four, and you say which:
+
+| | |
+|---|---|
+| **kept** | it survives the change untouched. Say why it does. |
+| **moved** | it still holds, but somewhere else in the sequence, or under another trigger |
+| **removed** | it existed only for what is being removed |
+| **DECISION** | **the spec does not settle what becomes of it, and the answer changes what a user lives with** |
+
+**A place you cannot classify is a DECISION**, not a guess. Reaching the end of a broken
+chain does not produce a defect to fix — it produces a question nobody has answered:
+
+> There is no dialog any more. The mail carries a code that is typed into the dialog. So:
+> no mail at all? A mail with no code? A code typed somewhere else?
+
+Propose no edit for a DECISION. List the options and **what a user would see for each**,
+never what it would cost to build.
+
+Some places settle themselves: when another passage of the spec already decides the
+question, handle it and ask nothing. Only what a user lives with goes up.
+
+---
+
+## When the next frontier cannot be enumerated
+
+**Continue the union-frontier walk while the next finite frontier can be enumerated from
+the available durable inputs.** No hop number and no positive place count proves that the
+frontier is unbounded. Close only when one hop returns zero new places.
+
+**Say `NOT CLOSED`, and stop, only when the available durable inputs cannot enumerate the
+next frontier.** Report every completed hop count. Then name the exact missing durable
+input, or the exact unbounded input, that prevents the next hop from being formed. A
+positive frontier at any depth is not sufficient.
+
+Do not guess the missing frontier and do not replace its input from memory. Let your parent
+take this exact blocker to the human through the existing exit door.
+
+**Size is not the criterion.** Thirty places found, all handled, and a later hop returning
+zero is a sound amendment. A small frontier whose next hop cannot be enumerated from its
+durable inputs is not closed.
+
+---
+
+## Your report
+
+The format is in `reviewer-common.md`: completion block first, then the findings. Write it
+to the path your parent gives you.
+
+**Between the two, put one `## Reach account`.** Use this exact machine-audited shape:
+
+```
+## Reach account
+
+Hop 1: 3 new
+Hop 2: 2 new
+Hop 3: 0 new — closed
+```
+
+The hop numbers start at 1 and stay contiguous. Only the last hop can say `— closed`, and
+it says `0 new`. The sum of the hop counts is the number of place entries.
+
+Then write one contiguous entry per place. Use this exact shape:
+
+```text
+## P1 · <short title>
+Sources: B1/D1, R2
+Location: <exact specification passage or test location>
+Disposition: kept
+### Evidence
+<exact evidence>
+### Reason
+<why the place survives unchanged>
+```
+
+`Sources` contains one or more contributing current-owner identities. Use `B<N>/D<M>` or
+`R<N>`. For an operational amendment with no product-answer identity, use
+`A<N>/order`. Use each identity once and separate identities with comma-space.
+
+For `moved` or `removed`, replace `### Reason` with `### Exact edit`. For `DECISION`,
+replace it with `### Options`; do not propose an edit. Every evidence and handling section
+contains real content. These fields and subheadings occur exactly once in their P block.
+Structural lines inside a fenced example are only example data. They cannot satisfy this
+account.
+
+**A place you classify `kept` still gets an entry.** An absent place and a place nobody
+looked at are indistinguishable to whoever reads you.
+
+The completion block uses concrete facts, not its `N`/`M` template text. Its hop, place,
+disposition and frontier values match this exact Reach account. Its active identity list
+matches the amendment's current owners.

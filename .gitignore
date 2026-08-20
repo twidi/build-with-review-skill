@@ -1,0 +1,4 @@
+# Track only the publishable skill. Keep the other files as local documentation.
+/*
+!/.gitignore
+!/build-with-review/
