@@ -1001,7 +1001,9 @@ header, it changes no behaviour, and no gate or reviewer has anything to say abo
 
 - **`gate.md`** — the runner proposes, the human validates, **you publish through
   `gate-write.sh`**: written by anyone earlier, the file would read as approved before
-  it was; the helper exposes only a complete atomically renamed list;
+  it was; the helper exposes only a complete atomically renamed file. A full-line `#`
+  comment preserves validated rationale but is never a command or a gate-surface
+  exemption;
 - **the confirmed-findings file** that closes a review pass — the sub-lot's source,
   distilled from verdicts only you hold together, and no child is assigned to it;
 - **the `.superpowers/` ignore rule** when workspace creation refuses —

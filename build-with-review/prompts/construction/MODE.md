@@ -48,6 +48,13 @@ The gate is this project's complete verification command list. It lives in
 `<repo>/.superpowers/bwr/gate.md`, git-ignored, **one per project, not per feature** —
 the next feature inherits it.
 
+Its line grammar is closed. Every non-blank line is either one complete command, or a
+full-line comment whose first non-whitespace character is `#`. Comments preserve the
+human-validated rationale in the frozen file. They are never executed, reported or
+counted as commands. A `#` later in a command remains part of that exact command. A
+comment grants no machine exemption from the gate-surface scan. The file must contain at
+least one command, and blank lines are refused.
+
 **It contains every verification the project has** — the complete test suites, back and
 front, the complete lint, type checks, build steps, anything the project runs to say that
 it is sound. Not a subset chosen for the work at hand: **all of it, every time.**
@@ -183,6 +190,7 @@ Publish the complete validated list with one call:
 
 ```sh
 <workspace>/prompts/construction/gate-write.sh create -- \
+    "# <optional human-validated rationale>" \
     "<first complete command>" "<second complete command>" ...
 ```
 
@@ -241,6 +249,7 @@ For growth or reconciliation, bind the replacement to the exact file the human s
 ```sh
 CURRENT=$(git hash-object <repo>/.superpowers/bwr/gate.md)
 <workspace>/prompts/construction/gate-write.sh replace "$CURRENT" -- \
+    "# <optional human-validated rationale>" \
     "<first complete command>" "<second complete command>" ...
 ```
 
@@ -576,7 +585,8 @@ it.**
 7. **C3.7 — Final gate surface and commit.** After publishing its plan copy and staging
    the exact candidate, a fresh logical gate runner reads the real stored list. It scans
    additions, removals, renames, changed command definitions and uncovered new targets.
-   It atomically publishes one op-scoped physical report with every gate line and result,
+   It atomically publishes one op-scoped physical report with every executable gate
+   command and result,
    the completed cleanliness comparison and the completed surface scan. The close derives
    its verdict from that audited report. Only `green` plus `Gate surface: unchanged`
    permits the one task commit.

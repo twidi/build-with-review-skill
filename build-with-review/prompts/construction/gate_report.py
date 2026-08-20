@@ -8,6 +8,8 @@ import re
 import subprocess
 import sys
 
+from gate_file import GateFileError, read_gate_commands
+
 
 def refuse(message):
     print(f"**gate report ERROR** · {message}", file=sys.stderr)
@@ -48,9 +50,10 @@ def audit(op, expected_gate, expected_tree):
     ).strip()
     if actual_gate != expected_gate:
         refuse(f"gate.md changed: expected {expected_gate}, got {actual_gate}")
-    commands = gate.read_text(encoding="utf-8").splitlines()
-    if not commands or any(not command for command in commands):
-        refuse("gate.md does not contain one non-empty command per line")
+    try:
+        commands = read_gate_commands(gate)
+    except (OSError, UnicodeError, GateFileError) as exc:
+        refuse(str(exc))
 
     relative = pathlib.PurePosixPath("reports", "gate", f"{op}.json")
     report_path = real_file(WORKSPACE / relative, WORKSPACE, "the physical gate report")

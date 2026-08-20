@@ -16,6 +16,12 @@ from that file, in order. Run the verify command before the first physical comma
 after every physical command. If it refuses, stop. The logical candidate changed, and a
 regenerated call must not adopt those bytes.
 
+The gate line grammar is exact. Ignore a full-line comment whose first non-whitespace
+character is `#`: do not execute it, give it a result or count it as a command. Preserve
+a `#` that occurs later in a command. Refuse a blank line or a file with no executable
+command. A comment is human-readable rationale, not a machine exemption from the
+gate-surface scan.
+
 Before the first command, record the exact non-ignored working state: `git status --porcelain`;
 the full tracked diff against `HEAD`; and the names plus content hashes of every
 untracked file. Repeat that snapshot after the last command. Any status, byte or path
@@ -114,7 +120,8 @@ The JSON has this exact shape:
 }
 ```
 
-`commands` contains every frozen gate line exactly once and in order. `status` is
+`commands` contains every frozen executable gate command exactly once and in order.
+It contains no comment line. `status` is
 `green` or `red`. `count` is a non-negative integer. `example` is one non-empty result
 summary. A changed cleanliness result uses `unchanged:false` and lists every changed
 path. A different surface uses `status:"different"` and one or more candidates. Each

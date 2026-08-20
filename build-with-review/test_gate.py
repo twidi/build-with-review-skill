@@ -374,9 +374,12 @@ else:
     def write_gate_report(self, op, *, omit_last=False, command_status="green",
                           cleanliness=True, surface="unchanged"):
         marker = self.gate_marker()
-        commands = (self.repo / ".superpowers" / "bwr" / "gate.md").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        commands = [
+            line for line in (self.repo / ".superpowers" / "bwr" / "gate.md").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
         if omit_last:
             commands = commands[:-1]
         candidates = [] if surface == "unchanged" else [
@@ -472,6 +475,86 @@ def close_refuses_a_report_that_omits_one_frozen_gate_line():
         check(after == before, "an incomplete command account appended a terminal")
         check((fixture.workspace / "gate-check-in-progress").exists(),
               "an incomplete command account removed the logical owner")
+    finally:
+        fixture.close()
+
+
+@test
+def full_line_gate_comments_are_not_commands():
+    fixture = Fixture()
+    try:
+        gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
+        command = "printf '%s\\n' '# remains command data' >/dev/null"
+        gate.write_text(
+            "# Explain why one documented command is not present.\n"
+            "   # An indented full-line comment is also non-executable.\n"
+            f"{command}\n",
+            encoding="utf-8",
+        )
+        op = "a" * 64
+        tree = fixture.git("write-tree").stdout.strip()
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        gate_sha = fixture.git("hash-object", str(gate)).stdout.strip()
+        (fixture.workspace / "gate-check-in-progress").write_text(
+            "\n".join((
+                f"op {op}",
+                "scope review",
+                "owner comment-test",
+                "lot lot-1",
+                "task 1",
+                "attempt 1",
+                f"head {head}",
+                f"base {head}",
+                f"tree {tree}",
+                f"gate {gate_sha}",
+                "code -",
+            )) + "\n",
+            encoding="utf-8",
+        )
+
+        ordinary = fixture.workspace / "prompts" / "construction" / "ordinary_gate.py"
+        fixture.run(sys.executable, ordinary, op, ok=True)
+        report = json.loads(
+            (fixture.workspace / "reports" / "gate" / f"{op}.json").read_text(encoding="utf-8")
+        )
+        check(
+            [result["command"] for result in report["commands"]] == [command],
+            "full-line comments entered the physical command account",
+        )
+
+        auditor = fixture.workspace / "prompts" / "construction" / "gate_report.py"
+        fixture.run(sys.executable, auditor, op, gate_sha, tree, ok=True)
+    finally:
+        fixture.close()
+
+
+@test
+def gate_writer_counts_commands_and_refuses_comment_only_files():
+    fixture = Fixture()
+    try:
+        gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
+        gate.unlink()
+        writer = fixture.workspace / "prompts" / "construction" / "gate-write.sh"
+        created = fixture.run(
+            "bash", writer, "create", "--",
+            "# This rationale is human-validated with the list.",
+            "git diff --check",
+            ok=True,
+        )
+        check("COMMANDS 1" in created.stdout, created.stdout)
+        check(
+            gate.read_text(encoding="utf-8")
+            == "# This rationale is human-validated with the list.\ngit diff --check\n",
+            "gate-write did not preserve the validated comment bytes",
+        )
+
+        current = fixture.git("hash-object", str(gate)).stdout.strip()
+        fixture.run(
+            "bash", writer, "replace", current, "--", "# No executable command remains.",
+            ok=False,
+        )
+        check("git diff --check" in gate.read_text(encoding="utf-8"),
+              "a refused comment-only replacement changed gate.md")
     finally:
         fixture.close()
 
@@ -1357,7 +1440,9 @@ def gate_runner_contract_covers_real_gate_and_semantic_surface_drift():
         "uncovered-target candidate",
         "after every physical command",
         "canonical physical-result",
-        "every frozen gate line exactly once and in order",
+        "every frozen executable gate command exactly once and in order",
+        "full-line comment",
+        "not a machine exemption",
     ):
         check(required in prompt, f"gate-runner contract lost: {required}")
 

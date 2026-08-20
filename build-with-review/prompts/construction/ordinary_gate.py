@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 
+from gate_file import GateFileError, read_gate_commands
+
 
 HERE = pathlib.Path(__file__).resolve().parent
 WORKSPACE = HERE.parent.parent
@@ -95,9 +97,10 @@ def run(op):
     if not re.fullmatch(r"[0-9a-f]{64}", op):
         refuse("the operation identity is malformed")
     marker = marker_data(op)
-    commands = real_file(GATE, "gate.md").read_text(encoding="utf-8").splitlines()
-    if not commands or any(not command for command in commands):
-        refuse("gate.md must contain one non-empty command per line")
+    try:
+        commands = read_gate_commands(real_file(GATE, "gate.md"))
+    except (OSError, UnicodeError, GateFileError) as exc:
+        refuse(str(exc))
     before = repository_state()
     if candidate_tree() != marker["tree"]:
         refuse("the staged candidate changed before the ordinary gate")

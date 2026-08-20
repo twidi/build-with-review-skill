@@ -4909,7 +4909,7 @@ def main():
         shutil.copyfile(os.path.join(AMENDMENT_PROMPTS, "amendment-commit.sh"), destination)
         os.chmod(destination, 0o755)
         os.makedirs(os.path.join(WORKSPACE, "prompts", "construction"))
-        for name in ("gate-check.sh", "gate_report.py", "construction_review.py"):
+        for name in ("gate-check.sh", "gate_file.py", "gate_report.py", "construction_review.py"):
             destination = os.path.join(WORKSPACE, "prompts", "construction", name)
             shutil.copyfile(os.path.join(HERE, "prompts", "construction", name), destination)
             os.chmod(destination, 0o755)

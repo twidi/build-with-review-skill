@@ -8,7 +8,7 @@ WORKSPACE=$(cd "$HERE/../.." && pwd)
 EXPECTED_REPO=$(cd "$WORKSPACE/../../.." && pwd -P)
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 
-USAGE='usage: gate-write.sh create -- "<command>"...  |  gate-write.sh replace <current gate blob SHA> -- "<command>"...'
+USAGE='usage: gate-write.sh create -- "<gate line>"...  |  gate-write.sh replace <current gate blob SHA> -- "<gate line>"...'
 [ $# -ge 3 ] || die "$USAGE"
 MODE=$1
 shift
@@ -26,7 +26,7 @@ case "$MODE" in
 esac
 [ "$1" = -- ] || die "$USAGE"
 shift
-[ $# -gt 0 ] || die "the complete gate list must contain at least one command"
+[ $# -gt 0 ] || die "the complete gate file must contain at least one line"
 
 cd "$EXPECTED_REPO"
 REPO=$(git rev-parse --show-toplevel 2>/dev/null) \
@@ -65,14 +65,11 @@ validate_target() {
     esac
 }
 
-declare -A SEEN=()
-for command in "$@"; do
-    [ -n "$command" ] || die "a gate command is empty"
-    case "$command" in
-        *$'\n'*|*$'\r'*) die "one gate command contains a line break; each argument must be one complete command" ;;
+for line in "$@"; do
+    [ -n "$line" ] || die "a gate line is empty"
+    case "$line" in
+        *$'\n'*|*$'\r'*) die "one gate argument contains a line break; each argument must be one complete line" ;;
     esac
-    [ -z "${SEEN[$command]+x}" ] || die "the complete gate list repeats this command: $command"
-    SEEN[$command]=1
 done
 
 validate_target
@@ -89,7 +86,10 @@ printf '%s\n' "$@" > "$TMP"
 [ -f "$TMP" ] && [ ! -L "$TMP" ] \
     || die "the prepared gate is not one real regular temporary file"
 [ "$(wc -l < "$TMP")" -eq "$#" ] \
-    || die "the prepared gate does not contain the complete command list"
+    || die "the prepared gate does not contain every supplied line"
+if ! COMMAND_COUNT=$(python3 "$HERE/gate_file.py" "$TMP"); then
+    die "the prepared gate does not satisfy the gate line grammar"
+fi
 PREPARED=$(git hash-object "$TMP")
 
 # Recheck immediately before publication. For creation, --no-clobber prevents
@@ -108,4 +108,4 @@ TMP=
     || die "the atomic publication did not leave one real gate file"
 [ "$(git hash-object "$GATE")" = "$PREPARED" ] \
     || die "the published gate bytes differ from the prepared complete list"
-printf 'GATE %s\nCOMMANDS %s\n' "$PREPARED" "$#"
+printf 'GATE %s\nCOMMANDS %s\n' "$PREPARED" "$COMMAND_COUNT"

@@ -300,9 +300,10 @@ python3 <workspace>/prompts/construction/ordinary_gate.py <op>
 bash <workspace>/prompts/construction/gate-check.sh close <op>
 ```
 
-The helper runs every command in the real `gate.md`, unchanged, from the repository
-root. It freezes the exact staged candidate before the first command. A lost result
-reuses the same operation only while that candidate remains unchanged.
+The helper runs every executable command in the real `gate.md`, unchanged, from the
+repository root. A full-line `#` comment is frozen with the gate but is never executed,
+reported or counted. It freezes the exact staged candidate before the first command. A
+lost result reuses the same operation only while that candidate remains unchanged.
 
 - **Never narrow a command.** No `-k`, no file list, no `--exitfirst`. Selecting is a
   bet on where the consequences landed, and it is what the gate exists to avoid.
@@ -542,9 +543,10 @@ acceptance measurement. It catches a verification command this task added, remov
 renamed after C0.
 
 It atomically writes the whole physical result to
-`<workspace>/reports/gate/<op>.json`. The artifact contains every exact gate line in
-order, one result for each line, the completed repository-cleanliness comparison and the
-completed surface scan. Its final message is only a readable view of that durable result.
+`<workspace>/reports/gate/<op>.json`. The artifact contains every exact executable gate
+command in order, one result for each command, no comment result, the completed
+repository-cleanliness comparison and the completed surface scan. Its final message is
+only a readable view of that durable result.
 
 The opening helper writes the structured `subagent-started` boundary. After the runner
 returns, close the exact operation:

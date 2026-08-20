@@ -59,6 +59,10 @@ through the same decision — and **run unchanged by whoever runs it**: never na
 never partial, never a subset chosen for the work at hand. The controller publishes a
 complete validated list through `gate-write.sh`; the implementer and runner never edit
 it.
+One non-blank line is one complete command, except a full-line comment whose first
+non-whitespace character is `#`. That comment preserves human-readable rationale in the
+frozen file. It is never executed, reported or counted, and it grants no machine
+exemption from the gate-surface scan. A later `#` remains part of its exact command.
 The path is either absent before first discovery or one real regular file at that exact
 checkout-local leaf. A symlink, dangling symlink or other occupant is foreign state and
 is never followed, compared, copied, adopted or replaced.
