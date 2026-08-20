@@ -236,6 +236,10 @@ generation**.
   <workspace>/additional-prompts/construction/design-checker.md` after its official prompt.
   Tell it to treat its stdout as human instructions and follow both instruction sets
   during the assignment. The later role-specific instruction wins on contradiction.
+  The `global prompt` and `additional prompt` fields are required absolute path values,
+  but their files may be absent. Always call both helpers. Empty stdout is valid absence
+  and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
+  blocks. Never test either file directly.
 
 ```
 progress.py subagent-started design-checker --round <K>
@@ -509,6 +513,10 @@ that is what the next step is for.
   <workspace>/additional-prompts/construction/code-checker.md` after its official prompt.
   Tell it to treat its stdout as human instructions and follow both instruction sets
   during the assignment. The later role-specific instruction wins on contradiction.
+  The `global prompt` and `additional prompt` fields are required absolute path values,
+  but their files may be absent. Always call both helpers. Empty stdout is valid absence
+  and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
+  blocks. Never test either file directly.
 
 All logical rounds and physical regenerations in this attempt use that same private
 history. A new attempt uses a new path. The file is best-effort reviewer memory only.
@@ -707,7 +715,11 @@ Now spawn one fresh **gate runner** before you commit:
   <workspace>/prompts/construction/gate-runner.md
   <workspace>/additional-prompts/construction/gate-runner.md` after its official prompt.
   Tell it to treat its stdout as human instructions and follow both instruction sets
-  during the assignment. The later role-specific instruction wins on contradiction;
+  during the assignment. The later role-specific instruction wins on contradiction. The
+  `global prompt` and `additional prompt` fields are required absolute path values, but
+  their files may be absent. Always call both helpers. Empty stdout is valid absence and
+  never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+  Never test either file directly;
 
 - give it the real checkout-local `gate.md` path and the exact operation, gate blob,
   candidate tree, predecessor and gate-execution identity printed by `gate-check.sh`;

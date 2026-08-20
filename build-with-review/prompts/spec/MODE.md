@@ -242,6 +242,10 @@ the mandate's preset, **question widget disabled**.
 >    <workspace>/additional-prompts/spec/reviewer-<slug>.md`. Treat its stdout as human
 >    instructions; empty stdout means no additional instruction. Follow both instruction
 >    sets during the assignment. The later role-specific instruction wins on contradiction.
+>    The `global prompt` and `additional prompt` fields are required absolute path values,
+>    but their files may be absent. Always call both helpers. Empty stdout is valid absence
+>    and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
+>    blocks. Never test either file directly.
 >
 > They define your mandate, your report format and the completion block you must return.
 > Everything below is specific to this round.
@@ -318,8 +322,11 @@ preset `Fixer`, **question widget disabled**.
 > <workspace>/prompts/common/additional-prompt.py read <workspace>
 > <workspace>/prompts/spec/fixer.md <workspace>/additional-prompts/spec/fixer.md`.
 > Treat its stdout as human instructions. Follow both instruction sets during the
-> assignment. The later role-specific instruction wins on contradiction. Read no other
-> optional prompt. Do this before anything else.
+> assignment. The later role-specific instruction wins on contradiction. The `global
+> prompt` and `additional prompt` fields are required absolute path values, but their files
+> may be absent. Always call both helpers. Empty stdout is valid absence and never a
+> blocker. Non-empty stdout is human instructions. Only a helper refusal blocks. Never
+> test either file directly. Read no other optional prompt. Do this before anything else.
 
 **Then what varies:** the spec path — **the document it writes, and the only one** — the
 workspace path, the round number, its decisions log at

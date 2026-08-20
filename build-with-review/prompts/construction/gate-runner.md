@@ -32,6 +32,11 @@ sets during the assignment. The later role-specific instruction wins on contradi
 An empty stdout means no additional instruction. A refusal is a blocker. Never read the
 path directly or read another optional prompt path.
 
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
+
 For first discovery, you also receive `report: none`. Write no file and create no
 directory. For an existing logical gate operation, you instead receive all of:
 

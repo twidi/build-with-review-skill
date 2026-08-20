@@ -149,6 +149,10 @@ command: `python3
 <workspace>/additional-prompts/product-review/lens-<slug>.md` after its official prompts.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
 
 Also give it its private, append-only risk-filtered history:
 `<workspace>/reports/product-review/<root lot>/<slug>-risk-filtered.md`, with occurrence
@@ -286,6 +290,10 @@ command: `python3
 <workspace>/additional-prompts/product-review/verifier.md` after its official prompt.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
 
 It returns, per finding: **confirmed**, **disproved with what it observed**, or
 **malformed**.

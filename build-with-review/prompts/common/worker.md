@@ -128,6 +128,11 @@ tool on Claude Code, its equivalent on Codex.
   a blocker. Never read the path directly. Read no other optional prompt path. Follow both
   instruction sets during the assignment. The later role-specific instruction wins on
   contradiction.
+- **Additional-prompt lookup is mandatory; the files are optional.** The `global prompt`
+  and `additional prompt` fields are required absolute path values, but their files may be
+  absent. Always call both helpers. Empty stdout is valid absence and never a blocker.
+  Non-empty stdout is human instructions. Only a helper refusal blocks. Never test either
+  file directly.
 - **Use the model and effort your prompt names.** The levels are in
   `<workspace>/prompts/common/vocabulary.md`.
 

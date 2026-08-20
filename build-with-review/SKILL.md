@@ -1482,6 +1482,11 @@ for proven absence. It blocks on an alias or other invalid occupant in the works
 path. Read no other optional prompt path. Follow both instruction sets during the
 assignment. The later role-specific instruction wins on contradiction.
 
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
+
 The human may ask the controller to create, replace or remove one of these files during
 the run. Never mutate the target path directly. For create or replace, write the exact
 content to one fresh real non-symlink draft with the file-editing tool, then run:

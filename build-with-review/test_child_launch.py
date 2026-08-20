@@ -274,6 +274,20 @@ def every_launch_reads_the_global_prompt_before_its_role_prompt():
               f"{name} launch does not keep both instruction sets active")
         check("role-specific instruction wins on contradiction" in normalized,
               f"{name} launch does not preserve role-specific precedence")
+        check("required absolute path values" in normalized,
+              f"{name} launch does not require both additional-prompt path inputs")
+        check("their files may be absent" in normalized,
+              f"{name} launch wrongly permits requiring optional prompt files to exist")
+        check("always call both helpers" in normalized,
+              f"{name} launch permits skipping an additional-prompt lookup")
+        check("empty stdout is valid absence and never a blocker" in normalized,
+              f"{name} launch does not make proven absence non-blocking")
+        check("only a helper refusal blocks" in normalized,
+              f"{name} launch does not give the helper sole classification authority")
+        check("never test either file directly" in normalized,
+              f"{name} launch permits a direct existence test")
+        check("validate every runtime path" not in normalized,
+              f"{name} launch contains the ambiguous generic runtime-path instruction")
 
     for name, relative, start, end in launch_sections:
         body = section(relative, start, end)

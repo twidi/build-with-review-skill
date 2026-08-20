@@ -42,6 +42,10 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 > role-specific instruction wins on contradiction. An empty stdout means no additional
 > instruction. A refusal is a blocker. Never read the path directly or read another
 > optional prompt path.
+> The `global prompt` and `additional prompt` fields are required absolute path values,
+> but their files may be absent. Always call both helpers. Empty stdout is valid absence
+> and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
+> blocks. Never test either file directly.
 >
 > ## Why this exists
 >

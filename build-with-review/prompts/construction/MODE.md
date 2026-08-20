@@ -235,6 +235,10 @@ command: `python3
 <workspace>/additional-prompts/construction/gate-runner.md` after its official prompt.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
 
 On first discovery, add `report: none`. That means no gate-specific input and no file or
 directory write. It does not mean the runtime-input block is absent.
@@ -618,6 +622,10 @@ command: `python3
 <workspace>/additional-prompts/construction/completeness.md` after its official prompt.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
 
 **On a sub-lot**, add the path to the parent lot's plan **and to every earlier
 sub-lot's** — counter 5 reads all their `Covers:` lines, the root's spec decisions and
@@ -862,6 +870,10 @@ command: `python3
 <workspace>/additional-prompts/construction/implementer.md` after its official prompts.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
 
 Tell it to stop before reading or writing any project or workspace path when one value
 is absent, relative, unresolved or contradictory. The current working directory is never
@@ -1142,6 +1154,10 @@ command: `python3
 <workspace>/additional-prompts/construction/diagnostic.md` after its official prompt.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
 
 ```
 progress.py subagent-started diagnostic --task <N>

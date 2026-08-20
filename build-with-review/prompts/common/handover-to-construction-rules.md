@@ -165,6 +165,11 @@ read the role-specific additional prompt through this command: `python3
 instructions. Follow both instruction sets during the assignment. The later role-specific
 instruction wins on contradiction. Read no other optional prompt path.
 
+The `global prompt` and `additional prompt` fields are required absolute path values, but
+their files may be absent. Always call both helpers. Empty stdout is valid absence and
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+Never test either file directly.
+
 WHERE THINGS STAND
 <the variable block — see below>
 
