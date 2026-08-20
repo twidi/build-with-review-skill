@@ -129,6 +129,7 @@ DASHBOARD_DIR = os.path.join(WORKSPACE, "dashboard")
 DASHBOARD_COPY = os.path.join(DASHBOARD_DIR, "data", "progress.jsonl")
 GATE_CHECK = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
 GATE_REPORT = os.path.join(WORKSPACE, "prompts", "construction", "gate_report.py")
+GATE_EXECUTION = os.path.join(WORKSPACE, "prompts", "construction", "gate_execution.py")
 CONSTRUCTION_REVIEW = os.path.join(
     WORKSPACE, "prompts", "construction", "construction_review.py",
 )
@@ -3592,12 +3593,14 @@ def validate_gate_subagent(event, data):
     }
     result_keys = {"green", "surface", "report", "report_sha256", "commands"}
     expected_keys = base_keys if event == "subagent-started" else base_keys | result_keys
-    if not isinstance(data, dict) or set(data) != expected_keys:
+    if not isinstance(data, dict) or set(data) not in (expected_keys, expected_keys | {"execution"}):
         fail(f"{event} gate-runner has an incomplete logical-check identity", data)
     if not isinstance(data.get("op"), str) or not re.fullmatch(r"[0-9a-f]{64}", data["op"]):
         fail(f"{event} gate-runner has an invalid operation identity")
     if data.get("scope") not in {"task", "review", "baseline"}:
         fail(f"{event} gate-runner has an invalid scope")
+    if "execution" in data and not re.fullmatch(r"[0-9a-f]{64}", str(data["execution"])):
+        fail(f"{event} gate-runner has an invalid execution identity")
     if not isinstance(data.get("task"), int) or isinstance(data.get("task"), bool) \
             or not isinstance(data.get("attempt"), int) or isinstance(data.get("attempt"), bool):
         fail(f"{event} gate-runner has an invalid task identity")
@@ -3615,14 +3618,14 @@ def validate_gate_subagent(event, data):
     marker = {}
     with open(GATE_MARKER, encoding="utf-8") as handle:
         lines = handle.read().splitlines()
-    if len(lines) != 11:
+    if len(lines) not in {11, 12}:
         fail("the live gate-check marker is malformed", {"lines": len(lines)})
     for line in lines:
         key, separator, value = line.partition(" ")
         if not separator or not value or key in marker:
             fail("the live gate-check marker is malformed", line)
         marker[key] = value
-    if set(marker) != base_keys:
+    if set(marker) not in (base_keys, base_keys | {"execution"}):
         fail("the live gate-check marker has an incomplete identity", marker)
     normalized = dict(marker)
     try:
@@ -3630,10 +3633,23 @@ def validate_gate_subagent(event, data):
         normalized["attempt"] = int(normalized["attempt"])
     except ValueError:
         fail("the live gate-check marker has a non-numeric task identity")
-    if any(data[key] != normalized[key] for key in base_keys):
+    if "execution" in marker:
+        execution = subprocess.run(
+            [sys.executable, GATE_EXECUTION, "validate-token", marker["execution"],
+             marker["gate"], marker["tree"]],
+            capture_output=True,
+            text=True,
+        )
+        if execution.returncode != 0:
+            fail("the live gate-check marker has an invalid frozen execution", execution.stderr)
+        normalized["execution"] = execution.stdout.strip()
+    identity_keys = base_keys | ({"execution"} if "execution" in marker else set())
+    if set(data) != (identity_keys if event == "subagent-started" else identity_keys | result_keys):
+        fail("the gate-runner event and marker disagree about execution identity", data)
+    if any(data[key] != normalized[key] for key in identity_keys):
         fail("the gate-runner event does not match the live logical check", {
-            "event": {key: data[key] for key in sorted(base_keys)},
-            "marker": {key: normalized[key] for key in sorted(base_keys)},
+            "event": {key: data[key] for key in sorted(identity_keys)},
+            "marker": {key: normalized[key] for key in sorted(identity_keys)},
         })
 
     check = subprocess.run(
@@ -3644,7 +3660,8 @@ def validate_gate_subagent(event, data):
 
     if event == "subagent-ended":
         audit = subprocess.run(
-            [sys.executable, GATE_REPORT, data["op"], data["gate"], data["tree"]],
+            [sys.executable, GATE_REPORT, data["op"], data["gate"], data["tree"],
+             data.get("execution", "-")],
             capture_output=True,
             text=True,
         )

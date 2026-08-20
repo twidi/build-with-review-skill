@@ -340,9 +340,25 @@ bash <workspace>/prompts/construction/gate-check.sh close <op>
 ```
 
 The helper runs every executable command in the real `gate.md`, unchanged, from the
-repository root. A full-line `#` comment is frozen with the gate but is never executed,
-reported or counted. It freezes the exact staged candidate before the first command. A
-lost result reuses the same operation only while that candidate remains unchanged.
+repository root. It uses the exact gate-execution schedule frozen by `gate-check.sh`.
+Commands run concurrently only inside one human-approved compatible group and never
+beyond its frozen maximum. Do not improvise another grouping. A full-line `#` comment is
+frozen with the gate but is never executed, reported or counted. The helper freezes the
+exact staged candidate before the first active group. A lost result reuses the same
+operation and complete command account only while that candidate remains unchanged.
+The repeated helper call joins the op's one executor owner. It cannot overlap a live or
+orphaned command from the earlier physical call.
+
+If `gate-check.sh open` refuses because compatibility evidence changed, no gate command
+has run. Report **Gate execution drift** and the helper's exact changed paths to your
+parent. Do not publish or remove the config yourself. Wait until the parent confirms a
+human-approved replacement schedule or the explicit sequential default, then open a fresh
+logical gate on the unchanged candidate. This route applies to ordinary and final gates.
+
+If one active group changes the candidate or repository state, the helper waits for that
+whole group and then refuses. The operation receives no terminal. Record the exact paths,
+abandon that op through `gate-check.sh abandon <op>`, and return to free work. Never let a
+new gate adopt the side effect as its starting candidate.
 
 - **Never narrow a command.** No `-k`, no file list, no `--exitfirst`. Selecting is a
   bet on where the consequences landed, and it is what the gate exists to avoid.
@@ -573,9 +589,13 @@ bash <workspace>/prompts/construction/gate-check.sh open task \
   refs/bwr/<run>/<lot>/attempt-base
 ```
 
+The same pre-command **Gate execution drift** route applies if this opening refuses on
+changed compatibility evidence. Do not spawn the gate runner until the parent settles it.
+
 The helper consumes this attempt's latest durable final code-review proof. That proof
 is either the clean checker verdict or the complete round-10 resolution. It freezes
-the exact index tree, `HEAD`, predecessor, real `gate.md` blob and one logical operation.
+the exact index tree, `HEAD`, predecessor, real `gate.md` blob, approved gate-execution
+schedule and one logical operation.
 If a prior physical runner result was lost, the same call returns the same operation only
 while every frozen byte is unchanged. It never adopts a previous call's side effects.
 
@@ -605,7 +625,7 @@ Now spawn one fresh **gate runner** before you commit:
   during the assignment. The later role-specific instruction wins on contradiction;
 
 - give it the real checkout-local `gate.md` path and the exact operation, gate blob,
-  candidate tree and predecessor printed by `gate-check.sh`;
+  candidate tree, predecessor and gate-execution identity printed by `gate-check.sh`;
 - give it the exact output and verification inputs:
 
   ```text
@@ -613,10 +633,12 @@ Now spawn one fresh **gate runner** before you commit:
   verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>
   ```
 
-It uses that verify command before the first command and after every command. Never copy
-the gate lines into its message.
+It uses that verify command around the shared executor. It runs the exact frozen schedule
+only through `gate_execution.py run <op>`. Never copy the gate lines or a schedule into
+its message.
 
-It runs that complete list again. It also scans the living repository's instruction
+It consumes that complete list again through the same executor used by the ordinary gate.
+It also scans the living repository's instruction
 documents, task/build manifests and CI configurations. This final run is the task's
 acceptance measurement. It catches a verification command this task added, removed or
 renamed after C0.
@@ -626,6 +648,10 @@ It atomically writes the whole physical result to
 command in order, one result for each command, no comment result, the completed
 repository-cleanliness comparison and the completed surface scan. Its final message is
 only a readable view of that durable result.
+
+If the shared executor instead reports candidate mutation, the runner writes no report.
+Abandon that exact op, retain its path evidence, and return to free work before preparing
+a new candidate.
 
 The opening helper writes the structured `subagent-started` boundary. After the runner
 returns, close the exact operation:
@@ -645,8 +671,10 @@ the event only finishes marker removal; it never writes a second result.
 - **Any addition, removal or rename candidate:** report **Gate drift** to your parent,
   with the runner's exact old/new commands and sources. Do not commit, fix, fail the
   attempt or edit `gate.md`. Wait. Your parent takes the existing gate decision to the
-  human and writes the complete validated list. When your parent tells you it is ready,
-  open and run a fresh logical gate check against that new real gate file.
+  human and writes the complete validated list. It must also settle the replacement
+  schedule or the explicit sequential default. When your parent confirms that both the
+  gate list and execution choice are ready, open and run a fresh logical gate check
+  against that new real gate file. Never infer how a replacement list can run.
 - **No surface drift, but any command or repository-cleanliness result is RED:** go to
   *When it fails*. Never clean a path written by a green command.
 - **Every command green, repository state unchanged, gate surface unchanged:** continue

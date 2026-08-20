@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from gate_file import GateFileError, read_gate_commands
+from gate_execution import canonical_bytes, read_account, validate_execution
 
 
 def refuse(message):
@@ -36,13 +37,15 @@ def real_file(path, root, subject):
     return current
 
 
-def audit(op, expected_gate, expected_tree):
+def audit(op, expected_gate, expected_tree, expected_execution="-"):
     if not re.fullmatch(r"[0-9a-f]{64}", op):
         refuse("the operation identity is invalid")
     if not re.fullmatch(r"[0-9a-f]{40,64}", expected_gate):
         refuse("the frozen gate identity is invalid")
     if not re.fullmatch(r"[0-9a-f]{40,64}", expected_tree):
         refuse("the frozen tree identity is invalid")
+    if expected_execution != "-" and not re.fullmatch(r"[0-9a-f]{64}", expected_execution):
+        refuse("the frozen gate execution identity is invalid")
 
     gate = real_file(REPO / ".superpowers" / "bwr" / "gate.md", REPO, "gate.md")
     actual_gate = subprocess.check_output(
@@ -62,12 +65,31 @@ def audit(op, expected_gate, expected_tree):
         report = json.loads(raw)
     except (UnicodeDecodeError, ValueError) as exc:
         refuse(f"the physical gate report is not complete JSON: {exc}")
-    if not isinstance(report, dict) or set(report) != {
-        "op", "gate", "tree", "commands", "cleanliness", "surface"
-    }:
+    legacy_keys = {"op", "gate", "tree", "commands", "cleanliness", "surface"}
+    expected_keys = legacy_keys if expected_execution == "-" else legacy_keys | {
+        "execution", "command_account_sha256"
+    }
+    if not isinstance(report, dict) or set(report) != expected_keys:
         refuse("the physical gate report has an incomplete top-level shape")
     if report["op"] != op or report["gate"] != expected_gate or report["tree"] != expected_tree:
         refuse("the physical gate report belongs to another frozen logical check")
+
+    account_results = None
+    if expected_execution != "-":
+        try:
+            execution = validate_execution(
+                report["execution"], expected_gate, commands, expected_tree,
+            )
+        except ValueError as exc:
+            refuse(str(exc))
+        if hashlib.sha256(canonical_bytes(execution)).hexdigest() != expected_execution:
+            refuse("the physical gate report carries another frozen execution")
+        account, account_sha256 = read_account(
+            op, expected_execution, commands, authenticate_outputs=True,
+        )
+        if report["command_account_sha256"] != account_sha256:
+            refuse("the physical gate report names another command account")
+        account_results = account["commands"]
 
     results = report["commands"]
     if not isinstance(results, list) or len(results) != len(commands):
@@ -87,6 +109,11 @@ def audit(op, expected_gate, expected_tree):
             refuse(f"command result {index} has invalid values")
         actual_commands.append(command)
         command_green = command_green and status == "green"
+        if account_results is not None:
+            account_result = account_results[index - 1]
+            expected_status = "green" if account_result["returncode"] == 0 else "red"
+            if command != account_result["command"] or status != expected_status:
+                refuse(f"command result {index} contradicts its physical command account")
     if actual_commands != commands:
         refuse("the physical gate report omitted, reordered, added or changed a frozen gate command")
 
@@ -130,8 +157,8 @@ def audit(op, expected_gate, expected_tree):
 
 
 def main():
-    if len(sys.argv) != 4:
-        refuse("usage: gate_report.py <op> <frozen gate blob> <frozen tree>")
+    if len(sys.argv) not in {4, 5}:
+        refuse("usage: gate_report.py <op> <frozen gate blob> <frozen tree> [execution sha256|-]")
     audit(*sys.argv[1:])
 
 

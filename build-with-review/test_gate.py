@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 
 
@@ -374,14 +375,27 @@ else:
     def write_gate_report(self, op, *, omit_last=False, command_status="green",
                           cleanliness=True, surface="unchanged"):
         marker = self.gate_marker()
-        commands = [
-            line for line in (self.repo / ".superpowers" / "bwr" / "gate.md").read_text(
+        execution_helper = self.workspace / "prompts" / "construction" / "gate_execution.py"
+        self.run(sys.executable, execution_helper, "run", op, ok=True)
+        inspection = json.loads(
+            self.run(sys.executable, execution_helper, "inspect", op, ok=True).stdout
+        )
+        account = json.loads(
+            (self.workspace / "reports" / "gate" / f"{op}.commands" / "account.json").read_text(
                 encoding="utf-8"
-            ).splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
+            )
+        )
+        command_results = [
+            {
+                "command": result["command"],
+                "status": "green" if result["returncode"] == 0 else "red",
+                "count": 1,
+                "example": result["example"],
+            }
+            for result in account["commands"]
         ]
         if omit_last:
-            commands = commands[:-1]
+            command_results = command_results[:-1]
         candidates = [] if surface == "unchanged" else [
             {"kind": "addition", "evidence": "README documents python -m extra_check"}
         ]
@@ -389,10 +403,9 @@ else:
             "op": op,
             "gate": marker["gate"],
             "tree": marker["tree"],
-            "commands": [
-                {"command": command, "status": command_status, "count": 1, "example": "1 check"}
-                for command in commands
-            ],
+            "execution": inspection["execution"],
+            "command_account_sha256": inspection["command_account_sha256"],
+            "commands": command_results,
             "cleanliness": {
                 "completed": True,
                 "unchanged": cleanliness,
@@ -438,6 +451,172 @@ def logical_gate_freezes_candidate_and_reuses_one_operation():
         retry = fixture.close_gate(op)
         check("already recorded" in retry.stdout, retry.stdout)
     finally:
+        fixture.close()
+
+
+@test
+def logical_gate_freezes_and_consumes_the_approved_parallel_schedule():
+    fixture = Fixture()
+    try:
+        first_ready = fixture.temp / "first-ready"
+        second_ready = fixture.temp / "second-ready"
+        first_script = fixture.temp / "parallel-first.py"
+        second_script = fixture.temp / "parallel-second.py"
+        first_script.write_text(
+            "import pathlib, time\n"
+            f"mine=pathlib.Path({str(first_ready)!r}); other=pathlib.Path({str(second_ready)!r})\n"
+            "mine.write_text('ready')\n"
+            "\nfor _ in range(100):\n"
+            "    if other.exists(): break\n"
+            "    time.sleep(0.01)\n"
+            "raise SystemExit(0 if other.exists() else 8)\n",
+            encoding="utf-8",
+        )
+        second_script.write_text(
+            "import pathlib, time\n"
+            f"mine=pathlib.Path({str(second_ready)!r}); other=pathlib.Path({str(first_ready)!r})\n"
+            "mine.write_text('ready')\n"
+            "\nfor _ in range(100):\n"
+            "    if other.exists(): break\n"
+            "    time.sleep(0.01)\n"
+            "raise SystemExit(0 if other.exists() else 9)\n",
+            encoding="utf-8",
+        )
+        commands = [f"{sys.executable} {first_script}", f"{sys.executable} {second_script}"]
+        gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
+        gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+        gate_sha = fixture.git("hash-object", str(gate)).stdout.strip()
+        helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
+        evidence = json.loads(
+            fixture.run(sys.executable, helper, "evidence", ".", ok=True).stdout
+        )
+        draft = fixture.temp / "gate-execution.json"
+        draft.write_text(json.dumps({
+            "schema": 1,
+            "gate": gate_sha,
+            "max_parallel": 2,
+            "compatibility_evidence": evidence,
+            "compatible_groups": [commands],
+        }), encoding="utf-8")
+        fixture.run(sys.executable, helper, "publish", draft, ok=True)
+
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        execution_hash = re.search(
+            r"^EXECUTION ([0-9a-f]{64})$", opened.stdout, re.MULTILINE
+        ).group(1)
+        fixture.write_gate_report(op)
+        fixture.close_gate(op, report=False)
+        terminal = fixture.journal()[-1]
+        check(terminal["data"]["execution"] == execution_hash, terminal)
+        check(all(path.exists() for path in (first_ready, second_ready)),
+              "the approved compatible group did not execute concurrently")
+    finally:
+        fixture.close()
+
+
+@test
+def changed_gate_cannot_open_until_execution_schedule_is_settled():
+    fixture = Fixture()
+    try:
+        gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
+        original = ["git diff --check", "git status --short"]
+        gate.write_text("\n".join(original) + "\n", encoding="utf-8")
+        helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
+        evidence = json.loads(
+            fixture.run(sys.executable, helper, "evidence", ".", ok=True).stdout
+        )
+        draft = fixture.temp / "drift-execution.json"
+        draft.write_text(json.dumps({
+            "schema": 1,
+            "gate": fixture.git("hash-object", str(gate)).stdout.strip(),
+            "max_parallel": 2,
+            "compatibility_evidence": evidence,
+            "compatible_groups": [original],
+        }), encoding="utf-8")
+        fixture.run(sys.executable, helper, "publish", draft, ok=True)
+
+        gate.write_text("git diff --check\n", encoding="utf-8")
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opening = (
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD",
+        )
+        fixture.run(*opening, ok=False)
+        check(not (fixture.workspace / "gate-check-in-progress").exists(),
+              "a stale execution schedule opened a logical gate")
+
+        fixture.run(sys.executable, helper, "remove", ok=True)
+        accepted = fixture.run(*opening, ok=True)
+        check(re.search(r"^OP [0-9a-f]{64}$", accepted.stdout, re.MULTILINE),
+              accepted.stdout)
+    finally:
+        fixture.close()
+
+
+@test
+def logical_gate_cannot_be_abandoned_while_its_executor_owner_is_live():
+    fixture = Fixture()
+    executor = None
+    try:
+        ready = fixture.temp / "abandon-ready"
+        release = fixture.temp / "abandon-release"
+        script = fixture.temp / "abandon-owner.py"
+        script.write_text(
+            "import pathlib, time\n"
+            f"ready=pathlib.Path({str(ready)!r}); release=pathlib.Path({str(release)!r})\n"
+            "ready.write_text('ready')\n"
+            "while not release.exists(): time.sleep(0.01)\n",
+            encoding="utf-8",
+        )
+        command = f"{sys.executable} {script}"
+        gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
+        gate.write_text(f"{command}\n", encoding="utf-8")
+        gate_sha = fixture.git("hash-object", str(gate)).stdout.strip()
+        draft = fixture.temp / "abandon-execution.json"
+        draft.write_text(json.dumps({
+            "schema": 1,
+            "gate": gate_sha,
+            "max_parallel": 1,
+            "compatibility_evidence": [],
+            "compatible_groups": [[command]],
+        }), encoding="utf-8")
+        helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
+        fixture.run(sys.executable, helper, "publish", draft, ok=True)
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        executor = subprocess.Popen(
+            [sys.executable, helper, "run", op], cwd=fixture.repo,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for _ in range(200):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        check(ready.exists(), "the executor never acquired the logical operation")
+        fixture.run("bash", fixture.gate_check, "abandon", op, ok=False)
+        check((fixture.workspace / "gate-check-in-progress").exists(),
+              "abandon removed a live executor's marker")
+        release.write_text("release", encoding="utf-8")
+        output = executor.communicate(timeout=10)
+        check(executor.returncode == 0, output)
+        fixture.run("bash", fixture.gate_check, "abandon", op, ok=True)
+        check(not (fixture.workspace / "gate-check-in-progress").exists(),
+              "an idle unterminalled operation could not be abandoned")
+    finally:
+        release = fixture.temp / "abandon-release"
+        release.write_text("release", encoding="utf-8")
+        if executor is not None and executor.poll() is None:
+            executor.kill()
+            executor.wait()
         fixture.close()
 
 
@@ -1438,8 +1617,11 @@ def gate_runner_contract_covers_real_gate_and_semantic_surface_drift():
         "Never accept a copied command list",
         "definition-change candidate",
         "uncovered-target candidate",
-        "after every physical command",
-        "canonical physical-result",
+        "gate_execution.py run <op>",
+        "human-approved compatible group",
+        "continues after a RED",
+        "canonical report",
+        "command_account_sha256",
         "every frozen executable gate command exactly once and in order",
         "full-line comment",
         "not a machine exemption",

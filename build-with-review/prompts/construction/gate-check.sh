@@ -12,6 +12,7 @@ MARKER="$WORKSPACE/gate-check-in-progress"
 JOURNAL="$WORKSPACE/progress.jsonl"
 PROGRESS="$WORKSPACE/prompts/common/progress.py"
 GATE_REPORT="$WORKSPACE/prompts/construction/gate_report.py"
+GATE_EXECUTION="$WORKSPACE/prompts/construction/gate_execution.py"
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 
 cd "$EXPECTED_REPO"
@@ -51,8 +52,8 @@ read_marker() {
     [ -f "$MARKER" ] && [ ! -L "$MARKER" ] \
         || die "the gate-check marker is not one real regular file: $MARKER"
     mapfile -t M_LINES < "$MARKER"
-    [ "${#M_LINES[@]}" -eq 11 ] \
-        || die "the gate-check marker has ${#M_LINES[@]} lines; expected 11"
+    [ "${#M_LINES[@]}" -eq 11 ] || [ "${#M_LINES[@]}" -eq 12 ] \
+        || die "the gate-check marker has ${#M_LINES[@]} lines; expected 11 or 12"
     marker_value() {
         local wanted=$1 line found=()
         for line in "${M_LINES[@]}"; do
@@ -76,6 +77,10 @@ read_marker() {
     M_TREE=$(marker_value tree)
     M_GATE=$(marker_value gate)
     M_CODE=$(marker_value code)
+    M_EXECUTION=-
+    if [ "${#M_LINES[@]}" -eq 12 ]; then
+        M_EXECUTION=$(marker_value execution)
+    fi
     [[ $M_OP =~ ^[0-9a-f]{64}$ ]] || die "the gate-check marker has an invalid operation identity"
     [[ $M_SCOPE =~ ^(task|baseline|review)$ ]] || die "the gate-check marker has an invalid scope"
     [[ $M_OWNER =~ ^[A-Za-z0-9._:/-]+$ ]] || die "the gate-check marker has an invalid owner"
@@ -90,6 +95,12 @@ read_marker() {
             || die "the task gate-check marker has no valid final code-review proof"
     else
         [ "$M_CODE" = - ] || die "a baseline gate-check marker carries a task code proof"
+    fi
+    M_EXECUTION_HASH=-
+    if [ "$M_EXECUTION" != - ]; then
+        M_EXECUTION_HASH=$(python3 "$GATE_EXECUTION" validate-token \
+            "$M_EXECUTION" "$M_GATE" "$M_TREE") \
+            || die "the gate-check marker has an invalid frozen execution"
     fi
 }
 
@@ -128,15 +139,17 @@ PY
 event_data() {
     local audit=${1:-}
     python3 - "$M_OP" "$M_SCOPE" "$M_OWNER" "$M_LOT" "$M_TASK" "$M_ATTEMPT" \
-        "$M_HEAD" "$M_BASE" "$M_TREE" "$M_GATE" "$M_CODE" "$audit" <<'PY'
+        "$M_HEAD" "$M_BASE" "$M_TREE" "$M_GATE" "$M_CODE" "$M_EXECUTION_HASH" "$audit" <<'PY'
 import json, sys
-keys = ("op", "scope", "owner", "lot", "task", "attempt", "head", "base", "tree", "gate", "code")
-values = sys.argv[1:12]
+keys = ("op", "scope", "owner", "lot", "task", "attempt", "head", "base", "tree", "gate", "code", "execution")
+values = sys.argv[1:13]
 data = dict(zip(keys, values))
 data["task"] = int(data["task"])
 data["attempt"] = int(data["attempt"])
-if sys.argv[12]:
-    outcome = json.loads(sys.argv[12])
+if data["execution"] == "-":
+    del data["execution"]
+if sys.argv[13]:
+    outcome = json.loads(sys.argv[13])
     if set(outcome) != {"green", "surface", "report", "report_sha256", "commands"}:
         raise SystemExit("the gate report audit has an invalid result shape")
     data.update(outcome)
@@ -145,7 +158,7 @@ PY
 }
 
 audit_report() {
-    python3 "$GATE_REPORT" "$1" "$2" "$3"
+    python3 "$GATE_REPORT" "$1" "$2" "$3" "$4"
 }
 
 terminal_matches_audit() {
@@ -164,7 +177,7 @@ open_check() {
     [[ $scope =~ ^(task|baseline|review)$ ]] || die "gate-check open scope must be task, review or baseline"
     [[ $owner =~ ^[A-Za-z0-9._:/-]+$ ]] || die "the gate-check owner has invalid characters"
     validate_gate
-    local head base tree op round
+    local head base tree op round execution_json execution_token execution_hash
     head=$(git rev-parse HEAD)
     base=$(git rev-parse --verify "$base_arg^{commit}") \
         || die "$base_arg is not a commit"
@@ -207,8 +220,18 @@ open_check() {
 Finish or abandon that exact check before opening another."
         validate_frozen_state
     else
+        execution_json=$(python3 "$GATE_EXECUTION" token) \
+            || die "the gate execution schedule is absent or invalid"
+        read -r execution_token execution_hash < <(python3 - "$execution_json" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1])
+if set(value) != {"execution", "sha256", "token"}:
+    raise SystemExit("invalid gate execution token result")
+print(value["token"], value["sha256"])
+PY
+        ) || die "the gate execution helper returned an invalid frozen schedule"
         op=$(printf '%s\0' "$scope" "$owner" "$head" "$base" "$tree" "$GATE_SHA" "$code" \
-            "$(date +%s%N)" "$$" "$RANDOM" | sha256sum | cut -d' ' -f1)
+            "$execution_hash" "$(date +%s%N)" "$$" "$RANDOM" | sha256sum | cut -d' ' -f1)
         {
             printf 'op %s\n' "$op"
             printf 'scope %s\n' "$scope"
@@ -221,13 +244,14 @@ Finish or abandon that exact check before opening another."
             printf 'tree %s\n' "$tree"
             printf 'gate %s\n' "$GATE_SHA"
             printf 'code %s\n' "$code"
+            printf 'execution %s\n' "$execution_token"
         } > "$MARKER.tmp"
         mv "$MARKER.tmp" "$MARKER"
         read_marker
     fi
     "$PROGRESS" subagent-started gate-runner --data "$(event_data)"
-    printf 'OP %s\nGATE %s\nTREE %s\nHEAD %s\nBASE %s\n' \
-        "$M_OP" "$M_GATE" "$M_TREE" "$M_HEAD" "$M_BASE"
+    printf 'OP %s\nGATE %s\nTREE %s\nHEAD %s\nBASE %s\nEXECUTION %s\n' \
+        "$M_OP" "$M_GATE" "$M_TREE" "$M_HEAD" "$M_BASE" "$M_EXECUTION_HASH"
 }
 
 close_check() {
@@ -240,7 +264,7 @@ close_check() {
             read_marker
             [ "$M_OP" = "$op" ] || die "the live gate marker belongs to $M_OP, not $op"
             validate_frozen_state
-            audit=$(audit_report "$M_OP" "$M_GATE" "$M_TREE") \
+            audit=$(audit_report "$M_OP" "$M_GATE" "$M_TREE" "$M_EXECUTION_HASH") \
                 || die "the physical gate report for $M_OP is absent, incomplete or invalid"
             terminal_matches_audit "$existing" "$audit" \
                 || die "the recorded gate terminal does not match its physical report"
@@ -252,7 +276,7 @@ close_check() {
     read_marker
     [ "$M_OP" = "$op" ] || die "the live gate marker belongs to $M_OP, not $op"
     validate_frozen_state
-    audit=$(audit_report "$M_OP" "$M_GATE" "$M_TREE") \
+    audit=$(audit_report "$M_OP" "$M_GATE" "$M_TREE" "$M_EXECUTION_HASH") \
         || die "the physical gate report for $M_OP is absent, incomplete or invalid"
     "$PROGRESS" subagent-ended gate-runner --data "$(event_data "$audit")"
     rm -f "$MARKER"
@@ -288,10 +312,11 @@ if len(events) != 1:
 d = events[0]["data"]
 required = {"op","scope","owner","lot","task","attempt","head","base","tree","gate","code",
             "green","surface","report","report_sha256","commands"}
-if set(d) != required or d["green"] is not True or d["surface"] != "unchanged" or d["gate"] != gate:
+if set(d) not in (required, required | {"execution"}) \
+        or d["green"] is not True or d["surface"] != "unchanged" or d["gate"] != gate:
     raise SystemExit("the gate result is not one exact green, unchanged result for the current gate")
 audit = json.loads(subprocess.check_output(
-    [sys.executable, report_helper, op, d["gate"], d["tree"]], text=True
+    [sys.executable, report_helper, op, d["gate"], d["tree"], d.get("execution", "-")], text=True
 ))
 if any(d.get(key) != value for key, value in audit.items()):
     raise SystemExit("the gate result does not match its canonical physical report")
@@ -472,6 +497,10 @@ case ${1:-} in
         [ "$M_OP" = "$2" ] || die "the live gate marker belongs to $M_OP, not $2"
         [ -z "$(journal_gate_result "$2")" ] \
             || die "gate check $2 already has a durable result and cannot be abandoned"
+        if [ "$M_EXECUTION" != - ]; then
+            python3 "$GATE_EXECUTION" idle "$2" \
+                || die "gate check $2 still has a live executor or command; do not abandon its owner"
+        fi
         rm -f "$MARKER"
         printf 'ABANDONED %s\n' "$2"
         ;;

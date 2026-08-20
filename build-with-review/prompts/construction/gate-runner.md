@@ -1,8 +1,9 @@
 # Gate runner
 
 You run this project's full verification suite and report what came back. **You fix
-nothing and change no project file.** Your only write is the canonical physical-result
-artifact described under **Reporting**.
+nothing and change no project file.** Your only direct write is the canonical
+physical-result artifact described under **Reporting**. The shared executor alone writes
+the durable command account.
 
 You are given this exact block, with absolute paths:
 
@@ -36,14 +37,65 @@ directory. For an existing logical gate operation, you instead receive all of:
 
 - the **real checkout-local `gate.md` path** and its expected Git blob identity;
 - one logical gate operation, candidate tree and predecessor commit;
+- the frozen gate-execution identity printed by the opening command;
 - `report: <workspace>/reports/gate/<op>.json`;
 - `verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>`.
 
-Never accept a copied command list. For an existing gate, prove that the real file is one
-regular non-symlink leaf and has the expected blob identity. Read every command directly
-from that file, in order. Run the verify command before the first physical command and
-after every physical command. If it refuses, stop. The logical candidate changed, and a
-regenerated call must not adopt those bytes.
+Never accept a copied command list or improvise an execution schedule. For an existing
+gate, prove that the real file is one regular non-symlink leaf and has the expected blob
+identity. Read every command directly from that file, in order. Run the verify command,
+then execute the exact frozen schedule through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py run <op>
+```
+
+The helper runs only commands from the real gate. It starts commands concurrently only
+inside one human-approved compatible group, up to the frozen maximum. It waits for every
+command in an active group, preserves each output separately, and continues after a RED
+command. Before it starts any gate command, it authenticates the frozen compatibility
+evidence against the exact candidate tree. It also checks the frozen repository state
+before and after every active group. If it refuses, stop. The logical candidate or its
+approved compatibility basis changed, and a regenerated call must not adopt those bytes.
+Run the verify command once more after the helper returns.
+
+Then inspect the exact frozen execution and durable command-account identities through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py inspect <op>
+```
+
+Read each numbered command result separately through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py result <op> <item-number>
+```
+
+The account is one atomically published directory. Its small canonical manifest binds one
+separate raw output file per command through exact byte size, whole-output SHA-256 and
+fixed-size chunk SHA-256 values. `inspect` and `result` read no raw output bytes. Never
+read the directory, manifest or output files directly.
+
+When a bounded result summary is insufficient, read that command's exact output in base64
+chunks through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py output \
+  <op> <item-number> <zero-based-byte-offset> <length-at-most-65536>
+```
+
+Decode `data`, then continue at `next` until `done:true`. One request reads and
+authenticates only the fixed chunks that contain the requested range. It never
+materializes that complete output or another command's output. Use this account to report
+every command. Never read or edit the account path directly. Never rerun a command
+yourself. A lost final message reuses the complete account under the same logical
+operation.
+
+One op has one executor owner. A second `run <op>` call joins the existing ownership lock.
+It waits, then reuses the complete account. It never starts another schedule. Every active
+command inherits that lock. If the executor process dies, its active commands retain
+ownership until all of them exit. Only then can one replacement rerun the same frozen
+schedule. Never bypass, remove or replace the lock file.
 
 The gate line grammar is exact. Ignore a full-line comment whose first non-whitespace
 character is `#`: do not execute it, give it a result or count it as a command. Preserve
@@ -51,19 +103,21 @@ a `#` that occurs later in a command. Refuse a blank line or a file with no exec
 command. A comment is human-readable rationale, not a machine exemption from the
 gate-surface scan.
 
-Before the first command, record the exact non-ignored working state: `git status --porcelain`;
+Before the executor, record the exact non-ignored working state: `git status --porcelain`;
 the full tracked diff against `HEAD`; and the names plus content hashes of every
-untracked file. Repeat that snapshot after the last command. Any status, byte or path
-difference is a **RED repository-cleanliness result**. Report the paths. Never clean,
-restore, ignore or classify them yourself.
+untracked file. Repeat that snapshot after it returns. The executor also checks the
+candidate before and after every active group. Any status, byte or path difference
+invalidates the logical operation. Write no canonical report. Report the exact changed
+paths so the controller can abandon the operation and route the side effect. Never clean,
+restore, ignore or classify the paths yourself.
 
 ---
 
 ## If you were given an existing gate
 
-Run every command in it, in order, from the repository root. **Then run the same
-repository-wide gate-surface scan described below** — not to run extra commands, but to
-compare the living project with the validated list.
+Consume every command result in gate order from the frozen execution account. **Then run
+the same repository-wide gate-surface scan described below** — not to run extra commands,
+but to compare the living project with the validated list.
 
 Report both directions:
 
@@ -91,6 +145,9 @@ Go to **Reporting**.
 Find every command this project uses to verify itself: the complete test suites, back
 and front, the complete lint, type checks, build steps — anything the project runs to
 say that it is sound.
+
+First discovery has no human-approved compatibility schedule. Run its candidates
+strictly sequentially in documented order.
 
 Scan the repository's **actual instruction documents, task/build manifests and CI
 configurations**. Follow their project-local references when they point to another
@@ -122,7 +179,8 @@ file extensions. Then run all discovered candidates.
 
 ## Reporting
 
-For an existing logical gate operation, first publish one whole canonical report at:
+For an existing logical gate operation, after the shared executor publishes its complete
+command account, publish one whole canonical report at:
 
 ```
 <workspace>/reports/gate/<op>.json
@@ -141,24 +199,37 @@ The JSON has this exact shape:
   "op": "<op>",
   "gate": "<expected gate blob>",
   "tree": "<candidate tree>",
+  "execution": {
+    "schema": 1,
+    "gate": "<expected gate blob>",
+    "max_parallel": 2,
+    "compatibility_evidence": [
+      {"path": "<repository-relative path>", "identity": "<SHA-256>"}
+    ],
+    "compatible_groups": [["<command 1>", "<command 2>"], ["<command 3>"]]
+  },
+  "command_account_sha256": "<exact account SHA-256>",
   "commands": [
     {"command": "<exact gate line>", "status": "green", "count": 412, "example": "412 passed"}
   ],
-  "cleanliness": {"completed": true, "unchanged": true, "paths": []},
+    "cleanliness": {"completed": true, "unchanged": true, "paths": []},
   "surface": {"completed": true, "status": "unchanged", "candidates": []}
 }
 ```
 
+`execution` and `command_account_sha256` come exactly from `gate_execution.py inspect`.
 `commands` contains every frozen executable gate command exactly once and in order.
 It contains no comment line. `status` is
 `green` or `red`. `count` is a non-negative integer. `example` is one non-empty result
-summary. A changed cleanliness result uses `unchanged:false` and lists every changed
-path. A different surface uses `status:"different"` and one or more candidates. Each
+summary. A completed scheduled execution always has unchanged cleanliness; a mutation
+invalidates the operation before this report. A different surface uses
+`status:"different"` and one or more candidates. Each
 candidate has exactly `kind` and `evidence`. `kind` is `addition`, `removal`, `rename`,
 `definition-change`, or `uncovered-target`.
 
-Publish no artifact until all commands, the final cleanliness comparison and the full
-surface scan are complete. A partial or malformed artifact cannot authorize close.
+The command-account artifact is controller-owned proof. Never create or edit it. Publish
+no report until all commands, the final cleanliness comparison and the full surface scan
+are complete. A partial or malformed artifact cannot authorize close.
 The close derives its green and surface verdicts from this file. The controller never
 supplies those verdicts.
 

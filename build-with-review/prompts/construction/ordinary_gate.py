@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 from gate_file import GateFileError, read_gate_commands
+from gate_execution import frozen_execution, read_account, run_commands
 
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -42,7 +43,8 @@ def marker_data(op):
         if not separator or not value or key in data:
             refuse("the gate-check marker is malformed")
         data[key] = value
-    if len(data) != 11 or data.get("op") != op or data.get("scope") != "review":
+    if len(data) not in {11, 12} or data.get("op") != op or data.get("scope") != "review" \
+            or (len(data) == 12 and "execution" not in data):
         refuse("the marker does not own this exact ordinary gate operation")
     return data
 
@@ -104,28 +106,46 @@ def run(op):
     before = repository_state()
     if candidate_tree() != marker["tree"]:
         refuse("the staged candidate changed before the ordinary gate")
+    execution = None
+    account_sha256 = None
     results = []
-    for command in commands:
-        completed = subprocess.run(
-            ["bash", "-c", command], cwd=REPO, capture_output=True, text=True,
+    if "execution" in marker:
+        _, execution, execution_hash = frozen_execution(op)
+        account = run_commands(op)
+        account, account_sha256 = read_account(
+            op, execution_hash, commands, authenticate_outputs=True,
         )
-        output = (completed.stdout + completed.stderr).strip()
-        if output:
-            print(output)
-        after_command = repository_state()
-        if after_command != before or candidate_tree() != marker["tree"]:
-            refuse(f"gate command changed the candidate or repository state: {command}")
-        results.append({
-            "command": command,
-            "status": "green" if completed.returncode == 0 else "red",
+        results = [{
+            "command": result["command"],
+            "status": "green" if result["returncode"] == 0 else "red",
             "count": 1,
-            "example": output.splitlines()[0][:300] if output else f"exit {completed.returncode}",
-        })
+            "example": result["example"],
+        } for result in account["commands"]]
+    else:
+        for command in commands:
+            completed = subprocess.run(
+                ["bash", "-c", command], cwd=REPO, capture_output=True, text=True,
+            )
+            output = (completed.stdout + completed.stderr).strip()
+            if output:
+                print(output)
+            after_command = repository_state()
+            if after_command != before or candidate_tree() != marker["tree"]:
+                refuse(f"gate command changed the candidate or repository state: {command}")
+            results.append({
+                "command": command,
+                "status": "green" if completed.returncode == 0 else "red",
+                "count": 1,
+                "example": output.splitlines()[0][:300] if output else f"exit {completed.returncode}",
+            })
     report = {
         "op": op, "gate": marker["gate"], "tree": marker["tree"], "commands": results,
         "cleanliness": {"completed": True, "unchanged": True, "paths": []},
         "surface": {"completed": True, "status": "unchanged", "candidates": []},
     }
+    if execution is not None:
+        report["execution"] = execution
+        report["command_account_sha256"] = account_sha256
     atomic_report(op, report)
     print(f"ORDINARY GATE REPORT {op}")
 

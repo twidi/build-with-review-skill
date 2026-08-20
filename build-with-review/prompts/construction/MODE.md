@@ -114,6 +114,103 @@ classify it. Do not read, replace, remove or write through it.
 If the real file exists, read it. If the path is proven absent, this is a first
 discovery — C0.4 and C0.5 apply.
 
+### C0.2a · Validate gate execution
+
+`gate.md` owns the exact command list. The optional controller-owned
+`<workspace>/gate-execution.json` owns only how that list can execute. It has this exact
+shape:
+
+```json
+{
+  "schema": 1,
+  "gate": "<current gate.md Git blob>",
+  "max_parallel": 2,
+  "compatibility_evidence": [
+    {"path": "<repository-relative definition or resource path>", "identity": "<SHA-256>"}
+  ],
+  "compatible_groups": [
+    ["<command 1>", "<command 2>"],
+    ["<command 3>"]
+  ]
+}
+```
+
+The groups form one exact ordered partition of every executable gate line. A group means
+that every command in it is mutually compatible. Groups execute in order. The maximum
+limits one active wave inside a group. Full-line comments remain in `gate.md`, but do not
+enter this partition.
+
+Validate the effective schedule at any entry through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py show
+```
+
+It refuses a malformed, foreign-generation or incomplete config. With a proven-absent
+config, it prints the derived sequential schedule.
+
+After the human has validated the exact gate commands, propose a schedule. **Do not infer
+compatibility from different command names.** Put a command in a shared group only when
+project evidence establishes that concurrent runs cannot collide through repository
+files, generated outputs, caches, databases, ports, services, processes, CPU or memory.
+Account for internal parallelism in pytest, compilers and build tools. Uncertainty means
+one singleton group.
+
+Present the exact proposed groups and their evidence. Then ask one question:
+
+> **Maximum parallel gate commands?**
+
+Offer `2 (recommended)`, `1`, `3`, and `4`. A free-form answer may supply another positive
+integer. The human validates both the grouping and the maximum. A missing answer or a
+proven-absent config means strict sequential execution: maximum 1 and one singleton group
+per command.
+
+For every shared group, name the complete sorted set of project-local definitions,
+targets and resource declarations that establish compatibility. A directory path covers
+its complete tracked subtree. Use `.` when the whole candidate tree is the smallest proof
+you can defend. If the complete compatibility basis cannot be named, use singleton groups.
+Generate the exact identities for those approved paths from the current staged tree:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py evidence \
+  <sorted-repository-relative-path>...
+```
+
+Copy that complete JSON list into `compatibility_evidence`. A parallel group requires a
+non-empty list. The helper authenticates every identity before it publishes a config and
+again before a logical gate can open. A changed definition, target or resource declaration
+therefore refuses before any gate command. Return to the human for a replacement schedule,
+or remove the stale config and use the sequential default. The later full surface scan
+still reports every other gate drift candidate.
+
+Write the complete approved JSON to one real draft file. Publish it only through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py publish \
+  <absolute-draft-path>
+```
+
+The helper authenticates the current gate blob, exact command partition and compatibility
+evidence against the staged tree. It then replaces the workspace config atomically. Delete
+only the draft you created after publication.
+To return future gates to the absence default, use:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py remove
+```
+
+Both mutations refuse while `gate-check-in-progress` exists. A gate change makes the old
+config stale. Reconcile the list with the human, then validate and publish a complete new
+schedule. Do not patch the old schedule.
+
+The setting belongs to this workspace, not to every machine. After a known machine or
+resource change, ask the human to revalidate the maximum before the next gate. Until that
+answer is published, remove the old config and use the sequential default.
+
+An existing run whose C0 already finished adopts this feature between logical gate
+operations. Ask at the next controller checkpoint. Do not restart C0, rewrite the journal,
+or alter a live marker. Until one approved config exists, every new gate stays sequential.
+
 ### C0.3 · Spawn the gate runner
 
 One subagent, **a light model, effort medium**, prompt
@@ -160,20 +257,26 @@ bash <workspace>/prompts/construction/gate-check.sh open baseline \
 ```
 
 Give the runner the real gate path and the operation, gate blob, candidate tree and
-predecessor printed by that call. Also give these two exact values:
+predecessor, and gate-execution identity printed by that call. Also give these two exact
+values:
 
 ```text
 report: <workspace>/reports/gate/<op>.json
 verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>
 ```
 
-Never copy a command list into its message. The runner reads the exact physical gate and
-uses that verify command before the first command and after every command.
+Never copy a command list into its message. The runner reads the exact physical gate. It
+uses the verify command around the shared executor and runs the frozen schedule only
+through `gate_execution.py run <op>`.
 
-It writes the whole canonical result to `<workspace>/reports/gate/<op>.json`. That artifact contains
-every exact gate command in order, one result per command, the completed cleanliness
-comparison and the completed gate-surface scan. Its final message is only a readable
-view of the same result. It fixes nothing.
+The shared executor atomically publishes the complete per-command account directory. Its
+small canonical manifest binds one separate raw output per command through exact size,
+whole hash and fixed-size chunk hashes. Bounded metadata reads touch no raw output. A
+bounded output read touches only its requested command chunks. The runner writes the whole
+canonical result to `<workspace>/reports/gate/<op>.json`. That report binds the account,
+contains every exact gate command in order, one result per command, the completed
+cleanliness comparison and the completed gate-surface scan. Its final message is only a
+readable view of the same result. It fixes nothing.
 
 `gate-check.sh open` writes the structured start. Close the exact returned result with:
 
@@ -185,15 +288,24 @@ bash <workspace>/prompts/construction/gate-check.sh close \
 The close audits the real op-scoped report. It derives `green` and the surface state
 from that report. No controller-supplied verdict can close the operation.
 
+If the executor reports that one active group changed repository state, it has already
+waited for that whole group and has published no command account or report. Record the
+exact changed paths, run `gate-check.sh abandon <op>`, and route the dirty baseline through
+C0.6. Never let another operation adopt those bytes.
+
 One file, `<workspace>/gate-check-in-progress`, owns an unfinished logical check. It
-freezes the operation, owner, `HEAD`, predecessor, index tree, real gate blob and, for a
-task, the latest final code-review proof. That proof is one clean checker verdict or
-one complete round-10 resolution without an accepted defect. Resume it as follows:
+freezes the operation, owner, `HEAD`, predecessor, index tree, real gate blob, exact gate
+execution schedule and, for a task, the latest final code-review proof. That proof is one
+clean checker verdict or one complete round-10 resolution without an accepted defect.
+Resume it as follows:
 
 - marker and no terminal result: if the whole canonical report exists, rerun `close`
   without regenerating the physical runner. Otherwise rerun the exact `open` call. It
-  returns the same op only when every frozen value still matches, then regenerate the
-  physical runner;
+  returns the same op only when every frozen value still matches. The regenerated runner
+  reuses a complete durable command account, or reruns the same frozen schedule if no
+  complete account landed. Its executor call first joins the op's ownership lock. If the
+  prior executor died, every orphaned active command retains that lock until it exits, so
+  the replacement cannot overlap it;
 - terminal result and marker: rerun `close` with that op. It removes only the orphan tail;
 - terminal result and no marker: consume it. Never run the gate again for lost output;
 - changed candidate or gate: stop the physical runner. Use `gate-check.sh abandon <op>`,
@@ -202,6 +314,9 @@ one complete round-10 resolution without an accepted defect. Resume it as follow
 Every other mutator refuses the live marker. A pause or abort first stops the physical
 runner and settles or abandons this check. No commit, plan publication, ref or stopping
 point may absorb its frozen candidate.
+
+`gate-check.sh abandon <op>` also refuses while that executor lock is held. Never abandon
+one op and open another while an old active wave can still run.
 
 ### C0.4 · Report — first discovery only
 
@@ -238,6 +353,10 @@ the earlier green proves only the shorter list. The gate that closes tasks is th
 as it stands, so the verdict C0.6 routes on must be that list's own — or the first
 implementer inherits a baseline nobody measured, and is blamed for a failure that
 predates its task.
+
+Complete C0.2a after the list is written and before this fresh logical check. The fresh
+check then freezes the approved schedule, or the safe sequential default if no config
+exists.
 
 ### C0.6 · The verdict
 
@@ -290,6 +409,9 @@ runner on the enlarged list, before the next attempt launches. The entry verdict
 covered the old list, and an addition can be RED on a baseline nobody touched — that
 RED is C0.6's halt, the human's to settle, never the next attempt's failure. Nothing
 launches on a gate whose baseline was never measured.
+
+Revalidate C0.2a for the complete replacement list before this fresh runner. The old
+schedule belongs to the old gate blob and cannot authorize the new list.
 
 ---
 
@@ -779,17 +901,31 @@ someone else's work.
 
 ### What comes back
 
+**Gate execution drift.** An ordinary or final gate opening refused before running any
+command because one or more approved compatibility-evidence paths changed. Keep the
+attempt and implementer live. Report the exact paths and current schedule to the human.
+Revalidate the complete groups and maximum against the changed definitions and resources.
+Publish the approved replacement config, or remove the stale config and select the
+sequential default. Before you release the implementer, verify `gate_execution.py show`
+accepts that settled choice against the current staged candidate. Then tell the same
+implementer to open a fresh logical gate. Do not classify this pre-execution refusal as a
+RED command, Gate drift report, attempt failure or code defect.
+
 **Gate drift.** The final task-boundary runner found one or more documented additions,
 removals or renames. This is not `Failed`, `Blocked`, or a C3.9 classification. Keep the
 attempt and its implementer live. Report the runner's exact old/new commands and sources
 to the human. The implementer never edits `gate.md`.
 
 The human validates the complete resulting list. Publish it through C0.5's
-`gate-write.sh replace` call, then message this same implementer to reread `gate.md` and
-rerun the fresh final gate runner. No next task starts. If the reconciled list is green,
-clean and unchanged, the same attempt commits and reports `Done`. If it is red without
-further surface drift, use the final-gate failure route. A newly retired or renamed
-command reaches this decision before any failure classification.
+`gate-write.sh replace` call. That publication makes the old execution config stale.
+**Before you release the implementer**, repeat C0.2a for the replacement list. Either
+publish the complete human-approved replacement schedule and compatibility evidence, or
+remove the stale config through `gate_execution.py remove` and explicitly select the
+sequential default. Only then message this same implementer to reread `gate.md` and rerun
+the fresh final gate runner. No next task starts. If the reconciled list is green, clean
+and unchanged, the same attempt commits and reports `Done`. If it is red without further
+surface drift, use the final-gate failure route. A newly retired or renamed command reaches
+this decision before any failure classification.
 
 **Done.** **A `Done` without a commit hash and final gate operation is not a `Done`**.
 Ask for both before anything else.

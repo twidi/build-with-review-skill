@@ -997,13 +997,19 @@ one edit at each close that changes what it records**: the spec loop's close, an
 landing, a re-entered loop's close, each mode naming its own. It is a status word in a
 header, it changes no behaviour, and no gate or reviewer has anything to say about it.
 
-**And three artifacts of the machinery itself, each with no other valid writer:**
+**And four artifacts of the machinery itself, each with no other valid writer:**
 
 - **`gate.md`** — the runner proposes, the human validates, **you publish through
   `gate-write.sh`**: written by anyone earlier, the file would read as approved before
   it was; the helper exposes only a complete atomically renamed file. A full-line `#`
   comment preserves validated rationale but is never a command or a gate-surface
   exemption;
+- **`<workspace>/gate-execution.json`** — after the exact gate list exists, you propose
+  compatible command groups and their complete project-local compatibility evidence. The
+  human validates the groups, evidence paths and maximum, and **you publish through
+  `gate_execution.py`**. Proven absence means strict sequential execution. Every logical
+  gate freezes the complete schedule and evidence, so later config or relevant project
+  changes cannot authorize concurrent execution;
 - **the confirmed-findings file** that closes a review pass — the sub-lot's source,
   distilled from verdicts only you hold together, and no child is assigned to it;
 - **the `.superpowers/` ignore rule** when workspace creation refuses —
@@ -1088,6 +1094,21 @@ handover copy only transfers an already validated gate between checkouts. First 
 writes only to a path proven absent immediately beforehand. Growth authenticates the exact
 old blob. Both prepare the complete command list in one real same-directory temporary and
 publish it by atomic rename, so interruption cannot expose a partial final leaf.
+
+The optional workspace-local `gate-execution.json` binds one exact gate blob to one
+human-approved ordered compatibility partition, one complete set of project-local
+compatibility evidence and one positive parallel maximum. The controller publishes or
+removes it only through `gate_execution.py`, and only between logical gate operations.
+Proven absence derives a sequential schedule. A changed evidence identity refuses before
+any gate command. Baseline, ordinary and final gates use the same executor. Each operation
+freezes its schedule and keeps one atomically published account directory. A small
+canonical manifest authenticates one independently seekable raw output per command with
+whole and fixed-chunk hashes. Metadata reads touch no raw output, and bounded output reads
+touch only the requested command chunks. A crash reruns that frozen schedule only when no
+complete account exists; it never adopts a later config.
+One op also owns one executor lock. Concurrent callers join it. Active command processes
+inherit it, so replacement cannot overlap an orphaned wave after executor death. Abandon
+refuses until that ownership is idle.
 
 **The sibling disposable ground has the same physical identity rule.**
 `<repo>/.superpowers/bwr/tmp` is a real directory at that exact checkout-local path.
