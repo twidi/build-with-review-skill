@@ -119,10 +119,12 @@ tree, and looking it up would only make you patch around someone else's reasonin
 You read the plan — **the `### Design` block an earlier attempt wrote is still there**,
 since the plan lives in the workspace and no reset can reach it — and the **failure
 report at the path your parent gives you**, under `<workspace>/reports/construction/`.
-When that report contains `## Final code-review handoff`, every accepted finding in its
-immutable batch is a standing correction obligation. Read it before Design or code.
-Your first code-checker manifest carries those exact identities. Its result must mark
-each one `addressed` or carry it forward as one current finding.
+When that report contains `## Final design-review handoff` or
+`## Final code-review handoff`, every accepted finding in its immutable batch is a
+standing correction obligation. Read it before Design or code. For a Design handoff,
+your first Design manifest carries those exact identities. For a code handoff, your
+first code-checker manifest carries them. The matching checker must mark each identity
+`addressed` or carry it forward as one current finding.
 
 **Sometimes there is no report, and that is normal.** It means the attempt before you
 never delivered one — it stopped over the plan, was interrupted by a pause, went silent,
@@ -136,6 +138,13 @@ whose report never landed**: its classification came with its message, your pare
 passes it, and you follow the table above as if the report existed — you simply have
 no file to read, and what failed lives only in the preserved attempt your parent can
 answer questions about.
+
+A human stop after an accepted round-10 Design settlement is different. It has no
+failure report, but its `paused` or `aborted` note owns the exact immutable verdict,
+settlement, result hash and accepted identities. Your first Design manifest carries
+those identities as required retry input. Verify every identity. Do not treat the absent
+report as permission to discard them. A later stop preserves the same obligation until
+a successful retry consumes it.
 
 **Your parent also gives you a label.** It says which part of the work was wrong, so it
 says where you start:
@@ -204,14 +213,17 @@ the list is what is forbidden.
 
 ## Design checker
 
-When the `### Design` block is written, **spawn a subagent to judge it**.
+When the `### Design` block is written, **spawn a subagent to judge one exact Design
+generation**.
 
 - **a strong model, effort high**
 - prompt: **`<workspace>/prompts/construction/design-checker.md`** — give it that path
 - it must **not inherit your context**, and it runs **in the background** if your
   provider offers the option — both rules are in `<workspace>/prompts/common/worker.md`
-- give it: the workspace path, the path to the plan, your task number, and the path to
-  the spec, plus its one optional additional prompt
+- give it: the workspace path, the manifest path printed by the opening below, the plan
+  path, the spec path, `<workspace>/prompts/common/review-risk.md`, the private history
+  path `reports/construction/<lot>/task-<N>-attempt-<K>-design-risk-filtered.md`, and the
+  occurrence label `Design checker round <R>`, plus its one optional additional prompt
   `<workspace>/additional-prompts/construction/design-checker.md`
 - give it `<workspace>/additional-prompts/global.md`; tell it to read the global
   additional prompt through this command: `python3
@@ -227,11 +239,34 @@ When the `### Design` block is written, **spawn a subagent to judge it**.
 
 ```
 progress.py subagent-started design-checker --round <K>
-progress.py note bound.spent --round <K> --text "design checker round <K> of 3"
-progress.py subagent-ended design-checker --round <K> --data '{"findings":<N>}'
+progress.py note bound.spent --round <K> --text "design checker round <K> of 10"
+progress.py subagent-ended design-checker --round <K> --data '{"result":"<result JSON file>"}'
 progress.py note verdict.consumed --round <K> --data '{"check":"design","outcome":"clean"}'
-progress.py note verdict.consumed --round <K> --data '{"check":"design","outcome":"findings"}' --text-file "$JOURNAL_TEXT_FILE"
+progress.py note verdict.consumed --round <K> --data '{"check":"design","outcome":"findings"}'
 ```
+
+The opening prints the exact manifest path. Give it to the checker. Write the checker
+return unchanged to one temporary JSON file with a file-writing tool. Never embed it in
+shell source. The ended call audits and publishes the immutable result. It derives the
+verdict, Finding 1..N set, and `critical`, `important`, and `minor` counts. Delete the
+temporary only after the ended call succeeds.
+
+All logical rounds and physical regenerations in this attempt share the same private
+history. A new attempt gets a new path. The history is best-effort checker memory only.
+Its loss never blocks the attempt, and `progress.py` records nothing about it.
+
+**Keep the checker available until the ended call accepts its result.** A refusal about
+the result JSON or manifest does not close the bracket. Send the exact refusal and the
+same manifest to the same checker. Request one complete replacement JSON, not a patch or
+explanation. Submit it to the **same open physical call**. Make **at most two repair
+requests**. Stop early when the same exact refusal follows the first replacement.
+
+This repair exists only while live context retains the exact checker address, request
+count and last refusal. After compaction, takeover, context loss, or addressability loss,
+send no guessed request. Close the exact call with `{"unusable":"lost"}`. Then regenerate
+under the same manifest, logical round and single domain spend. If no replacement is
+accepted, close with `{"unusable":"unusable"}`. A workflow or authority refusal is not a
+result repair. Stop and resolve that state.
 
 An errored, empty or unusable physical call still closes its bracket before regeneration:
 
@@ -243,39 +278,89 @@ If compaction lost the result before its ending bracket, record `unusable:"lost"
 that open call. Then open the regenerated physical call under the same logical round.
 Every physical opening is terminal before `verdict.consumed` can land.
 
-*The `bound.spent` line is what survives a compaction: before launching a checker,
-count the domain lines whose text says `design checker round` — they say which logical
-round this one is. Write exactly one of the two `verdict.consumed` lines immediately
-after the return, before changing the design. Findings use `progress-rules.md`'s
-`--text-file` transport whenever their exact text needs it.*
+The `bound.spent` line survives compaction. Count only domain lines whose text says
+`design checker round`. Write one matching `verdict.consumed` after the audited return.
+The immutable result artifact preserves the complete batch.
 
-It returns findings, or nothing.
+It returns every admitted finding, or a clean result. New candidates use
+`review-risk.md`. Filtered observations remain only in the attempt-scoped private
+history. Prior admitted identities bypass fresh probability admission.
 
-**A finding sends you back to the design.** Fix it, then spawn a fresh checker — never
-reuse the previous one. **Three rounds at most.**
+### Rounds 1 through 9
 
-**A lost result does not create a round.** If the latest design-checker domain spend for
-this attempt and round has no matching `verdict.consumed`, relaunch the same checker with
-a fresh `subagent-started` / `subagent-ended` bracket, but write no second domain spend.
-Record the regenerated verdict, then act. If a consumed findings note has no later
-design-checker domain spend, finish or verify every correction named by that exact note
-before allocating the next round. A consumed clean note advances; it is never checked
-again.
+Account for every finding before another logical round. Correct the Design first. Use
+`corrected` when the new Design fixes the finding. Use `unchanged` only when exact plan,
+spec or repository evidence proves no Design change is required.
 
-### At the third round, if you still disagree
+```markdown
+## Finding 1 — corrected
+The exact Design correction and evidence.
 
-Do not decide by default. **Classify what the disagreement is about:**
+## Finding 2 — unchanged
+The exact evidence that the Design already satisfies the accepted contract.
+```
 
-- **The plan is ambiguous or silent** — you and the checker are each reading it a
-  different way, and both readings hold. **Stop and report it to your parent** as
-  blocked.
-- **The spec does not settle the behaviour at stake** — that is a DECISION. **Stop and
-  report it.**
-- **The plan does settle it, and both options respect it** — then it is yours to
-  decide. Decide, write a **`### Disagreement`** block in your task's section saying
-  what the checker held, what you did, and why the plan permits both. Then move on.
+```sh
+progress.py note design.review.resolved --round <K> \
+  --data '{"check":"design","items":[{"id":1,"status":"corrected"},{"id":2,"status":"unchanged"}]}' \
+  --text-file "$JOURNAL_TEXT_FILE"
+```
 
-**There is no fourth round.**
+The account covers every finding once and in order. The next manifest binds the exact
+corrected Design, immutable prior batch and resolution. The next checker marks every
+prior identity `addressed` or carries it once as `still-open`. Never rewrite an adverse
+result as clean.
+
+**A lost result does not create a round.** Inspect physical brackets first. Continue an
+addressable live repair on the same call. Otherwise close the open call as `lost`, then
+regenerate under the same round, manifest and spend. If a consumed findings note has no
+matching `design.review.resolved`, settle that exact batch before another round. A clean
+note advances.
+
+### At round 10, settle the complete batch
+
+Round 10 never allocates round 11. Do not edit the Design after its result. Account for
+every numbered finding as `accepted`, `refuted`, or `alternative`.
+
+- `accepted` means the checker found a real Design defect.
+- `refuted` requires exact plan, spec or repository evidence.
+- `alternative` means both Designs satisfy the accepted plan.
+
+The implementer alone owns authority classification:
+
+- If the plan is ambiguous or incomplete, stop and report **Blocked**.
+- If the spec does not settle required product behaviour, stop and report a **DECISION**.
+
+Both routes stop before structured settlement.
+
+If no item is accepted, first copy every alternative into `### Disagreement`. Preserve
+existing text. Use one exact heading per alternative:
+
+```markdown
+#### Finding 2 — design alternative
+Why both Designs satisfy the plan, and why this Design stays.
+```
+
+Then record the complete settlement:
+
+```sh
+progress.py note design.review.resolved --round 10 \
+  --data '{"check":"design","items":[{"id":1,"status":"refuted"},{"id":2,"status":"alternative"}]}' \
+  --text-file "$JOURNAL_TEXT_FILE"
+```
+
+With zero accepted items, this exact settlement authorizes implementation. It does not
+claim that the checker returned clean.
+
+With any accepted item, stop before implementation. Do not edit the Design. Put the
+complete immutable batch and settlement in the failure report. Preserve `Disagreement`
+unchanged; any alternative stays in that failure handoff because this attempt cannot
+publish a final Design. Use C3.9b for this task's Design, C3.9c for an earlier accepted
+obligation, or C3.9d for decomposition or interface failure. **C3.9a is not valid**
+because no accepted code implementation exists. The next attempt receives the exact
+accepted obligations.
+
+**There is no round 11. Ten logical design-checker rounds are the complete bound.**
 
 ---
 
@@ -784,18 +869,19 @@ The report holds:
      interface between tasks does not hold.
 3. **What you read to conclude that.**
 
-When round 10 has an `accepted` item, add a fourth and final section. Generate its exact
-contents from the durable checker result and settlement:
+When design or code round 10 has an `accepted` item, add a fourth and final section.
+Generate its exact contents from the durable checker result and settlement:
 
 ```sh
 progress.py construction-failure-handoff <lot> <N> <K>
 ```
 
 Copy the complete output unchanged as the report's final section. It is `## Final
-code-review handoff` plus one canonical JSON block. `attempt-failed.sh` validates the
-complete immutable checker batch and every disposition before it stages, preserves,
-resets or journals anything. A missing, partial or changed block is a refusal. An
-ordinary failure with no accepted round-10 item keeps the three-part report above.
+design-review handoff` or `## Final code-review handoff`, plus one canonical JSON block.
+`attempt-failed.sh` validates the complete immutable checker batch and every disposition
+before it stages, preserves, resets or journals anything. A missing, partial or changed
+block is a refusal. An ordinary failure with no accepted round-10 item keeps the
+three-part report above.
 For this accepted-defect report, name the first three sections exactly `## What failed`,
 `## Classification`, and `## Evidence read`, in that order. Begin the classification
 body with the exact `C3.9a`, `C3.9b`, `C3.9c`, or `C3.9d` passed to the closer.

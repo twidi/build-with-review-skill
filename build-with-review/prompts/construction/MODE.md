@@ -705,9 +705,17 @@ it.**
 1. **C3.1 — Design.** It reads the real tree and writes a `### Design` block into its
    task's section of the plan: steps, exposed signatures, chosen and discarded
    alternatives, behaviours it will test. Not one line of code.
-2. **C3.2 — Design checker.** A subagent it spawns judges that design alone. A finding
-   sends it back to C3.1. **Three logical rounds at most; regenerating an unconsumed
-   result keeps its round.**
+2. **C3.2 — Design checker.** A subagent judges one exact immutable Design generation
+   and returns one strict JSON batch. New candidates use shared impact/probability
+   admission. Prior identities remain public until addressed or carried forward. Rounds
+   1 through 9 require one complete correction account before another manifest. At round
+   10, the implementer records one exact `design.review.resolved` settlement. Zero
+   accepted findings can authorize implementation and preserve alternatives in
+   `### Disagreement`. An accepted defect stops before implementation and fails through
+   C3.9b, C3.9c or C3.9d; C3.9a is not valid. **Ten logical rounds at most; regenerating
+   an unconsumed physical result keeps its round. Round 10 never allocates round 11.**
+   A human `pause` or `abort` can still stop immediately. Its durable stop note preserves
+   an accepted final Design obligation for the next attempt.
 3. **C3.3 — Implement.** Step by step. It never invents behaviour the plan does not
    state.
 4. **C3.4 — Free work and the ordinary gate.** It runs any commands it needs. When it
@@ -876,9 +884,16 @@ the workspace. After that block, the message gives these role inputs, and nothin
 
    When the previous failure carries an accepted round-10 defect, the report path is
    mandatory in `attempt-started.sh` as well as the message. The start freezes its exact
-   journal and artifact proof. The first code-checker manifest gives every accepted
-   identity to the checker as required retry input. A missing or different path refuses
-   before the attempt mark moves.
+   journal and artifact proof. The first design- or code-checker manifest, according to
+   the source obligation, gives every accepted identity to the checker as required retry
+   input. A missing or different path refuses before the attempt mark moves.
+
+   One stopped accepted Design settlement is the exact exception to the report path.
+   `paused` or `aborted` freezes its immutable verdict, settlement, result hash and
+   accepted identities directly. Pass `-` to `attempt-started.sh`. The start freezes the
+   stop proof, and the first Design manifest carries every accepted identity. This is not
+   a reportless failure close. Another stop propagates the same proof until a successful
+   retry consumes it.
 
 **It builds its own paths from the lot.** The plan is at `<workspace>/plans/<lot>-plan.md`,
 the repository copy is `plan-publish.sh`'s business, and a past task is read with
@@ -972,7 +987,7 @@ immutable checker result, every disposition and the report hash before its first
 preserve or reset gesture. The resulting `attempt.failed` binds that artifact. Pass its
 exact workspace-relative path as argument four to the next `attempt-started.sh` call.
 That obligation propagates through another failed retry and ends only after a successful
-attempt whose code checker consumed it.
+attempt whose matching design or code checker consumed it.
 
 **You hand that path to the next attempt, which reads the file itself.** That is why it is
 a file and not a message: your context is not the only place that failure can live, and a
@@ -1475,6 +1490,12 @@ pause must not erase**, and three windows hold one:
 note exists for — and the resume routes on it: the C3.9 table as written, rewind and
 re-cut included, never the blanket default.**
 
+If round 10 already has a complete settlement with any `accepted` Design item, the stop
+note also receives the exact immutable Design obligation. The stop does not wait for a
+failure report. A later attempt cannot start as an ordinary reportless retry: it passes
+`-`, freezes the stop proof, and gives every accepted identity to Design round 1. A stop
+with no settlement, or a settlement with zero accepted items, keeps the ordinary route.
+
 **The code:**
 
 | | |
@@ -1517,6 +1538,7 @@ git clean -fd            # the reset does not remove the files the task created
 
 progress.py note paused --task <N> --text-file "$JOURNAL_TEXT_FILE" --data '{"sha":"<sha>","attempt":<K>}'
 progress.py note aborted --task <N> --data '{"sha":"<sha>","attempt":<K>}'
+# progress.py derives and adds any accepted final Design obligation or inherited retry
 ```
 
 **It prints the SHA of the last validated task**, and on a pause the SHA of the preserved

@@ -41,7 +41,7 @@ fi
     || die "construction has a consumed checker or diagnostic verdict without its exact durable proof.
 Recover that logical spend and physical result before starting another attempt. Nothing was marked and no session exists."
 RETRY_PROOF=$("$PROGRESS" construction-retry-check "$LOT" "$N" "$RETRY_REPORT") \
-    || die "the retry input does not consume the current accepted code-review obligation.
+    || die "the retry input does not consume the current accepted checker obligation.
 Nothing was marked and no session exists."
 [[ $RETRY_PROOF = - || $RETRY_PROOF =~ ^[0-9]+:[0-9a-f]{64}$ ]] \
     || die "the retry obligation proof is malformed. Nothing was marked and no session exists."

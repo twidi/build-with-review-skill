@@ -314,6 +314,8 @@ pause)
         DATA="{\"sha\":\"$SHA\",\"op\":\"$BARE_STOP_OP\"}"
     else
         SHA=$(git rev-parse HEAD)
+        # progress.py derives any accepted final Design obligation or inherited
+        # retry from the durable journal before this attempt identity is removed.
         DATA="{\"sha\":\"$SHA\",\"attempt\":$K}"
     fi
     NOTE=("$WORKSPACE/prompts/common/progress.py" note paused
@@ -362,6 +364,8 @@ $REMOVED"
         NOTE=("$WORKSPACE/prompts/common/progress.py" note aborted
             --text "$PRESERVED" --data "$DATA")
     else
+        # progress.py derives any accepted final Design obligation or inherited
+        # retry from the durable journal before this attempt identity is removed.
         DATA="{\"sha\":\"$SHA\",\"attempt\":$K}"
         NOTE=("$WORKSPACE/prompts/common/progress.py" note aborted
             ${CTX[@]+"${CTX[@]}"} --data "$DATA")

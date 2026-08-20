@@ -151,23 +151,25 @@ sentences about the product, never test names.
 
 ## The `### Disagreement` block
 
-Written only when the implementer decided after a final disagreement: design-checker
-round 3 or code-checker round 10.
+Written only when the implementer decided after design-checker or code-checker round 10.
 
 ```markdown
 ### Disagreement
+#### Finding 1 — design alternative
+The design checker held that the lock belongs in the service.
+I kept it at the task boundary because both routes satisfy the accepted ownership rule.
+
 #### Finding 2 — code alternative
 The code checker held that the ownership test belongs in the service.
 I kept it in the view because the service is also called by a channel with no request.
 Both implementations satisfy the plan's lock constraint.
 ```
 
-For a code-checker disagreement, use one exact
-`#### Finding N — code alternative` section per alternative.
-Preserve the round-10 finding number. Each section says what the checker held, what was
-done instead, and why the accepted plan permits both. A refuted finding and an accepted
-defect do not belong here. A design-checker disagreement keeps the original three-line
-form because its result has no numbered final-batch settlement.
+Use one exact `#### Finding N — design alternative` or
+`#### Finding N — code alternative` section per alternative. Preserve the round-10
+finding number. Each section says what the checker held, what was done instead, and why
+the accepted plan permits both. A refuted finding and an accepted defect do not belong
+here.
 
 **Its own heading, never buried inside `Design`.** The product review has to find it
 without reading the whole plan.

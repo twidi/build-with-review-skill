@@ -160,6 +160,34 @@ def committed_plan_state(lot, task, revision):
     return plan_state_bytes(result.stdout, lot, task, relative)
 
 
+def appended_disagreement_headings(content, base_sha256, heading, subject):
+    section_lines = content.decode("utf-8").splitlines(keepends=True)
+    all_headings = [(index, int(match.group(1))) for index, line in enumerate(section_lines)
+                    if (match := heading.fullmatch(line.rstrip("\r\n")))]
+    boundaries = [index for index, _ in all_headings] + [len(section_lines)]
+    matching_boundaries = []
+    for boundary in boundaries:
+        prefix_lines = list(section_lines[:boundary])
+        while prefix_lines and not prefix_lines[-1].strip():
+            prefix_lines.pop()
+        prefix = ("".join(prefix_lines).rstrip("\r\n") + "\n").encode("utf-8") \
+            if prefix_lines else b""
+        identity = None if prefix in {b"", b"### Disagreement\n"} else sha256(prefix)
+        if identity == base_sha256:
+            matching_boundaries.append(boundary)
+    if len(matching_boundaries) != 1:
+        refuse(f"{subject} changed the prior Disagreement bytes")
+    boundary = matching_boundaries[0]
+    current = [(index, finding) for index, finding in all_headings if index >= boundary]
+    current_indexes = {index for index, _ in current}
+    if any(
+        line.startswith("#### Finding ") and index not in current_indexes
+        for index, line in enumerate(section_lines[boundary:], boundary)
+    ):
+        refuse(f"{subject} has a malformed appended finding heading")
+    return section_lines, current
+
+
 def disagreement_state(lot, task, base_sha256, expected):
     task = validate_identity(lot, task)
     if base_sha256 != "-" and not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
@@ -176,20 +204,11 @@ def disagreement_state(lot, task, base_sha256, expected):
         if base_sha256 or expected_ids:
             refuse("the final plan lost its accepted Disagreement section")
         return {"disagreement_sha256": None, "findings": []}
-    text = content.decode("utf-8")
-    code_heading = re.compile(r"^#### Finding ([1-9][0-9]*) — code alternative$")
-    section_lines = text.splitlines(keepends=True)
-    headings = [(index, int(match.group(1))) for index, line in enumerate(section_lines)
-                if (match := code_heading.fullmatch(line.rstrip("\r\n")))]
-    first_code = headings[0][0] if headings else len(section_lines)
-    prefix_lines = section_lines[:first_code]
-    while prefix_lines and not prefix_lines[-1].strip():
-        prefix_lines.pop()
-    prefix = ("".join(prefix_lines).rstrip("\r\n") + "\n").encode("utf-8") \
-        if prefix_lines else b""
-    prefix_identity = None if prefix in {b"", b"### Disagreement\n"} else sha256(prefix)
-    if prefix_identity != base_sha256:
-        refuse("the code-review resolution changed the accepted Design Disagreement")
+    section_lines, headings = appended_disagreement_headings(
+        content, base_sha256,
+        re.compile(r"^#### Finding ([1-9][0-9]*) — code alternative$"),
+        "the code-review resolution",
+    )
     found = [finding for _, finding in headings]
     if found != expected_ids:
         refuse("the Disagreement section does not name every alternative exactly once and in order")
@@ -197,6 +216,37 @@ def disagreement_state(lot, task, base_sha256, expected):
         end_index = headings[position + 1][0] if position + 1 < len(headings) else len(section_lines)
         if not any(line.strip() for line in section_lines[start_index + 1:end_index]):
             refuse(f"the Disagreement code alternative for finding {finding} has no explanation")
+    return {"disagreement_sha256": sha256(content), "findings": found}
+
+
+def design_disagreement_state(lot, task, base_sha256, expected):
+    task = validate_identity(lot, task)
+    if base_sha256 != "-" and not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
+        refuse("the prior Design Disagreement identity is malformed")
+    base_sha256 = None if base_sha256 == "-" else base_sha256
+    expected_ids = [] if expected == "-" else [int(value) for value in expected.split(",")]
+    if expected_ids != sorted(set(expected_ids)) or any(value < 1 for value in expected_ids):
+        refuse("the expected design-alternative identities are malformed")
+    path = real_workspace_file(f"plans/{lot}-plan.md", "the construction plan")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start, end = task_slice(lines, task)
+    section_range, content = named_section(lines, start, end, "### Disagreement")
+    if section_range is None:
+        if base_sha256 or expected_ids:
+            refuse("the final Design has no required Disagreement section")
+        return {"disagreement_sha256": None, "findings": []}
+    section_lines, headings = appended_disagreement_headings(
+        content, base_sha256,
+        re.compile(r"^#### Finding ([1-9][0-9]*) — design alternative$"),
+        "the design-review settlement",
+    )
+    found = [finding for _, finding in headings]
+    if found != expected_ids:
+        refuse("the Disagreement section does not name every design alternative exactly once")
+    for position, (start_index, finding) in enumerate(headings):
+        end_index = headings[position + 1][0] if position + 1 < len(headings) else len(section_lines)
+        if not any(line.strip() for line in section_lines[start_index + 1:end_index]):
+            refuse(f"the Design alternative for finding {finding} has no explanation")
     return {"disagreement_sha256": sha256(content), "findings": found}
 
 
@@ -323,6 +373,62 @@ def manifest(lot, task, attempt, round_number, gate, base, tree):
     return {"path": str(relative), "sha256": sha256(payload), "tree": tree, "files": len(files)}
 
 
+def design_manifest(lot, task, attempt, round_number):
+    task = validate_identity(lot, task)
+    if not TASK_RE.fullmatch(str(attempt)) or not TASK_RE.fullmatch(str(round_number)) \
+            or int(round_number) > 10:
+        refuse("the design-review attempt or round identity is malformed")
+    state = plan_state(lot, task)
+    document = {
+        "schema": 1,
+        "lot": lot,
+        "task": task,
+        "attempt": int(attempt),
+        "round": int(round_number),
+        **state,
+        "previous": read_design_previous_account(int(round_number)),
+    }
+    payload = (json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ) + "\n").encode()
+    relative = pathlib.PurePosixPath(
+        "reports", "construction", lot,
+        f"task-{task}-attempt-{attempt}-design-round-{round_number}-manifest.json",
+    )
+    atomic_publish(str(relative), payload, "the design-review manifest")
+    return {"path": str(relative), "sha256": sha256(payload)}
+
+
+def load_design_manifest(relative):
+    path = real_workspace_file(relative, "the design-review manifest")
+    payload = path.read_bytes()
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        refuse(f"the design-review manifest is invalid JSON: {exc}")
+    required = {
+        "schema", "lot", "task", "attempt", "round", "plan", "plan_sha256",
+        "plan_projection_sha256", "plan_ownership_sha256", "contract_sha256",
+        "design_sha256", "disagreement_sha256", "previous",
+    }
+    if not isinstance(document, dict) or set(document) != required \
+            or document.get("schema") != 1:
+        refuse("the design-review manifest has an invalid shape")
+    task = validate_identity(document.get("lot"), document.get("task"))
+    if not TASK_RE.fullmatch(str(document.get("attempt"))) \
+            or not TASK_RE.fullmatch(str(document.get("round"))) \
+            or document["round"] > 10:
+        refuse("the design-review manifest has a malformed generation identity")
+    validate_design_previous_account(document["previous"], document["round"])
+    expected_relative = str(pathlib.PurePosixPath(
+        "reports", "construction", document["lot"],
+        f"task-{task}-attempt-{document['attempt']}-design-round-{document['round']}-manifest.json",
+    ))
+    if relative != expected_relative:
+        refuse("the design-review manifest path contradicts its generation identity")
+    return path, payload, document
+
+
 def load_manifest(relative):
     path = real_workspace_file(relative, "the code-review manifest")
     payload = path.read_bytes()
@@ -415,6 +521,80 @@ def validate_previous_account(account, round_number):
     ) or [item.get("id") for item in resolution] != expected_ids:
         refuse("the prior batch has no complete correction account")
     return account
+
+
+def validate_design_previous_account(account, round_number):
+    if round_number == 1 and account is None:
+        return None
+    required = {
+        "source", "result", "result_sha256", "findings", "resolution",
+        "resolution_proof",
+    }
+    if not isinstance(account, dict):
+        refuse("the prior design-review account is malformed")
+    if account.get("source") == "round":
+        required.add("round")
+        if round_number == 1 or account.get("round") != round_number - 1:
+            refuse("the prior design-review account has the wrong logical round")
+        statuses = {"corrected", "unchanged"}
+        contiguous_identities = True
+    elif account.get("source") == "retry":
+        required.add("failure")
+        if round_number != 1 or not re.fullmatch(
+            r"[0-9]+:[0-9a-f]{64}", account.get("failure", ""),
+        ):
+            refuse("the design retry account has a malformed failure proof")
+        statuses = {"accepted"}
+        contiguous_identities = False
+    else:
+        refuse("the prior design-review account has an unknown source")
+    if set(account) != required \
+            or not isinstance(account.get("result"), str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", account.get("result_sha256", "")) \
+            or not re.fullmatch(r"[0-9]+:[0-9a-f]{64}", account.get("resolution_proof", "")):
+        refuse("the prior design-review account has an invalid shape")
+    result_path = real_workspace_file(account["result"], "the prior design-checker result")
+    if sha256(result_path.read_bytes()) != account["result_sha256"]:
+        refuse("the prior design-checker result changed")
+    findings = account.get("findings")
+    identities = [item.get("id") for item in findings] if isinstance(findings, list) else []
+    if contiguous_identities:
+        identities_invalid = identities != list(range(1, len(findings) + 1))
+    else:
+        identities_invalid = identities != sorted(set(identities)) or any(
+            not TASK_RE.fullmatch(str(identity)) for identity in identities
+        )
+    if not findings or identities_invalid or any(
+        not isinstance(item, dict) or set(item) != {"id", "where", "what", "why", "impact"}
+        or item.get("impact") not in IMPACTS
+        or any(not isinstance(item.get(key), str) or not item[key].strip()
+               for key in ("where", "what", "why"))
+        for item in findings
+    ):
+        refuse("the prior design-review batch has malformed findings")
+    resolution = account.get("resolution")
+    if not isinstance(resolution, list) or len(resolution) != len(findings) \
+            or [item.get("id") for item in resolution] != identities or any(
+                not isinstance(item, dict) or set(item) != {"id", "status", "evidence"}
+                or item.get("status") not in statuses
+                or not isinstance(item.get("evidence"), str) or not item["evidence"].strip()
+                for item in resolution
+            ):
+        refuse("the prior design-review batch has no complete resolution account")
+    return account
+
+
+def read_design_previous_account(round_number):
+    payload = sys.stdin.buffer.read()
+    if not payload.strip():
+        if round_number == 1:
+            return None
+        refuse("a later design-review round has no prior resolution account")
+    try:
+        account = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        refuse(f"the prior design-review account is invalid JSON: {exc}")
+    return validate_design_previous_account(account, round_number)
 
 
 def read_previous_account(round_number):
@@ -527,6 +707,56 @@ def read_plan_generation(relative, kind):
     sys.stdout.buffer.write(payload)
 
 
+def read_design_generation(relative, kind):
+    _, _, document = load_design_manifest(relative)
+    if kind not in {"contract", "design"}:
+        refuse("the design-generation read kind must be contract or design")
+    state = plan_state(document["lot"], document["task"])
+    for key in (
+        "contract_sha256", "design_sha256", "plan_projection_sha256",
+        "plan_ownership_sha256", "disagreement_sha256",
+    ):
+        if state[key] != document[key]:
+            refuse("the living plan no longer matches the frozen design-review generation")
+    path = real_workspace_file(state["plan"], "the construction plan")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start, end = task_slice(lines, document["task"])
+    if kind == "contract":
+        ranges = [named_section(lines, start, end, heading)[0]
+                  for heading in ("### Design", "### Disagreement")]
+        stop = min((item[0] for item in ranges if item), default=end)
+        while stop > start and not lines[stop - 1].strip():
+            stop -= 1
+        payload = ("".join(lines[start:stop]).rstrip("\r\n") + "\n").encode("utf-8")
+        expected = document["contract_sha256"]
+    else:
+        _, payload = named_section(lines, start, end, "### Design")
+        expected = document["design_sha256"]
+    if sha256(payload) != expected:
+        refuse(f"the exact {kind} bytes contradict the design-review manifest")
+    sys.stdout.buffer.write(payload)
+
+
+def design_previous_count(relative):
+    _, _, document = load_design_manifest(relative)
+    previous = document["previous"]
+    print(len(previous["findings"]) if previous else 0)
+
+
+def design_previous_item(relative, item_number):
+    _, _, document = load_design_manifest(relative)
+    if not TASK_RE.fullmatch(str(item_number)):
+        refuse("the prior design finding identity is malformed")
+    previous = document["previous"]
+    if previous is None or int(item_number) > len(previous["findings"]):
+        refuse("the design-review manifest has no requested prior finding")
+    index = int(item_number) - 1
+    print(json.dumps({
+        "finding": previous["findings"][index],
+        "resolution": previous["resolution"][index],
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 def strict_result(manifest_relative, source):
     _, _, frozen = load_manifest(manifest_relative)
     source = pathlib.Path(source)
@@ -618,6 +848,88 @@ def strict_result(manifest_relative, source):
     }
 
 
+def strict_design_result(manifest_relative, source):
+    _, manifest_payload, frozen = load_design_manifest(manifest_relative)
+    source = pathlib.Path(source)
+    if not source.is_file() or source.is_symlink():
+        refuse("the physical design-checker result source is not one real regular file")
+    raw = source.read_bytes()
+    try:
+        report = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        refuse(f"the physical design-checker result is not complete JSON: {exc}")
+    if not isinstance(report, dict) or set(report) != {
+        "verdict", "manifest", "checks", "previous", "findings",
+    } or report.get("verdict") not in {"clean", "findings"} \
+            or report.get("manifest") != manifest_relative:
+        refuse("the physical design-checker result has an invalid top-level shape")
+    checks = report["checks"]
+    if not isinstance(checks, list) or len(checks) not in {2, 3} or any(
+        not isinstance(item, dict) or set(item) != {"subject", "evidence"}
+        or not isinstance(item.get("subject"), str) or not item["subject"].strip()
+        or not isinstance(item.get("evidence"), str) or not item["evidence"].strip()
+        for item in checks
+    ):
+        refuse("the physical design-checker result has no exact checked evidence account")
+    prior = frozen["previous"]
+    prior_ids = [item["id"] for item in prior["findings"]] if prior else []
+    previous = report["previous"]
+    if not isinstance(previous, list) or len(previous) != len(prior_ids) or any(
+        not isinstance(item, dict) or set(item) != {"id", "status", "evidence"}
+        or item.get("status") not in {"addressed", "still-open"}
+        or not isinstance(item.get("evidence"), str) or not item["evidence"].strip()
+        for item in previous
+    ) or [item.get("id") for item in previous] != prior_ids:
+        refuse("the physical design-checker result does not verify every prior finding exactly once")
+    findings = report["findings"]
+    if not isinstance(findings, list) or any(
+        not isinstance(item, dict) or set(item) != {
+            "id", "where", "what", "why", "impact", "previous",
+        }
+        or not TASK_RE.fullmatch(str(item.get("id")))
+        or item.get("impact") not in IMPACTS
+        or any(not isinstance(item.get(key), str) or not item[key].strip()
+               for key in ("where", "what", "why"))
+        or not isinstance(item.get("previous"), list)
+        or item["previous"] != sorted(set(item["previous"]))
+        or any(identity not in prior_ids for identity in item["previous"])
+        for item in findings
+    ) or [item["id"] for item in findings] != list(range(1, len(findings) + 1)):
+        refuse("the physical design-checker result has malformed or non-contiguous findings")
+    still_open = [item["id"] for item in previous if item["status"] == "still-open"]
+    carried = [identity for finding in findings for identity in finding["previous"]]
+    if carried != still_open:
+        refuse("the physical design-checker result drops, duplicates or invents a still-open prior finding")
+    prior_impacts = {item["id"]: item["impact"] for item in prior["findings"]} if prior else {}
+    for finding in findings:
+        if finding["previous"]:
+            strongest = max(
+                (prior_impacts[identity] for identity in finding["previous"]),
+                key=IMPACT_RANK.__getitem__,
+            )
+            if IMPACT_RANK[finding["impact"]] < IMPACT_RANK[strongest]:
+                refuse("a carried design finding lowers its previously admitted impact")
+    outcome = "clean" if not findings else "findings"
+    if report["verdict"] != outcome:
+        refuse("the physical design-checker verdict contradicts its exact findings")
+    canonical = (json.dumps(
+        report, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ) + "\n").encode()
+    result_relative = manifest_relative.removesuffix("-manifest.json") + "-result.json"
+    atomic_publish(result_relative, canonical, "the physical design-checker result")
+    return {
+        "outcome": outcome,
+        "findings": len(findings),
+        "critical": sum(item["impact"] == "CRITICAL" for item in findings),
+        "important": sum(item["impact"] == "IMPORTANT" for item in findings),
+        "minor": sum(item["impact"] == "MINOR" for item in findings),
+        "report": result_relative,
+        "report_sha256": sha256(canonical),
+        "manifest": manifest_relative,
+        "manifest_sha256": sha256(manifest_payload),
+    }
+
+
 def final_tree(manifest_relative, current_tree, resolved_disagreement="-"):
     _, _, frozen = load_manifest(manifest_relative)
     if not re.fullmatch(r"[0-9a-f]{40,64}", current_tree):
@@ -657,8 +969,12 @@ def main():
         print(json.dumps(committed_plan_state(*args), separators=(",", ":"), sort_keys=True))
     elif command == "disagreement" and len(args) == 4:
         print(json.dumps(disagreement_state(*args), separators=(",", ":"), sort_keys=True))
+    elif command == "design-disagreement" and len(args) == 4:
+        print(json.dumps(design_disagreement_state(*args), separators=(",", ":"), sort_keys=True))
     elif command == "manifest" and len(args) == 7:
         print(json.dumps(manifest(*args), separators=(",", ":"), sort_keys=True))
+    elif command == "design-manifest" and len(args) == 4:
+        print(json.dumps(design_manifest(*args), separators=(",", ":"), sort_keys=True))
     elif command == "read" and len(args) == 5:
         read_candidate(*args)
     elif command == "count" and len(args) == 1:
@@ -673,8 +989,16 @@ def main():
         previous_item(*args)
     elif command == "read-plan" and len(args) == 2:
         read_plan_generation(*args)
+    elif command == "read-design" and len(args) == 2:
+        read_design_generation(*args)
+    elif command == "design-previous-count" and len(args) == 1:
+        design_previous_count(*args)
+    elif command == "design-previous-item" and len(args) == 2:
+        design_previous_item(*args)
     elif command == "publish-result" and len(args) == 2:
         print(json.dumps(strict_result(*args), separators=(",", ":"), sort_keys=True))
+    elif command == "publish-design-result" and len(args) == 2:
+        print(json.dumps(strict_design_result(*args), separators=(",", ":"), sort_keys=True))
     elif command == "final-tree" and len(args) in {2, 3}:
         final_tree(*args)
     else:

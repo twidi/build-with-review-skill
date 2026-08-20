@@ -71,7 +71,8 @@ NOTE_KINDS = {
     "spec.breach.opened", "spec.breach.corrected", "spec.breach.restored", "spec.edit.ready",
     "ruling.applied", "decision.batch.closed",
     "not-converging", "sublot.oversized", "reach.not-closed", "bound.spent",
-    "rewind.done", "fixer.dispatched", "verdict.consumed", "code.review.resolved",
+    "rewind.done", "fixer.dispatched", "verdict.consumed", "design.review.resolved",
+    "code.review.resolved",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -100,11 +101,13 @@ AMENDMENT_REACH_LABELS = (
     "frontier",
 )
 CONSTRUCTION_CHECKERS = {"design": "design-checker", "code": "code-checker"}
-CONSTRUCTION_CHECKER_ROUNDS = {"design": 3, "code": 10}
+CONSTRUCTION_CHECKER_ROUNDS = {"design": 10, "code": 10}
 CONSTRUCTION_CLASSIFICATIONS = {"C3.9a", "C3.9b", "C3.9c", "C3.9d"}
 CONSTRUCTION_UNUSABLE_RESULTS = {"error", "empty", "lost", "unusable"}
 CODE_CORRECTION_STATUSES = {"corrected", "unchanged"}
 CODE_FINAL_RESOLUTION_STATUSES = {"accepted", "refuted", "alternative"}
+DESIGN_CORRECTION_STATUSES = {"corrected", "unchanged"}
+DESIGN_FINAL_RESOLUTION_STATUSES = {"accepted", "refuted", "alternative"}
 REPORT_COUNT_KEYS = {"critical", "important", "minor", "decision"}
 SPEC_FIRST_MANDATES = ("enumerator", "verifier", "feasibility", "judge")
 SPEC_LATER_MANDATES = ("enumerator", "ripple", "verifier", "feasibility", "judge")
@@ -2101,8 +2104,6 @@ def construction_logical_identity(entries, context, check, round_number, subject
         if not construction_positive_integer(round_number) or round_number > round_limit:
             fail(f"{subject} requires a logical round from 1 through {round_limit}")
         identity = active_attempt_identity(context, subject)
-        if check != "code":
-            identity.pop("retry", None)
         return {"check": check, **identity, "round": round_number}
     if check == "diagnostic":
         if round_number is not None:
@@ -2193,10 +2194,22 @@ def construction_design_proof(entries, before, identity, generation, subject):
     if data.get("outcome") == "clean":
         if data.get("disagreement_sha256") != generation.get("disagreement_sha256"):
             fail(f"{subject} changed Disagreement after its clean Design verdict")
-    elif data.get("outcome") == "findings" and data.get("round") == 3 \
+    elif data.get("outcome") == "findings" \
+            and data.get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"] \
             and construction_positive_integer(data.get("findings")):
-        if not re.fullmatch(r"[0-9a-f]{64}", generation.get("disagreement_sha256") or ""):
-            fail(f"{subject} has no durable Design Disagreement after the final findings")
+        resolutions = [(position, candidate) for position, candidate in design_resolutions(
+            entries, before, identity["lot"], identity["task"], identity["attempt"],
+        ) if note_data(candidate).get("round") == data["round"]]
+        if len(resolutions) != 1 or resolutions[0][0] <= index:
+            fail(f"{subject} has no exact final Design settlement")
+        resolution_index, resolution = resolutions[0]
+        resolution_data = note_data(resolution)
+        if resolution_data.get("verdict") != journal_line_proof(index) \
+                or resolution_data.get("accepted") != 0:
+            fail(f"{subject} has an unresolved or accepted final Design defect")
+        if resolution_data.get("disagreement_sha256") != generation.get("disagreement_sha256"):
+            fail(f"{subject} does not carry the exact settled Design Disagreement")
+        return resolution_index
     else:
         fail(f"{subject} has no accepted Design checker result")
     return index
@@ -2222,7 +2235,12 @@ def construction_review_gate(entries, before, base, gate, tree, subject):
 def previous_code_batch(entries, base, subject):
     if base["round"] == 1:
         retry = base.get("retry")
-        return (retry_code_batch(entries, retry, subject), None) if retry else (None, None)
+        if not retry:
+            return None, None
+        _, _, report = accepted_retry_from_proof(entries, retry, subject)
+        if "code_review" not in report:
+            return None, None
+        return retry_code_batch(entries, retry, subject), None
     prior_round = base["round"] - 1
     verdicts = code_verdicts(
         entries, len(entries), base["lot"], base["task"], base["attempt"],
@@ -2387,6 +2405,61 @@ def validate_code_generation_history(entries, before, logical, subject):
         fail(f"{subject} reuses another code round's ordinary gate")
 
 
+def validate_design_generation_history(entries, before, logical, subject):
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if construction_event_matches(entry, logical, "subagent-started")]
+    if not starts:
+        fail(f"{subject} has no design-checker opening")
+    start_index = starts[0][0]
+    expected_keys = {
+        "check", "lot", "task", "attempt", "round", "plan_manifest", "plan_tasks",
+        "plan_ownership_sha256", "contract_sha256", "design_sha256",
+        "plan_projection_sha256", "disagreement_sha256", "manifest",
+        "manifest_sha256", "retry",
+    }
+    if set(logical) != expected_keys or any(
+        not re.fullmatch(r"[0-9a-f]{64}", logical.get(key, ""))
+        for key in (
+            "plan_ownership_sha256", "contract_sha256", "design_sha256",
+            "plan_projection_sha256", "manifest_sha256",
+        )
+    ) or logical.get("disagreement_sha256") is not None and not re.fullmatch(
+        r"[0-9a-f]{64}", logical.get("disagreement_sha256", ""),
+    ):
+        fail(f"{subject} has a malformed exact design-review generation")
+    manifest_path = exact_real_file(
+        WORKSPACE, logical.get("manifest"), f"{subject}'s design-review manifest",
+    )
+    payload = Path(manifest_path).read_bytes()
+    if sha256_bytes(payload) != logical["manifest_sha256"]:
+        fail(f"{subject}'s design-review manifest changed")
+    try:
+        manifest = json.loads(payload)
+    except (UnicodeError, ValueError) as exc:
+        fail(f"{subject}'s design-review manifest is malformed", exc)
+    expected_manifest = {
+        "lot": logical["lot"], "task": logical["task"],
+        "attempt": logical["attempt"], "round": logical["round"],
+        "plan_ownership_sha256": logical["plan_ownership_sha256"],
+        "contract_sha256": logical["contract_sha256"],
+        "design_sha256": logical["design_sha256"],
+        "plan_projection_sha256": logical["plan_projection_sha256"],
+        "disagreement_sha256": logical["disagreement_sha256"],
+    }
+    if not isinstance(manifest, dict) or any(
+        manifest.get(key) != value for key, value in expected_manifest.items()
+    ):
+        fail(f"{subject}'s design-review manifest contradicts its frozen generation")
+    prior = design_verdicts(
+        entries, start_index, logical["lot"], logical["task"], logical["attempt"],
+    )
+    if len(prior) != logical["round"] - 1:
+        fail(f"{subject} has the wrong number of prior design-review generations")
+    expected_previous = design_previous_batch(entries[:start_index], logical, subject)
+    if manifest.get("previous") != expected_previous:
+        fail(f"{subject}'s design manifest changes its prior findings account")
+
+
 def construction_event_matches(entry, logical, event):
     if entry.get("event") != event:
         return False
@@ -2409,10 +2482,37 @@ def construction_result_shape(data, logical, call, subject):
             fail(f"{subject} has an invalid unusable-result reason")
         return False
     if logical["check"] == "design":
-        findings = data.get("findings")
-        if set(data) != {*base, "findings"} or data != {**base, "findings": findings} \
-                or not isinstance(findings, int) or isinstance(findings, bool) or findings < 0:
-            fail(f"{subject} has an invalid checker finding count")
+        result_keys = {
+            "outcome", "findings", "critical", "important", "minor",
+            "report", "report_sha256", "manifest", "manifest_sha256",
+        }
+        if set(data) != {*base, *result_keys} \
+                or data.get("outcome") not in {"clean", "findings"} \
+                or not isinstance(data.get("findings"), int) \
+                or isinstance(data.get("findings"), bool) or data["findings"] < 0 \
+                or any(not isinstance(data.get(key), int) or isinstance(data.get(key), bool)
+                       or data[key] < 0 for key in ("critical", "important", "minor")) \
+                or data["findings"] != data["critical"] + data["important"] + data["minor"] \
+                or data["outcome"] != ("clean" if data["findings"] == 0 else "findings") \
+                or data.get("manifest") != logical.get("manifest") \
+                or data.get("manifest_sha256") != logical.get("manifest_sha256") \
+                or not isinstance(data.get("report"), str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", data.get("report_sha256", "")):
+            fail(f"{subject} has an invalid audited design-checker result")
+        audit = subprocess.run(
+            [sys.executable, CONSTRUCTION_REVIEW, "publish-design-result",
+             logical["manifest"], os.path.join(WORKSPACE, data["report"])],
+            capture_output=True, text=True,
+        )
+        if audit.returncode != 0:
+            fail(f"{subject}'s design-checker result artifact is invalid",
+                 audit.stderr or audit.stdout)
+        try:
+            expected = json.loads(audit.stdout)
+        except ValueError:
+            fail(f"{subject}'s design-checker result audit returned malformed JSON")
+        if any(data.get(key) != value for key, value in expected.items()):
+            fail(f"{subject}'s design-checker result contradicts its immutable artifact")
         return True
     if logical["check"] == "code":
         result_keys = {
@@ -2566,6 +2666,29 @@ def normalize_construction_started(entries, data, context, check, round_number):
             generation = construction_review_generation(
                 entries, logical, data.get("gate"), "the code-checker opening",
             )
+        else:
+            previous_account = design_previous_batch(
+                entries, {**logical, **generation}, "the design-checker opening",
+            )
+            manifest = subprocess.run(
+                [sys.executable, CONSTRUCTION_REVIEW, "design-manifest",
+                 logical["lot"], str(logical["task"]), str(logical["attempt"]),
+                 str(logical["round"])],
+                input=json.dumps(previous_account) if previous_account else "",
+                capture_output=True, text=True,
+            )
+            if manifest.returncode != 0:
+                fail("the design-checker opening cannot freeze its exact generation",
+                     manifest.stderr or manifest.stdout)
+            try:
+                frozen_manifest = json.loads(manifest.stdout)
+            except ValueError:
+                fail("the design-review manifest helper returned malformed JSON")
+            generation = {
+                **generation,
+                "manifest": frozen_manifest.get("path"),
+                "manifest_sha256": frozen_manifest.get("sha256"),
+            }
         logical = {**logical, **generation}
     paired = construction_physical_calls(
         entries, len(entries), logical, f"the {check} logical round", require_closed=True,
@@ -2628,8 +2751,20 @@ def normalize_construction_ended(entries, data, context, check, round_number):
         fail(f"a {check} physical result requires structured data")
     if set(data) == {"unusable"}:
         result = {**logical, "call": call, "unusable": data.get("unusable")}
-    elif check == "design" and set(data) == {"findings"}:
-        result = {**logical, "call": call, "findings": data.get("findings")}
+    elif check == "design" and set(data) == {"result"} \
+            and isinstance(data.get("result"), str) and data["result"]:
+        audit = subprocess.run(
+            [sys.executable, CONSTRUCTION_REVIEW, "publish-design-result",
+             logical["manifest"], data["result"]], capture_output=True, text=True,
+        )
+        if audit.returncode != 0:
+            fail("the design-checker physical result is not one complete audited result",
+                 audit.stderr or audit.stdout)
+        try:
+            outcome = json.loads(audit.stdout)
+        except ValueError:
+            fail("the design-checker result helper returned malformed JSON", audit.stdout)
+        result = {**logical, "call": call, **outcome}
     elif check == "code" and set(data) == {"result"} \
             and isinstance(data.get("result"), str) and data["result"]:
         audit = subprocess.run(
@@ -2656,13 +2791,9 @@ def construction_expected_verdict(logical, result, text):
     result_data = note_data(result)
     call = result_data["call"]
     if logical["check"] == "design":
-        findings = result_data["findings"]
-        outcome = "clean" if findings == 0 else "findings"
-        if outcome == "clean" and text is not None:
-            fail(f"a clean {logical['check']} verdict takes no findings text")
-        if outcome == "findings" and (not isinstance(text, str) or not text.strip()):
-            fail(f"an adverse {logical['check']} verdict requires its exact findings text")
-        return {**logical, "call": call, "outcome": outcome, "findings": findings}
+        if text is not None:
+            fail("a design-checker verdict derives its evidence from the immutable result artifact")
+        return dict(result_data)
     if logical["check"] == "code":
         if text is not None:
             fail("a code-checker verdict derives its evidence from the immutable result artifact")
@@ -2725,7 +2856,11 @@ def validate_construction_verdict_entry(entries, index, entry):
     logical = construction_frozen_logical(
         entries, index, base, "a durable construction verdict",
     ) if check in CONSTRUCTION_CHECKERS else base
-    if check == "code":
+    if check == "design":
+        validate_design_generation_history(
+            entries, index, logical, "a durable construction verdict",
+        )
+    elif check == "code":
         validate_code_generation_history(
             entries, index, logical, "a durable construction verdict",
         )
@@ -2798,6 +2933,76 @@ def code_resolution_text_items(text, subject, statuses):
     return items
 
 
+def design_verdicts(entries, before, lot, task, attempt):
+    return [(index, entry) for index, entry in enumerate(entries[:before])
+            if entry.get("event") == "note" and entry.get("kind") == "verdict.consumed"
+            and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("attempt") == attempt and note_data(entry).get("check") == "design"]
+
+
+def design_resolutions(entries, before, lot, task, attempt):
+    return [(index, entry) for index, entry in enumerate(entries[:before])
+            if entry.get("event") == "note" and entry.get("kind") == "design.review.resolved"
+            and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("attempt") == attempt]
+
+
+def design_previous_batch(entries, base, subject):
+    if base["round"] == 1:
+        retry = base.get("retry")
+        if not retry:
+            return None
+        _, _, report = accepted_retry_from_proof(entries, retry, subject)
+        if "design_review" not in report:
+            return None
+        return retry_design_batch(entries, retry, subject)
+    prior_round = base["round"] - 1
+    verdicts = [(index, entry) for index, entry in design_verdicts(
+        entries, len(entries), base["lot"], base["task"], base["attempt"],
+    ) if note_data(entry).get("round") == prior_round]
+    resolutions = [(index, entry) for index, entry in design_resolutions(
+        entries, len(entries), base["lot"], base["task"], base["attempt"],
+    ) if note_data(entry).get("round") == prior_round]
+    if len(verdicts) != 1 or note_data(verdicts[0][1]).get("outcome") != "findings" \
+            or len(resolutions) != 1 or resolutions[0][0] <= verdicts[0][0]:
+        fail(f"{subject} has no exact prior findings and resolution account")
+    verdict_index, verdict = verdicts[0]
+    resolution_index, resolution = resolutions[0]
+    verdict_data = note_data(verdict)
+    resolution_data = note_data(resolution)
+    if resolution_data.get("verdict") != journal_line_proof(verdict_index):
+        fail(f"{subject}'s prior resolution belongs to another design verdict")
+    if resolution_data.get("next_design_sha256") != base.get("design_sha256") \
+            or resolution_data.get("next_plan_projection_sha256") != base.get(
+                "plan_projection_sha256"
+            ):
+        fail(f"{subject} does not use the exact Design produced by its prior correction")
+    result_path = exact_real_file(
+        WORKSPACE, verdict_data.get("report"), f"{subject}'s prior design-checker result",
+    )
+    payload = Path(result_path).read_bytes()
+    if sha256_bytes(payload) != verdict_data.get("report_sha256"):
+        fail(f"{subject}'s prior design-checker result changed")
+    try:
+        result = json.loads(payload)
+    except (UnicodeError, ValueError) as exc:
+        fail(f"{subject}'s prior design-checker result is malformed", exc)
+    findings = result.get("findings") if isinstance(result, dict) else None
+    if not isinstance(findings, list) or len(findings) != verdict_data.get("findings"):
+        fail(f"{subject}'s prior design-checker result has no exact findings batch")
+    return {
+        "source": "round", "round": prior_round,
+        "result": verdict_data["report"],
+        "result_sha256": verdict_data["report_sha256"],
+        "findings": [
+            {key: item[key] for key in ("id", "where", "what", "why", "impact")}
+            for item in findings
+        ],
+        "resolution": resolution_data["items"],
+        "resolution_proof": journal_line_proof(resolution_index),
+    }
+
+
 def code_verdicts(entries, before, lot, task, attempt):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "verdict.consumed"
@@ -2820,6 +3025,64 @@ def journal_entry_from_proof(entries, proof, subject):
     if index >= len(entries) or journal_line_proof(index) != proof:
         fail(f"{subject} names no exact durable journal line")
     return index, entries[index]
+
+
+def final_design_failure_handoff(entries, before, lot, task, attempt, subject):
+    verdicts = [(index, entry) for index, entry in design_verdicts(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
+    if not verdicts:
+        return None
+    if len(verdicts) != 1:
+        fail(f"{subject} has more than one final design-checker verdict")
+    verdict_index, verdict = verdicts[0]
+    verdict_data = note_data(verdict)
+    if verdict_data.get("outcome") != "findings":
+        return None
+    resolutions = [(index, entry) for index, entry in design_resolutions(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
+    if not resolutions:
+        return {"unresolved": True}
+    if len(resolutions) != 1 or resolutions[0][0] <= verdict_index:
+        fail(f"{subject} has no one ordered final design-review settlement")
+    resolution_index, resolution = resolutions[0]
+    resolution_data = note_data(resolution)
+    if resolution_data.get("verdict") != journal_line_proof(verdict_index):
+        fail(f"{subject}'s final design settlement belongs to another checker verdict")
+    if resolution_data.get("accepted") == 0:
+        return None
+    if not construction_positive_integer(resolution_data.get("accepted")):
+        fail(f"{subject}'s final design settlement has a malformed accepted count")
+    result_relative = verdict_data.get("report")
+    result_path = exact_real_file(
+        WORKSPACE, result_relative, f"{subject}'s immutable final design-checker result",
+    )
+    payload = Path(result_path).read_bytes()
+    if sha256_bytes(payload) != verdict_data.get("report_sha256"):
+        fail(f"{subject}'s immutable final design-checker result changed")
+    try:
+        result = json.loads(payload)
+    except (UnicodeError, ValueError) as exc:
+        fail(f"{subject}'s immutable final design-checker result is malformed", exc)
+    findings = result.get("findings") if isinstance(result, dict) else None
+    dispositions = resolution_data.get("items")
+    if not isinstance(findings, list) or len(findings) != verdict_data.get("findings") \
+            or not isinstance(dispositions, list) or len(dispositions) != len(findings):
+        fail(f"{subject} has no complete final design batch and disposition account")
+    accepted = [item["id"] for item in dispositions if item.get("status") == "accepted"]
+    if len(accepted) != resolution_data["accepted"]:
+        fail(f"{subject}'s accepted Design count contradicts its exact account")
+    handoff = {
+        "schema": 1,
+        "verdict": journal_line_proof(verdict_index),
+        "resolution": journal_line_proof(resolution_index),
+        "result": result_relative,
+        "result_sha256": verdict_data["report_sha256"],
+        "checker_result": result,
+        "dispositions": dispositions,
+    }
+    return {"unresolved": False, "handoff": handoff, "accepted": accepted}
 
 
 def final_code_failure_handoff(entries, before, lot, task, attempt, subject):
@@ -2882,11 +3145,18 @@ def final_code_failure_handoff(entries, before, lot, task, attempt, subject):
 
 
 def failure_report_state(entries, before, lot, task, attempt, classification, subject):
-    state = final_code_failure_handoff(entries, before, lot, task, attempt, subject)
+    design_state = final_design_failure_handoff(entries, before, lot, task, attempt, subject)
+    code_state = final_code_failure_handoff(entries, before, lot, task, attempt, subject)
+    if design_state is not None and code_state is not None:
+        fail(f"{subject} has both final design and code-review failure obligations")
+    state = design_state if design_state is not None else code_state
     if state is None:
         return None
     if state.get("unresolved"):
-        fail(f"{subject} cannot close unresolved round-10 code-checker findings")
+        fail(f"{subject} cannot close unresolved round-10 checker findings")
+    review = "design" if design_state is not None else "code"
+    if review == "design" and classification == "C3.9a":
+        fail(f"{subject} cannot classify an accepted pre-implementation Design defect as C3.9a")
     relative = f"reports/construction/{lot}-task-{task}-try-{attempt}.md"
     path = exact_real_file(WORKSPACE, relative, f"{subject}'s failure report")
     try:
@@ -2895,8 +3165,8 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
         text = payload.decode("utf-8")
     except UnicodeError as exc:
         fail(f"{subject}'s failure report is not UTF-8", exc)
-    headings = ["## What failed", "## Classification", "## Evidence read",
-                "## Final code-review handoff"]
+    handoff_heading = f"## Final {review}-review handoff"
+    headings = ["## What failed", "## Classification", "## Evidence read", handoff_heading]
     positions = [text.count(heading + "\n") for heading in headings]
     if positions != [1, 1, 1, 1] \
             or not all(text.index(headings[index]) < text.index(headings[index + 1])
@@ -2906,10 +3176,10 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
     if not re.search(rf"(?m)^{re.escape(classification)}(?:\s|$)", classification_block):
         fail(f"{subject}'s failure report contradicts its C3.9 classification")
     match = re.search(
-        r"(?ms)^## Final code-review handoff\n```json\n([^\n]+)\n```\s*$", text,
+        rf"(?ms)^{re.escape(handoff_heading)}\n```json\n([^\n]+)\n```\s*$", text,
     )
     if not match:
-        fail(f"{subject}'s failure report has no exact final code-review handoff block")
+        fail(f"{subject}'s failure report has no exact final {review}-review handoff block")
     try:
         embedded = json.loads(match.group(1))
     except ValueError as exc:
@@ -2919,7 +3189,7 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
     return {
         "report": relative,
         "report_sha256": sha256_bytes(payload),
-        "code_review": {
+        f"{review}_review": {
             "verdict": state["handoff"]["verdict"],
             "resolution": state["handoff"]["resolution"],
             "result_sha256": state["handoff"]["result_sha256"],
@@ -2933,8 +3203,10 @@ def accepted_failure_from_proof(entries, proof, subject):
     if entry.get("event") != "note" or entry.get("kind") != "attempt.failed":
         fail(f"{subject} does not identify an accepted-defect failure")
     data = note_data(entry)
-    if not isinstance(data.get("code_review"), dict):
-        fail(f"{subject} does not identify an accepted final code-review obligation")
+    reviews = [name for name in ("design_review", "code_review")
+               if isinstance(data.get(name), dict)]
+    if len(reviews) != 1:
+        fail(f"{subject} does not identify one accepted final checker obligation")
     expected_report = failure_report_state(
         entries, index, entry.get("lot"), entry.get("task"), data.get("attempt"),
         data.get("classification"), subject,
@@ -2948,34 +3220,141 @@ def accepted_failure_from_proof(entries, proof, subject):
     return index, entry, expected_report
 
 
+def compact_design_review_obligation(state):
+    handoff = state["handoff"]
+    return {
+        "verdict": handoff["verdict"],
+        "resolution": handoff["resolution"],
+        "result_sha256": handoff["result_sha256"],
+        "accepted": state["accepted"],
+    }
+
+
+def attempt_stop_design_state(entries, before, lot, task, attempt, subject):
+    state = final_design_failure_handoff(
+        entries, before, lot, task, attempt, subject,
+    )
+    if state is None or state.get("unresolved") or not state.get("accepted"):
+        return None
+    return state
+
+
+def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=None):
+    data = note_data(entry)
+    attempt_number = data.get("attempt")
+    base = {"sha": data.get("sha"), "attempt": attempt_number}
+    if not re.fullmatch(r"[0-9a-f]{40,64}", str(base["sha"])) \
+            or not construction_positive_integer(attempt_number) \
+            or not isinstance(entry.get("lot"), str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", entry["lot"]) \
+            or not construction_positive_integer(entry.get("task")):
+        fail(f"{subject} has malformed construction identity")
+    state = attempt_stop_design_state(
+        entries, before, entry["lot"], entry["task"], attempt_number, subject,
+    )
+    if state is not None:
+        return {**base, "design_review": compact_design_review_obligation(state)}
+    retry = inherited_retry
+    if retry is None:
+        retry = outstanding_retry_proof(entries[:before], entry["lot"])
+    if retry is not None:
+        accepted_retry_from_proof(entries, retry, f"{subject}'s inherited retry obligation")
+        return {**base, "retry": retry}
+    return base
+
+
+def accepted_stop_from_proof(entries, proof, subject):
+    index, entry = journal_entry_from_proof(entries, proof, subject)
+    if entry.get("event") != "note" or entry.get("kind") not in {"paused", "aborted"}:
+        fail(f"{subject} does not identify a stopped accepted Design obligation")
+    expected = expected_attempt_stop_data(entries, index, entry, subject)
+    if note_data(entry) != expected or not isinstance(expected.get("design_review"), dict):
+        fail(f"{subject} does not identify one accepted final Design obligation")
+    return index, entry, {"design_review": expected["design_review"]}
+
+
+def accepted_retry_from_proof(entries, proof, subject):
+    _, entry = journal_entry_from_proof(entries, proof, subject)
+    if entry.get("event") == "note" and entry.get("kind") == "attempt.failed":
+        return accepted_failure_from_proof(entries, proof, subject)
+    if entry.get("event") == "note" and entry.get("kind") in {"paused", "aborted"}:
+        return accepted_stop_from_proof(entries, proof, subject)
+    fail(f"{subject} does not identify an accepted final checker obligation")
+
+
 def outstanding_retry_proof(entries, lot):
     terminals = [(index, entry) for index, entry in enumerate(entries)
                  if entry.get("event") == "note" and entry.get("lot") == lot
-                 and entry.get("kind") in {"attempt.failed", "attempt.succeeded"}]
+                 and entry.get("kind") in {
+                     "attempt.failed", "attempt.succeeded", "paused", "aborted",
+                 }]
     if not terminals:
         return None
     index, terminal = terminals[-1]
     data = note_data(terminal)
     if terminal.get("kind") == "attempt.succeeded":
         return None
-    if isinstance(data.get("code_review"), dict):
+    if terminal.get("kind") in {"paused", "aborted"}:
+        expected = expected_attempt_stop_data(
+            entries, index, terminal, "the durable stopped attempt",
+        )
+        if data != expected:
+            fail("the durable stopped attempt changed its retry obligation", expected)
+    if isinstance(data.get("code_review"), dict) or isinstance(data.get("design_review"), dict):
         proof = journal_line_proof(index)
-        accepted_failure_from_proof(entries, proof, "the outstanding retry obligation")
+        accepted_retry_from_proof(entries, proof, "the outstanding retry obligation")
         return proof
     retry = data.get("retry")
     if retry is not None:
-        accepted_failure_from_proof(entries, retry, "the propagated retry obligation")
+        accepted_retry_from_proof(entries, retry, "the propagated retry obligation")
         return retry
     return None
 
 
 def retry_code_batch(entries, proof, subject):
-    _, _, report = accepted_failure_from_proof(entries, proof, subject)
+    _, _, report = accepted_retry_from_proof(entries, proof, subject)
+    if "code_review" not in report or "report" not in report:
+        fail(f"{subject} does not carry an accepted code obligation")
     handoff_path = exact_real_file(WORKSPACE, report["report"], f"{subject}'s failure report")
     text = Path(handoff_path).read_text(encoding="utf-8")
     match = re.search(r"(?ms)^## Final code-review handoff\n```json\n([^\n]+)\n```\s*$", text)
     handoff = json.loads(match.group(1))
     accepted = set(report["code_review"]["accepted"])
+    findings = [
+        {key: item[key] for key in ("id", "where", "what", "why", "impact")}
+        for item in handoff["checker_result"]["findings"] if item["id"] in accepted
+    ]
+    dispositions = [item for item in handoff["dispositions"] if item["id"] in accepted]
+    return {
+        "source": "retry", "failure": proof,
+        "result": handoff["result"], "result_sha256": handoff["result_sha256"],
+        "findings": findings, "resolution": dispositions,
+        "resolution_proof": handoff["resolution"],
+    }
+
+
+def retry_design_batch(entries, proof, subject):
+    proof_index, proof_entry, report = accepted_retry_from_proof(entries, proof, subject)
+    if "design_review" not in report:
+        fail(f"{subject} does not carry an accepted Design obligation")
+    if proof_entry.get("kind") == "attempt.failed":
+        handoff_path = exact_real_file(WORKSPACE, report["report"], f"{subject}'s failure report")
+        text = Path(handoff_path).read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^## Final design-review handoff\n```json\n([^\n]+)\n```\s*$", text,
+        )
+        if not match:
+            fail(f"{subject}'s failure report has no exact Design handoff")
+        handoff = json.loads(match.group(1))
+    else:
+        state = attempt_stop_design_state(
+            entries, proof_index, proof_entry.get("lot"), proof_entry.get("task"),
+            note_data(proof_entry).get("attempt"), subject,
+        )
+        if state is None:
+            fail(f"{subject}'s stopped attempt has no accepted Design handoff")
+        handoff = state["handoff"]
+    accepted = set(report["design_review"]["accepted"])
     findings = [
         {key: item[key] for key in ("id", "where", "what", "why", "impact")}
         for item in handoff["checker_result"]["findings"] if item["id"] in accepted
@@ -3010,6 +3389,187 @@ def canonical_code_resolution(logical, verdict_index, verdict, items, disagreeme
         "alternative": statuses.count("alternative"),
         "disagreement_sha256": disagreement_sha256,
     }
+
+
+def canonical_design_resolution(
+    logical, verdict_index, verdict, items, *, next_generation=None,
+    disagreement_sha256=None,
+):
+    statuses = [item["status"] for item in items]
+    result = {
+        **logical,
+        "verdict": journal_line_proof(verdict_index),
+        "findings": note_data(verdict)["findings"],
+        "items": items,
+    }
+    if logical["round"] < CONSTRUCTION_CHECKER_ROUNDS["design"]:
+        return {
+            **result,
+            "corrected": statuses.count("corrected"),
+            "unchanged": statuses.count("unchanged"),
+            "next_design_sha256": next_generation["design_sha256"],
+            "next_plan_projection_sha256": next_generation["plan_projection_sha256"],
+        }
+    return {
+        **result,
+        "accepted": statuses.count("accepted"),
+        "refuted": statuses.count("refuted"),
+        "alternative": statuses.count("alternative"),
+        "disagreement_sha256": disagreement_sha256,
+    }
+
+
+def normalize_design_resolution(entries, data, text, context, round_number):
+    if not isinstance(data, dict) or set(data) != {"check", "items"} \
+            or data.get("check") != "design":
+        fail("a design-review resolution has malformed structured data", data)
+    validate_construction_verdict_history(entries)
+    base = construction_logical_identity(
+        entries, context, "design", round_number, "a design-review resolution",
+    )
+    logical = construction_frozen_logical(
+        entries, len(entries), base, "a design-review resolution",
+    )
+    if any(note_data(entry).get("round") == logical["round"] for _, entry in design_resolutions(
+        entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+    )):
+        fail("this design-review round already has a resolution")
+    matches = [(index, entry) for index, entry in design_verdicts(
+        entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+    ) if note_data(entry).get("round") == logical["round"]]
+    if len(matches) != 1:
+        fail("a design-review resolution has no exact round verdict")
+    verdict_index, verdict = matches[0]
+    verdict_data = note_data(verdict)
+    if verdict_data.get("outcome") != "findings" \
+            or not construction_positive_integer(verdict_data.get("findings")):
+        fail("a design-review resolution requires its exact findings verdict")
+    items = data.get("items")
+    if not isinstance(items, list) or len(items) != verdict_data["findings"]:
+        fail("a design-review resolution does not cover the exact findings count")
+    allowed = DESIGN_FINAL_RESOLUTION_STATUSES \
+        if logical["round"] == CONSTRUCTION_CHECKER_ROUNDS["design"] \
+        else DESIGN_CORRECTION_STATUSES
+    expected_ids = list(range(1, verdict_data["findings"] + 1))
+    if any(not isinstance(item, dict) or set(item) != {"id", "status"}
+           or item.get("status") not in allowed for item in items) \
+            or [item.get("id") for item in items] != expected_ids:
+        fail("a design-review resolution has malformed or non-contiguous items", items)
+    detailed = code_resolution_text_items(text, "the design-review resolution", allowed)
+    if [{key: item[key] for key in ("id", "status")} for item in detailed] != items:
+        fail("the design-review resolution text contradicts its structured items")
+    current = construction_plan_generation(base, "the design-review resolution")
+    for key in ("contract_sha256", "plan_ownership_sha256"):
+        if current[key] != logical[key]:
+            fail("the design-review resolution changes controller-owned plan authority")
+    if logical["round"] < CONSTRUCTION_CHECKER_ROUNDS["design"]:
+        if current.get("disagreement_sha256") != logical.get("disagreement_sha256"):
+            fail("an intermediate design correction changes Disagreement")
+        return canonical_design_resolution(
+            logical, verdict_index, verdict, detailed, next_generation=current,
+        )
+    if current["design_sha256"] != logical["design_sha256"] \
+            or current["plan_projection_sha256"] != logical["plan_projection_sha256"]:
+        fail("the final design settlement follows an unreviewed Design edit", {
+            "frozen_design": logical["design_sha256"],
+            "current_design": current["design_sha256"],
+            "frozen_projection": logical["plan_projection_sha256"],
+            "current_projection": current["plan_projection_sha256"],
+        })
+    if any(item["status"] == "accepted" for item in detailed):
+        if current.get("disagreement_sha256") != logical.get("disagreement_sha256"):
+            fail("an accepted final Design defect changed Disagreement before failure")
+        disagreement_data = {"disagreement_sha256": current.get("disagreement_sha256")}
+    else:
+        alternative_ids = [
+            item["id"] for item in detailed if item["status"] == "alternative"
+        ]
+        disagreement = subprocess.run(
+            [sys.executable, CONSTRUCTION_REVIEW, "design-disagreement", logical["lot"],
+             str(logical["task"]), logical.get("disagreement_sha256") or "-",
+             ",".join(map(str, alternative_ids)) or "-"],
+            capture_output=True, text=True,
+        )
+        if disagreement.returncode != 0:
+            fail("the final design-review settlement has no exact Disagreement projection",
+                 disagreement.stderr or disagreement.stdout)
+        try:
+            disagreement_data = json.loads(disagreement.stdout)
+        except ValueError:
+            fail("the design Disagreement audit returned malformed JSON")
+    return canonical_design_resolution(
+        logical, verdict_index, verdict, detailed,
+        disagreement_sha256=disagreement_data["disagreement_sha256"],
+    )
+
+
+def validate_design_resolution_entry(entries, index, entry):
+    data = note_data(entry)
+    base = {key: data.get(key) for key in ("check", "lot", "task", "attempt", "round")}
+    if base["check"] != "design" or not isinstance(base["lot"], str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", base["lot"]) \
+            or not construction_positive_integer(base["task"]) \
+            or not construction_positive_integer(base["attempt"]) \
+            or not construction_positive_integer(base["round"]) \
+            or base["round"] > CONSTRUCTION_CHECKER_ROUNDS["design"] \
+            or any(entry.get(key) != base[key] for key in ("lot", "task", "attempt", "round")):
+        fail("a durable design-review resolution has malformed logical identity")
+    logical = construction_frozen_logical(
+        entries, index, base, "a durable design-review resolution",
+    )
+    if any(note_data(candidate).get("round") == logical["round"] for _, candidate in design_resolutions(
+        entries, index, logical["lot"], logical["task"], logical["attempt"],
+    )):
+        fail("a design-review round has more than one durable resolution")
+    matches = [(position, candidate) for position, candidate in design_verdicts(
+        entries, index, logical["lot"], logical["task"], logical["attempt"],
+    ) if note_data(candidate).get("round") == logical["round"]]
+    if len(matches) != 1:
+        fail("a durable design-review resolution has no exact checker verdict")
+    verdict_index, verdict = matches[0]
+    verdict_data = note_data(verdict)
+    if verdict_data.get("outcome") != "findings" \
+            or not construction_positive_integer(verdict_data.get("findings")):
+        fail("a durable design-review resolution does not follow exact findings")
+    items = data.get("items")
+    allowed = DESIGN_FINAL_RESOLUTION_STATUSES \
+        if logical["round"] == CONSTRUCTION_CHECKER_ROUNDS["design"] \
+        else DESIGN_CORRECTION_STATUSES
+    if not isinstance(items, list) or len(items) != verdict_data["findings"] \
+            or code_resolution_text_items(
+                entry.get("text"), "the durable design-review resolution", allowed,
+            ) != items:
+        fail("a durable design-review resolution has no complete item account")
+    if logical["round"] < CONSTRUCTION_CHECKER_ROUNDS["design"]:
+        next_generation = {
+            "design_sha256": data.get("next_design_sha256"),
+            "plan_projection_sha256": data.get("next_plan_projection_sha256"),
+        }
+        if any(not re.fullmatch(r"[0-9a-f]{64}", value or "")
+               for value in next_generation.values()):
+            fail("a durable design correction has malformed next-generation identity")
+        expected = canonical_design_resolution(
+            logical, verdict_index, verdict, items, next_generation=next_generation,
+        )
+    else:
+        disagreement_sha256 = data.get("disagreement_sha256")
+        if disagreement_sha256 is not None \
+                and not re.fullmatch(r"[0-9a-f]{64}", disagreement_sha256):
+            fail("a durable final design settlement has malformed Disagreement identity")
+        has_accepted = any(item["status"] == "accepted" for item in items)
+        has_alternative = any(item["status"] == "alternative" for item in items)
+        if has_accepted:
+            if disagreement_sha256 != logical.get("disagreement_sha256"):
+                fail("an accepted durable Design settlement changed Disagreement")
+        elif has_alternative and disagreement_sha256 is None \
+                or not has_alternative and disagreement_sha256 != logical.get("disagreement_sha256"):
+            fail("a durable final design settlement contradicts its Disagreement")
+        expected = canonical_design_resolution(
+            logical, verdict_index, verdict, items,
+            disagreement_sha256=disagreement_sha256,
+        )
+    if data != expected:
+        fail("a durable design-review resolution changes its proof or account", expected)
 
 
 def normalize_code_resolution(entries, data, text, context, round_number):
@@ -3158,7 +3718,7 @@ def normalize_attempt_failed(entries, data, context):
     if report is not None:
         expected = {**base, **report}
     elif identity.get("retry"):
-        accepted_failure_from_proof(entries, identity["retry"], "the inherited retry obligation")
+        accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
         expected = {**base, "retry": identity["retry"]}
     else:
         expected = base
@@ -3180,7 +3740,7 @@ def normalize_attempt_succeeded(entries, data, context):
             or not re.fullmatch(r"[0-9a-f]{64}", str(expected["gate"])):
         fail("attempt.succeeded has malformed commit or gate identity")
     if identity.get("retry"):
-        accepted_failure_from_proof(entries, identity["retry"], "the successful retry obligation")
+        accepted_retry_from_proof(entries, identity["retry"], "the successful retry obligation")
         expected["retry"] = identity["retry"]
     if data != expected:
         fail("attempt.succeeded changes or drops its exact retry obligation", expected)
@@ -3188,6 +3748,39 @@ def normalize_attempt_succeeded(entries, data, context):
                  "task": identity["task"], "data": expected}
     validate_attempt_succeeded_entry(entries + [candidate], len(entries), candidate)
     return expected
+
+
+def normalize_attempt_stop(entries, kind, data, context):
+    if not isinstance(data, dict):
+        fail(f"{kind} requires structured stop data")
+    identity_context = {**context, "attempt": data.get("attempt")}
+    identity = active_attempt_identity(
+        identity_context, f"the {kind} attempt stop", allow_closer=True,
+    )
+    base = {"sha": data.get("sha"), "attempt": identity["attempt"]}
+    if data != base:
+        fail(f"{kind} accepts only its stop SHA and attempt number")
+    candidate = {
+        "event": "note", "kind": kind, "lot": identity["lot"],
+        "task": identity["task"], "data": base,
+    }
+    state = attempt_stop_design_state(
+        entries, len(entries), identity["lot"], identity["task"], identity["attempt"],
+        f"the {kind} attempt stop",
+    )
+    if state is not None:
+        return {**base, "design_review": compact_design_review_obligation(state)}
+    if identity.get("retry") is not None:
+        accepted_retry_from_proof(
+            entries, identity["retry"], f"the {kind} attempt stop's inherited retry",
+        )
+        return {**base, "retry": identity["retry"]}
+    expected = expected_attempt_stop_data(
+        entries, len(entries), candidate, f"the {kind} attempt stop",
+    )
+    if expected != base:
+        fail(f"the {kind} attempt identity drops its outstanding retry obligation", expected)
+    return base
 
 
 def validate_attempt_failed_entry(entries, index, entry):
@@ -3207,7 +3800,7 @@ def validate_attempt_failed_entry(entries, index, entry):
     if report is not None:
         expected = {**base, **report}
     elif data.get("retry") is not None:
-        accepted_failure_from_proof(entries, data["retry"], "the durable propagated retry")
+        accepted_retry_from_proof(entries, data["retry"], "the durable propagated retry")
         expected = {**base, "retry": data["retry"]}
     else:
         expected = base
@@ -3220,16 +3813,19 @@ def validate_attempt_succeeded_entry(entries, index, entry):
     retry = data.get("retry")
     if retry is None:
         return
-    accepted_failure_from_proof(entries, retry, "the successful retry obligation")
+    _, _, report = accepted_retry_from_proof(
+        entries, retry, "the successful retry obligation",
+    )
+    checker = "design-checker" if "design_review" in report else "code-checker"
     starts = [candidate for candidate in entries[:index]
               if candidate.get("event") == "subagent-started"
-              and candidate.get("kind") == "code-checker"
+              and candidate.get("kind") == checker
               and candidate.get("lot") == entry.get("lot")
               and candidate.get("task") == entry.get("task")
               and candidate.get("attempt") == data.get("attempt")
               and candidate.get("round") == 1]
     if not starts or any(note_data(start).get("retry") != retry for start in starts):
-        fail("attempt.succeeded did not give its accepted retry obligation to code review")
+        fail("attempt.succeeded did not give its accepted retry obligation to its checker")
 
 
 def validate_construction_verdict_history(entries):
@@ -3243,12 +3839,21 @@ def validate_construction_verdict_history(entries):
             fail("a durable consumed verdict has an unknown checker identity", check)
         validate_construction_verdict_entry(entries, index, entry)
     for index, entry in enumerate(entries):
-        if entry.get("event") == "note" and entry.get("kind") == "code.review.resolved":
+        if entry.get("event") == "note" and entry.get("kind") == "design.review.resolved":
+            validate_design_resolution_entry(entries, index, entry)
+        elif entry.get("event") == "note" and entry.get("kind") == "code.review.resolved":
             validate_code_resolution_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "attempt.failed":
             validate_attempt_failed_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "attempt.succeeded":
             validate_attempt_succeeded_entry(entries, index, entry)
+        elif entry.get("event") == "note" and entry.get("kind") in {"paused", "aborted"} \
+                and isinstance(note_data(entry).get("attempt"), int):
+            expected = expected_attempt_stop_data(
+                entries, index, entry, "the durable stopped attempt",
+            )
+            if note_data(entry) != expected:
+                fail("the durable stopped attempt changed its retry obligation", expected)
 
 
 def normalize_consolidation_started(entries, data, round_number):
@@ -5298,6 +5903,9 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         data = normalize_attempt_failed(notes, data, context)
     elif kind == "attempt.succeeded":
         data = normalize_attempt_succeeded(notes, data, context)
+    elif kind in {"paused", "aborted"} and isinstance(data, dict) \
+            and "attempt" in data:
+        data = normalize_attempt_stop(notes, kind, data, context)
     elif kind == "spec.written":
         data = normalize_spec_written(notes, data, text)
     elif kind == "round.opened":
@@ -5320,7 +5928,7 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             and text.startswith("consolidation round"):
         data = normalize_consolidation_spend(notes, data, text, round_number)
     elif kind == "bound.spent" and isinstance(text, str) and re.fullmatch(
-        r"(?:design checker round [1-3] of 3|code checker round (?:[1-9]|10) of 10)",
+        r"(?:(?:design|code) checker round (?:[1-9]|10) of 10)",
         text,
     ):
         check = text.split()[0]
@@ -5341,6 +5949,8 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         )
     elif kind == "verdict.consumed":
         fail("verdict.consumed has an unknown or malformed check identity", data)
+    elif kind == "design.review.resolved":
+        data = normalize_design_resolution(notes, data, text, context, round_number)
     elif kind == "code.review.resolved":
         data = normalize_code_resolution(notes, data, text, context, round_number)
 
@@ -5844,10 +6454,12 @@ def cmd_subagent_started(args):
         fail(f"subagent-started {args.kind} does not take structured data")
     append_event(me["session_id"], "subagent-started", kind=args.kind, data=data,
                  **context)
-    if args.kind == "code-checker":
+    if args.kind in {"design-checker", "code-checker"}:
         print(json.dumps({
             "manifest": data["manifest"], "manifest_sha256": data["manifest_sha256"],
-            "tree": data["tree"], "gate": data["gate"], "call": data["call"],
+            **({"tree": data["tree"], "gate": data["gate"]}
+               if args.kind == "code-checker" else {}),
+            "call": data["call"],
         }, separators=(",", ":"), sort_keys=True))
 
 
@@ -5913,7 +6525,9 @@ def cmd_note(args):
         args.kind, data, text, round_number=context.get("round"),
         mandate=context.get("mandate"), context=context,
     )
-    if args.kind in {"bound.spent", "verdict.consumed", "code.review.resolved"} \
+    if args.kind in {
+        "bound.spent", "verdict.consumed", "design.review.resolved", "code.review.resolved",
+    } \
             and isinstance(data, dict) \
             and data.get("check") in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
         context.update({key: data[key] for key in ("lot", "task", "attempt")})
@@ -5992,10 +6606,30 @@ def cmd_construction_verdict_check(args):
             fail("construction verdict history takes no lot, task or attempt")
         print("CONSTRUCTION VERDICTS VALID")
         return
-    if args.check != "code" or not isinstance(args.lot, str) \
+    if args.check not in {"design", "code"} or not isinstance(args.lot, str) \
             or not construction_positive_integer(args.task) \
             or not construction_positive_integer(args.attempt):
-        fail("a code verdict proof requires code, lot, task and attempt")
+        fail("a checker verdict proof requires design or code, lot, task and attempt")
+    if args.check == "design":
+        verdicts = design_verdicts(
+            entries, len(entries), args.lot, args.task, args.attempt,
+        )
+        if not verdicts:
+            fail("this attempt has no proved design-checker verdict")
+        _, latest = verdicts[-1]
+        base = {key: note_data(latest)[key] for key in (
+            "lot", "task", "attempt", "round",
+        )}
+        base["check"] = "design"
+        logical = construction_frozen_logical(
+            entries, len(entries), base, "the accepted Design proof",
+        )
+        generation = construction_plan_generation(logical, "the accepted Design proof")
+        proof_index = construction_design_proof(
+            entries, len(entries), base, generation, "the accepted Design proof",
+        )
+        print(journal_line_proof(proof_index))
+        return
     verdicts = code_verdicts(entries, len(entries), args.lot, args.task, args.attempt)
     if not verdicts:
         fail("this attempt has no proved code-checker verdict")
@@ -6057,16 +6691,24 @@ def cmd_construction_verdict_check(args):
 def cmd_construction_failure_handoff(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
-    state = final_code_failure_handoff(
+    design_state = final_design_failure_handoff(
+        entries, len(entries), args.lot, args.task, args.attempt,
+        "the final design-review failure handoff",
+    )
+    code_state = final_code_failure_handoff(
         entries, len(entries), args.lot, args.task, args.attempt,
         "the final code-review failure handoff",
     )
+    if design_state is not None and code_state is not None:
+        fail("this attempt has both final design and code-review failure obligations")
+    state = design_state if design_state is not None else code_state
     if state is None or state.get("unresolved") or not state.get("accepted"):
-        fail("this attempt has no settled accepted round-10 code-review defect")
+        fail("this attempt has no settled accepted round-10 checker defect")
+    review = "design" if design_state is not None else "code"
     canonical = json.dumps(
         state["handoff"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
-    print("## Final code-review handoff")
+    print(f"## Final {review}-review handoff")
     print("```json")
     print(canonical)
     print("```")
@@ -6085,7 +6727,7 @@ def cmd_construction_failure_check(args):
     if report is not None:
         expected = {**base, **report}
     elif identity.get("retry"):
-        accepted_failure_from_proof(entries, identity["retry"], "the inherited retry obligation")
+        accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
         expected = {**base, "retry": identity["retry"]}
     else:
         expected = base
@@ -6098,13 +6740,18 @@ def cmd_construction_retry_check(args):
     proof = outstanding_retry_proof(entries, args.lot)
     if proof is None:
         if args.report != "-":
-            fail("no accepted final code-review obligation authorizes this retry report")
+            fail("no accepted final checker obligation authorizes this retry report")
         print("-")
         return
-    _, _, report = accepted_failure_from_proof(entries, proof, "the next attempt's retry input")
-    if args.report != report["report"]:
+    _, proof_entry, report = accepted_retry_from_proof(
+        entries, proof, "the next attempt's retry input",
+    )
+    expected_report = report.get("report", "-")
+    if proof_entry.get("kind") in {"paused", "aborted"} and expected_report != "-":
+        fail("a stopped Design obligation unexpectedly owns a failure report")
+    if args.report != expected_report:
         fail("the next attempt must receive the exact accepted-defect failure report",
-             {"expected": report["report"], "actual": args.report})
+             {"expected": expected_report, "actual": args.report})
     print(proof)
 
 
@@ -6227,7 +6874,7 @@ def build_parser():
     sp.set_defaults(func=cmd_amendment_state_check)
 
     sp = sub.add_parser("construction-verdict-check", help=argparse.SUPPRESS)
-    sp.add_argument("check", choices=("history", "code"))
+    sp.add_argument("check", choices=("history", "design", "code"))
     sp.add_argument("lot", nargs="?")
     sp.add_argument("task", nargs="?", type=positive_int)
     sp.add_argument("attempt", nargs="?", type=positive_int)

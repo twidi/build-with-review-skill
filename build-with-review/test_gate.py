@@ -177,14 +177,24 @@ else:
                 + "\n\n### Design\nChange app.txt and verify its observable result.\n",
                 encoding="utf-8",
             )
-        self.progress_call("subagent-started", "design-checker", "--round", "1")
+        opened = self.progress_call("subagent-started", "design-checker", "--round", "1")
+        manifest = json.loads(opened.stdout)["manifest"]
         self.progress_call(
             "note", "bound.spent", "--round", "1",
-            "--text", "design checker round 1 of 3",
+            "--text", "design checker round 1 of 10",
         )
+        report = self.temp / f"design-result-{self.current_attempt}.json"
+        report.write_text(json.dumps({
+            "verdict": "clean", "manifest": manifest,
+            "checks": [
+                {"subject": "task contract", "evidence": "Every task obligation was checked."},
+                {"subject": "repository fit", "evidence": "Repository placement was checked."},
+            ],
+            "previous": [], "findings": [],
+        }), encoding="utf-8")
         self.progress_call(
             "subagent-ended", "design-checker", "--round", "1",
-            "--data", '{"findings":0}',
+            "--data", json.dumps({"result": str(report)}),
         )
         self.progress_call(
             "note", "verdict.consumed", "--round", "1",
@@ -837,19 +847,7 @@ def code_checker_consumes_the_exact_gate_manifest_and_strict_result():
         fixture.base = fixture.git("rev-parse", "HEAD").stdout.strip()
         fixture.start_attempt_state()
 
-        fixture.progress_call("subagent-started", "design-checker", "--round", "1")
-        fixture.progress_call(
-            "note", "bound.spent", "--round", "1",
-            "--text", "design checker round 1 of 3",
-        )
-        fixture.progress_call(
-            "subagent-ended", "design-checker", "--round", "1",
-            "--data", '{"findings":0}',
-        )
-        fixture.progress_call(
-            "note", "verdict.consumed", "--round", "1",
-            "--data", '{"check":"design","outcome":"clean"}',
-        )
+        fixture.append_design_clean()
 
         (fixture.repo / "app.txt").write_text("reviewed candidate\n", encoding="utf-8")
         fixture.git("add", "app.txt")
@@ -1665,8 +1663,14 @@ def code_checker_contract_repairs_invalid_results_before_regeneration():
 
 
 def main():
+    selected = TESTS
+    test_filter = os.environ.get("BWR_TEST_FILTER")
+    if test_filter:
+        selected = [function for function in TESTS if test_filter in function.__name__]
+        if not selected:
+            raise SystemExit(f"no test matches BWR_TEST_FILTER={test_filter!r}")
     failures = 0
-    for function in TESTS:
+    for function in selected:
         try:
             function()
         except Exception:
@@ -1678,9 +1682,9 @@ def main():
             print(f"ok    {function.__name__}")
     print()
     if failures:
-        print(f"{failures} of {len(TESTS)} tests FAILED")
+        print(f"{failures} of {len(selected)} tests FAILED")
         raise SystemExit(1)
-    print(f"all {len(TESTS)} tests passed")
+    print(f"all {len(selected)} tests passed")
 
 
 if __name__ == "__main__":

@@ -255,7 +255,7 @@ def append_code_correction(round_number):
 
 def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
                            round_number=1, findings=0, text=None, impacts=None):
-    round_limit = {"design": 3, "code": 10}[check]
+    round_limit = {"design": 10, "code": 10}[check]
     helper = os.path.join(WORKSPACE, "prompts", "construction", "construction_review.py")
     plan_path = os.path.join(WORKSPACE, "plans", f"{lot}-plan.md")
     if not os.path.isfile(plan_path):
@@ -294,11 +294,11 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
         "design_sha256": state["design_sha256"],
         "plan_projection_sha256": state["plan_projection_sha256"],
         "disagreement_sha256": state["disagreement_sha256"],
+        "retry": retry,
     }
     context = {"mode": "construction", "lot": lot, "task": task,
                "attempt": attempt, "round": round_number}
     if check == "code":
-        logical["retry"] = retry
         if not any(entry.get("kind") == "verdict.consumed"
                    and (entry.get("data") or {}).get("check") == "design"
                    and entry.get("lot") == lot and entry.get("task") == task
@@ -385,6 +385,14 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
             **gate_data, "green": True, "surface": "unchanged", "report": report_relative,
             "report_sha256": report_sha, "commands": 1,
         })
+    else:
+        frozen = json.loads(subprocess.check_output([
+            sys.executable, helper, "design-manifest", lot, str(task), str(attempt),
+            str(round_number),
+        ], text=True, cwd=REPO))
+        logical.update({
+            "manifest": frozen["path"], "manifest_sha256": frozen["sha256"],
+        })
     append_subagent("subagent-started", f"{check}-checker",
                     data={**logical, "call": 1}, **context)
     append_note(
@@ -428,13 +436,157 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
         ], text=True, cwd=REPO))
         ended_data = {**logical, "call": 1, **audited}
     else:
-        ended_data = {**logical, "call": 1, "findings": findings}
+        report = design_result_payload({"manifest": logical["manifest"]}, findings=[
+            {"id": number, "where": f"Design step {number}",
+             "what": f"Design finding {number}",
+             "why": "The accepted task contract is not met.",
+             "impact": impacts[number - 1] if impacts else "IMPORTANT", "previous": []}
+            for number in range(1, findings + 1)
+        ])
+        source = write_design_result(
+            f"design-result-{lot}-{task}-{attempt}-{round_number}.json", report,
+        )
+        audited = json.loads(subprocess.check_output([
+            sys.executable, helper, "publish-design-result", logical["manifest"], source,
+        ], text=True, cwd=REPO))
+        ended_data = {**logical, "call": 1, **audited}
     append_subagent("subagent-ended", f"{check}-checker", data=ended_data, **context)
     outcome = "clean" if findings == 0 else "findings"
-    verdict = dict(ended_data) if check == "code" else {
-        **logical, "call": 1, "outcome": outcome, "findings": findings,
+    verdict = dict(ended_data)
+    append_note("verdict.consumed", verdict, None, **context)
+
+
+def design_result_payload(opening, *, findings=(), previous=(), verdict=None):
+    findings = list(findings)
+    return {
+        "verdict": verdict or ("clean" if not findings else "findings"),
+        "manifest": opening["manifest"],
+        "checks": [
+            {"subject": "task contract",
+             "evidence": "Every Achieves and To verify obligation was checked."},
+            {"subject": "repository fit",
+             "evidence": "The named repository patterns and constraints were checked."},
+        ],
+        "previous": list(previous),
+        "findings": findings,
     }
-    append_note("verdict.consumed", verdict, text if check == "design" else None, **context)
+
+
+def write_design_result(name, payload):
+    path = os.path.join(BASE, name)
+    with open(path, "w", encoding="utf-8") as target:
+        json.dump(payload, target)
+    return path
+
+
+def open_design_round(round_number):
+    opened = run_progress(
+        "subagent-started", "design-checker", "--round", str(round_number),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening = json.loads(opened.stdout)
+    spent = run_progress(
+        "note", "bound.spent", "--round", str(round_number),
+        "--text", f"design checker round {round_number} of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    return opening
+
+
+def finish_design_round(round_number, opening, *, findings=(), previous=()):
+    source = write_design_result(
+        f"design-round-{round_number}.json",
+        design_result_payload(opening, findings=findings, previous=previous),
+    )
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--round", str(round_number),
+        "--data", json.dumps({"result": source}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    outcome = "clean" if not findings else "findings"
+    consumed = run_progress(
+        "note", "verdict.consumed", "--round", str(round_number),
+        "--data", json.dumps({"check": "design", "outcome": outcome}),
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+
+
+def resolve_design_round(round_number, items):
+    text_path = os.path.join(BASE, f"design-resolution-{round_number}.md")
+    with open(text_path, "w", encoding="utf-8") as target:
+        target.write("\n\n".join(
+            f"## Finding {item['id']} — {item['status']}\n"
+            f"Exact evidence for finding {item['id']}."
+            for item in items
+        ) + "\n")
+    result = run_progress(
+        "note", "design.review.resolved", "--round", str(round_number),
+        "--text-file", text_path,
+        "--data", json.dumps({"check": "design", "items": items}),
+    )
+    check(result.returncode == 0, result.stdout + result.stderr)
+
+
+def replace_current_design(replacement):
+    path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
+    text = open(path, encoding="utf-8").read()
+    text = re.sub(
+        r"(?ms)^### Design\n.*?(?=^### |^## Task |\Z)",
+        f"### Design\n{replacement.rstrip()}\n",
+        text,
+    )
+    with open(path, "w", encoding="utf-8") as target:
+        target.write(text)
+
+
+def append_current_disagreement(body):
+    path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
+    text = open(path, encoding="utf-8").read()
+    with open(path, "a", encoding="utf-8") as target:
+        heading = "" if "\n### Disagreement\n" in text else "\n### Disagreement\n"
+        target.write(f"{heading}{body.rstrip()}\n")
+
+
+def drive_design_to_round_ten():
+    previous = []
+    for round_number in range(1, 11):
+        opening = open_design_round(round_number)
+        finding = {
+            "id": 1, "where": f"Design round {round_number}",
+            "what": f"The round {round_number} design keeps one exact defect.",
+            "why": "The accepted task contract remains unmet.",
+            "impact": "IMPORTANT", "previous": [1] if previous else [],
+        }
+        findings = [finding]
+        if round_number == 10:
+            findings.append({
+                "id": 2, "where": "Design round 10 alternative",
+                "what": "The checker proposes another plan-compliant Design.",
+                "why": "The final settlement must preserve the exact alternative.",
+                "impact": "MINOR", "previous": [],
+            })
+        finish_design_round(round_number, opening, findings=findings, previous=previous)
+        if round_number < 10:
+            replace_current_design(
+                f"Implement the accepted task contract. Corrected generation {round_number}."
+            )
+            resolve_design_round(round_number, [{"id": 1, "status": "corrected"}])
+            previous = [{
+                "id": 1, "status": "still-open",
+                "evidence": "The exact admitted defect remains open.",
+            }]
+
+
+def stop_active_attempt(mode, attempt=2):
+    result = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"),
+         mode, "lot-1", "3", str(attempt)],
+        capture_output=True, text=True, cwd=REPO, env=ENV, timeout=120,
+    )
+    check(result.returncode == 0, result.stdout + result.stderr)
+    check(not os.path.exists(os.path.join(WORKSPACE, "attempt-in-flight")),
+          f"the {mode} stop did not remove the completed attempt identity")
+    return result
 
 
 def seed_active_attempt(lot="lot-1", task=3, attempt=2):
@@ -1413,18 +1565,406 @@ def construction_verdicts_require_a_spend_and_physical_result():
 
 
 @test
+def design_checker_result_is_one_immutable_structured_batch():
+    seed_active_attempt()
+    opened = run_progress("subagent-started", "design-checker", "--round", "1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening = json.loads(opened.stdout)
+    check(set(opening) == {"manifest", "manifest_sha256", "call"}, opening)
+
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1",
+        "--text", "design checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result = design_result_payload(opening, findings=[{
+        "id": 1,
+        "where": "Design step 2",
+        "what": "The design drops the required state transition.",
+        "why": "The task cannot satisfy its accepted contract.",
+        "impact": "IMPORTANT",
+        "previous": [],
+    }])
+    source = write_design_result("design-round-1.json", result)
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--round", "1",
+        "--data", json.dumps({"result": source}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+
+    consumed = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"design","outcome":"findings"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+    data = journal_lines()[-1]["data"]
+    check(data["findings"] == 1 and data["important"] == 1, data)
+    check(data["critical"] == 0 and data["minor"] == 0, data)
+    check(data["report"].endswith("-design-round-1-result.json"), data)
+    result_path = os.path.join(WORKSPACE, data["report"])
+    with open(result_path, "a", encoding="utf-8") as target:
+        target.write(" ")
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode != 0,
+          "a changed immutable design-checker result passed historical validation")
+
+
+@test
+def design_parity_requires_one_correction_account_before_the_next_round():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    finding = {
+        "id": 1, "where": "Design step 1",
+        "what": "The state transition is absent.",
+        "why": "The accepted task outcome cannot occur.",
+        "impact": "IMPORTANT", "previous": [],
+    }
+    finish_design_round(1, opening, findings=[finding])
+    before = len(journal_lines())
+    refused_after(
+        run_progress("subagent-started", "design-checker", "--round", "2"),
+        before, "a later design round without a complete prior resolution",
+    )
+
+    replace_current_design("Implement the accepted task contract and its state transition.")
+    resolve_design_round(1, [{"id": 1, "status": "corrected"}])
+    opening = open_design_round(2)
+    previous = [{
+        "id": 1, "status": "addressed",
+        "evidence": "The corrected Design now names the state transition.",
+    }]
+    finish_design_round(2, opening, previous=previous)
+    proof = run_progress("construction-verdict-check", "design", "lot-1", "3", "2")
+    check(proof.returncode == 0, proof.stdout + proof.stderr)
+
+
+@test
+def design_parity_round_ten_uses_one_terminal_settlement_and_no_round_eleven():
+    seed_active_attempt()
+    append_current_disagreement(
+        "#### Finding 7 — design alternative\n"
+        "A prior attempt preserved this accepted alternative."
+    )
+    drive_design_to_round_ten()
+
+    before = len(journal_lines())
+    refused_after(
+        run_progress("subagent-started", "design-checker", "--round", "11"),
+        before, "an eleventh design-checker round",
+    )
+    append_current_disagreement(
+        "#### Finding 1 — design alternative\n"
+        "The checker alternative and the selected Design both satisfy the accepted plan.\n"
+        "#### Finding 2 — design alternative\n"
+        "The second checker alternative also satisfies the accepted plan."
+    )
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "alternative"},
+    ])
+    proof = run_progress("construction-verdict-check", "design", "lot-1", "3", "2")
+    check(proof.returncode == 0, proof.stdout + proof.stderr)
+    plan = open(os.path.join(WORKSPACE, "plans", "lot-1-plan.md"), encoding="utf-8").read()
+    check("Finding 7 — design alternative" in plan,
+          "the final settlement did not preserve an earlier Design alternative")
+
+
+@test
+def design_parity_accepted_final_defect_requires_exact_failure_handoff():
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "accepted"},
+    ])
+    refused_after(
+        run_progress("construction-verdict-check", "design", "lot-1", "3", "2"),
+        len(journal_lines()), "an accepted final Design defect as implementation authority",
+    )
+    handoff = run_progress("construction-failure-handoff", "lot-1", "3", "2")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    check(handoff.stdout.startswith("## Final design-review handoff\n```json\n"), handoff.stdout)
+    report_relative = "reports/construction/lot-1-task-3-try-2.md"
+    report_path = os.path.join(WORKSPACE, report_relative)
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as target:
+        target.write(
+            "## What failed\nThe final design review accepted one defect.\n\n"
+            "## Classification\nC3.9b — the current task Design is wrong.\n\n"
+            "## Evidence read\nThe immutable design-checker result and settlement.\n\n"
+            + handoff.stdout
+        )
+    before = len(journal_lines())
+    refused_after(
+        run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9a"),
+        before, "C3.9a for an accepted pre-implementation Design defect",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "3", "2", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failure_data = json.loads(admitted.stdout)
+    check(failure_data["report"] == report_relative, failure_data)
+    check(failure_data["design_review"]["accepted"] == [2], failure_data)
+    failed = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", json.dumps(failure_data),
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    retry = run_progress(
+        "construction-retry-check", "lot-1", "3", report_relative,
+    )
+    check(retry.returncode == 0, retry.stdout + retry.stderr)
+    proof = retry.stdout.strip()
+    marker = os.path.join(WORKSPACE, "attempt-in-flight")
+    lines = open(marker, encoding="utf-8").read().splitlines()
+    lines[0] = "lot-1 3 3"
+    lines[1] = re.sub(r" retry .+$", f" retry {proof}", lines[1])
+    with open(marker, "w", encoding="utf-8") as target:
+        target.write("\n".join(lines) + "\n")
+    replace_current_design("Implement the accepted task contract without the accepted defect.")
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"]["attempt"] = 3
+    cfg["sessions"][CALLER]["annotations"]["bwr"]["attempt"] = 3
+    set_config(cfg)
+    retry_opening = open_design_round(1)
+    manifest_relative = retry_opening["manifest"]
+    manifest = json.load(open(os.path.join(WORKSPACE, manifest_relative), encoding="utf-8"))
+    check(manifest["previous"]["source"] == "retry", manifest["previous"])
+    check([item["id"] for item in manifest["previous"]["findings"]] == [2], manifest)
+    finish_design_round(1, retry_opening, previous=[{
+        "id": 2, "status": "addressed",
+        "evidence": "The replacement Design removes the exact accepted defect.",
+    }])
+    retry_proof = run_progress("construction-verdict-check", "design", "lot-1", "3", "3")
+    check(retry_proof.returncode == 0, retry_proof.stdout + retry_proof.stderr)
+
+
+def assert_stopped_design_obligation_reaches_retry(mode):
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "accepted"},
+    ])
+    stop_active_attempt(mode)
+
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0, retry.stdout + retry.stderr)
+    proof = retry.stdout.strip()
+    check(proof != "-", f"the {mode} stop discarded the accepted Design obligation")
+
+    seed_active_attempt(attempt=3)
+    marker = os.path.join(WORKSPACE, "attempt-in-flight")
+    lines = open(marker, encoding="utf-8").read().splitlines()
+    lines[1] = re.sub(r" retry .+$", f" retry {proof}", lines[1])
+    with open(marker, "w", encoding="utf-8") as target:
+        target.write("\n".join(lines) + "\n")
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"]["attempt"] = 3
+    cfg["sessions"][CALLER]["annotations"]["bwr"]["attempt"] = 3
+    set_config(cfg)
+    opening = open_design_round(1)
+    manifest = json.load(open(
+        os.path.join(WORKSPACE, opening["manifest"]), encoding="utf-8",
+    ))
+    check([item["id"] for item in manifest["previous"]["findings"]] == [2], manifest)
+    finish_design_round(1, opening, previous=[{
+        "id": 2, "status": "addressed",
+        "evidence": "The retry Design addresses the stopped accepted defect.",
+    }])
+    stop_active_attempt(mode, attempt=3)
+    propagated = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(propagated.returncode == 0, propagated.stdout + propagated.stderr)
+    check(propagated.stdout.strip() == proof,
+          f"the later {mode} stop did not propagate the accepted Design obligation")
+
+
+@test
+def design_parity_triplet_pause_preserves_accepted_final_obligation():
+    assert_stopped_design_obligation_reaches_retry("pause")
+
+
+@test
+def design_parity_triplet_abort_preserves_accepted_final_obligation():
+    assert_stopped_design_obligation_reaches_retry("abort")
+
+
+@test
+def design_parity_stop_without_an_accepted_settlement_keeps_normal_retry_behavior():
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    append_current_disagreement(
+        "#### Finding 1 — design alternative\n"
+        "The first alternative satisfies the accepted task contract.\n"
+        "#### Finding 2 — design alternative\n"
+        "The second alternative satisfies the accepted task contract."
+    )
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "alternative"},
+    ])
+    stop_active_attempt("pause")
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0 and retry.stdout.strip() == "-", retry.stdout + retry.stderr)
+
+    reset()
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    stop_active_attempt("abort")
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0 and retry.stdout.strip() == "-", retry.stdout + retry.stderr)
+
+
+@test
+def design_parity_historical_stop_rejects_a_changed_accepted_obligation():
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "accepted"},
+    ])
+    stop_active_attempt("pause")
+    journal = journal_lines()
+    stopped = journal[-1]
+    check(stopped["kind"] == "paused" and stopped["data"]["design_review"]["accepted"] == [2],
+          stopped)
+    stopped["data"]["design_review"]["accepted"] = []
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode != 0,
+          "a changed accepted Design obligation passed historical validation")
+
+
+@test
+def design_parity_contract_has_probability_strict_result_repair_and_terminal_rules():
+    with open(os.path.join(COMMON_PROMPTS, "review-risk.md"), encoding="utf-8") as source:
+        risk = " ".join(source.read().split())
+    with open(os.path.join(HERE, "prompts", "construction", "design-checker.md"),
+              encoding="utf-8") as source:
+        checker = " ".join(source.read().split())
+    with open(os.path.join(HERE, "prompts", "construction", "implementer.md"),
+              encoding="utf-8") as source:
+        implementer = " ".join(source.read().split())
+    with open(os.path.join(HERE, "prompts", "construction", "MODE.md"),
+              encoding="utf-8") as source:
+        mode = " ".join(source.read().split())
+    with open(os.path.join(HERE, "SKILL.md"), encoding="utf-8") as source:
+        skill = " ".join(source.read().split())
+    progress_source = open(SOURCE, encoding="utf-8").read()
+
+    check("CONSTRUCTION design and code checkers" in risk,
+          "the shared risk contract must include both construction discovery checkers")
+    check("-design-risk-filtered.md" in risk,
+          "the design checker needs one attempt-scoped private history")
+    check("Design and consolidation have three logical checker rounds" not in skill,
+          "the root skill retains the obsolete three-round Design limit")
+    check("CONSTRUCTION design and code checkers use" in skill,
+          "the root risk-admission summary omits one construction checker")
+    check("-design-risk-filtered.md" in skill and "-code-risk-filtered.md" in skill,
+          "the root private-history summary omits one construction checker")
+    check("Final design-review handoff" in implementer
+          and "Final code-review handoff" in implementer,
+          "the retry summary omits one accepted checker handoff")
+    check("first Design manifest" in implementer and "first code-checker manifest" in implementer,
+          "the retry summary omits one accepted checker manifest")
+    check("no accepted final checker obligation authorizes this retry report" in progress_source,
+          "the shared retry diagnostic still names only code review")
+    check("no accepted final code-review obligation authorizes this retry report"
+          not in progress_source,
+          "the stale code-only retry diagnostic remains present")
+    for name, contract in (("design checker", checker), ("implementer", implementer),
+                           ("construction mode", mode), ("skill", skill)):
+        lowered = contract.lower()
+        check("ten logical" in lowered or "ten rounds" in lowered,
+              f"the {name} does not state the ten-round design bound")
+        check("round 11" in lowered,
+              f"the {name} does not forbid design round 11")
+    for name, contract in (("implementer", implementer), ("construction mode", mode),
+                           ("skill", skill)):
+        check("design.review.resolved" in contract,
+              f"the {name} does not carry the exact design settlement")
+    check("Return one JSON object" in checker and "Return no prose outside it" in checker,
+          "the design checker must have one strict result channel")
+    check("result-validation refusal" in checker
+          and "complete replacement JSON object" in checker
+          and "current physical call" in checker,
+          "the design checker must support one bounded same-call result repair")
+    check("at most two repair requests" in implementer.lower()
+          and "same open physical call" in implementer.lower()
+          and "unusable:\"lost\"" in implementer,
+          "the design result needs the bounded live repair route")
+    check("C3.9a" in implementer and "not valid" in implementer.lower(),
+          "an accepted pre-implementation Design defect must forbid C3.9a")
+    check("Preserve `Disagreement` unchanged" in implementer,
+          "an accepted final Design defect must not publish alternatives")
+    for name, contract in (("implementer", implementer), ("construction mode", mode),
+                           ("skill", skill)):
+        check("stop" in contract.lower() and "accepted" in contract.lower()
+              and "Design" in contract and "first Design manifest" in contract,
+              f"the {name} does not preserve a stopped accepted Design obligation")
+
+
+@test
+def design_parity_invalid_result_repair_keeps_the_same_open_physical_call():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    invalid = write_design_result("invalid-design-result.json", {"verdict": "clean"})
+    before = len(journal_lines())
+    refused_after(
+        run_progress(
+            "subagent-ended", "design-checker", "--round", "1",
+            "--data", json.dumps({"result": invalid}),
+        ),
+        before, "an invalid design result",
+    )
+    refused_after(
+        run_progress("subagent-started", "design-checker", "--round", "1"),
+        before, "another physical opening over the live repair call",
+    )
+    valid = write_design_result(
+        "replacement-design-result.json", design_result_payload(opening),
+    )
+    accepted = run_progress(
+        "subagent-ended", "design-checker", "--round", "1",
+        "--data", json.dumps({"result": valid}),
+    )
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+    finish = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"design","outcome":"clean"}',
+    )
+    check(finish.returncode == 0, finish.stdout + finish.stderr)
+
+
+@test
+def design_parity_historical_consumers_reject_a_damaged_resolution():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1, "where": "Design step 1", "what": "The transition is absent.",
+        "why": "The accepted outcome cannot occur.", "impact": "IMPORTANT", "previous": [],
+    }])
+    replace_current_design("Implement the accepted task contract and its transition.")
+    resolve_design_round(1, [{"id": 1, "status": "corrected"}])
+    journal = journal_lines()
+    resolution = next(entry for entry in journal if entry.get("kind") == "design.review.resolved")
+    resolution["data"]["items"][0]["evidence"] = ""
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode != 0, "damaged durable design resolution passed history validation")
+
+
+@test
 def design_checker_consumes_the_exact_latest_result_once():
     seed_active_attempt()
     refused(run_progress("subagent-started", "design-checker", "--task", "4", "--round", "1"))
     refused(run_progress("subagent-started", "design-checker", "--round", "2"))
 
-    proc = run_progress("subagent-started", "design-checker", "--round", "1")
-    check(proc.returncode == 0, proc.stdout + proc.stderr)
-    proc = run_progress(
-        "note", "bound.spent", "--round", "1",
-        "--text", "design checker round 1 of 3",
-    )
-    check(proc.returncode == 0, proc.stdout + proc.stderr)
+    opening = open_design_round(1)
     before = len(journal_lines())
     proc = run_progress(
         "note", "verdict.consumed", "--round", "1", "--data",
@@ -1436,8 +1976,18 @@ def design_checker_consumes_the_exact_latest_result_once():
     )
     refused_after(proc, before, "a physical return from the wrong checker")
 
+    source = write_design_result(
+        "two-design-findings.json",
+        design_result_payload(opening, findings=[
+            {"id": 1, "where": "Design step 1", "what": "The interface changes.",
+             "why": "A caller breaks.", "impact": "IMPORTANT", "previous": []},
+            {"id": 2, "where": "Design step 2", "what": "Required state is absent.",
+             "why": "The task result is wrong.", "impact": "CRITICAL", "previous": []},
+        ]),
+    )
     proc = run_progress(
-        "subagent-ended", "design-checker", "--round", "1", "--data", '{"findings":2}',
+        "subagent-ended", "design-checker", "--round", "1", "--data",
+        json.dumps({"result": source}),
     )
     check(proc.returncode == 0, proc.stdout + proc.stderr)
     before = len(journal_lines())
@@ -1447,16 +1997,7 @@ def design_checker_consumes_the_exact_latest_result_once():
     )
     refused_after(proc, before, "a clean verdict over positive findings")
     proc = run_progress(
-        "note", "verdict.consumed", "--round", "1", "--data",
-        '{"check":"design","outcome":"findings"}',
-    )
-    refused_after(proc, before, "an adverse design verdict without exact findings")
-
-    findings_path = os.path.join(BASE, "design-findings.txt")
-    with open(findings_path, "w", encoding="utf-8") as target:
-        target.write("F1 changes the interface.\nF2 drops a required state.\n")
-    proc = run_progress(
-        "note", "verdict.consumed", "--round", "1", "--text-file", findings_path,
+        "note", "verdict.consumed", "--round", "1",
         "--data", '{"check":"design","outcome":"findings"}',
     )
     check(proc.returncode == 0, proc.stdout + proc.stderr)
@@ -1464,7 +2005,7 @@ def design_checker_consumes_the_exact_latest_result_once():
     check(consumed["data"]["findings"] == 2 and consumed["data"]["call"] == 1, consumed)
     before = len(journal_lines())
     duplicate = run_progress(
-        "note", "verdict.consumed", "--round", "1", "--text-file", findings_path,
+        "note", "verdict.consumed", "--round", "1",
         "--data", '{"check":"design","outcome":"findings"}',
     )
     refused_after(duplicate, before, "a duplicate design verdict")
@@ -1530,12 +2071,9 @@ def code_checker_regenerates_under_one_logical_spend():
 
 
 @test
-def construction_checker_round_limits_are_check_specific():
+def code_checker_round_limit_still_stops_at_ten():
     seed_active_attempt()
     append_checker_verdict("design", lot="lot-1", task=3, attempt=2)
-    findings_path = os.path.join(BASE, "checker-findings.txt")
-    with open(findings_path, "w", encoding="utf-8") as target:
-        target.write("F1 remains actionable.\n")
 
     for round_number in range(1, 10):
         append_checker_verdict(
@@ -1573,18 +2111,6 @@ def construction_checker_round_limits_are_check_specific():
         run_progress("subagent-started", "code-checker", "--round", "11"),
         before, "an eleventh logical code-checker round",
     )
-
-    for round_number in range(1, 4):
-        append_checker_verdict(
-            "design", lot="lot-1", task=3, attempt=2,
-            round_number=round_number, findings=1, text="F1 remains actionable.",
-        )
-    before = len(journal_lines())
-    refused_after(
-        run_progress("subagent-started", "design-checker", "--round", "4"),
-        before, "a fourth logical design-checker round",
-    )
-
 
 @test
 def code_checker_verdict_derives_exact_public_impact_counts():
@@ -1833,10 +2359,10 @@ def code_checker_prompt_requires_an_exhaustive_batch_and_free_work_loops():
         "A red ordinary gate returns to free work",
     ):
         check(required in mode_contract, f"the construction mode contract lost: {required}")
-    check(
-        "design-checker round 3 or code-checker round 10" in plan_format_contract,
-        "the plan format does not carry both final-round disagreement routes",
-    )
+    check("design-checker or code-checker round 10" in plan_format_contract,
+          "the plan format does not carry both final-round disagreement routes")
+    check("#### Finding N — design alternative" in plan_format_contract,
+          "the plan format has no exact design-alternative ownership heading")
     check(
         "#### Finding N — code alternative" in plan_format_contract,
         "the plan format has no exact code-alternative ownership heading",
@@ -4884,7 +5410,7 @@ def main():
                         os.path.join(WORKSPACE, "prompts", "common", "authority_precedence.py"))
         shutil.copyfile(SPEC_EDIT_SOURCE,
                         os.path.join(WORKSPACE, "prompts", "common", "spec_edit_auth.py"))
-        for name in ("spec-commit.sh", "attempt-closer.sh", "bare-stop.sh",
+        for name in ("spec-commit.sh", "attempt-closer.sh", "bare-stop.sh", "stop.sh",
                      "disposable-worktree.sh", "document-copy.sh"):
             destination = os.path.join(WORKSPACE, "prompts", "common", name)
             shutil.copyfile(os.path.join(COMMON_PROMPTS, name), destination)
@@ -4927,8 +5453,14 @@ def main():
         ENV["TWICC_BIN"] = f"{shlex.quote(sys.executable)} {shlex.quote(fake)}"
         ENV["FAKE_TWICC_DIR"] = FAKE_DIR
 
+        selected = TESTS
+        test_filter = os.environ.get("BWR_TEST_FILTER")
+        if test_filter:
+            selected = [fn for fn in TESTS if test_filter in fn.__name__]
+            if not selected:
+                raise RuntimeError(f"no test name contains {test_filter!r}")
         failures = 0
-        for fn in TESTS:
+        for fn in selected:
             reset()
             try:
                 fn()
@@ -4941,9 +5473,9 @@ def main():
                 print(f"ok    {fn.__name__}")
         print()
         if failures:
-            print(f"{failures} of {len(TESTS)} tests FAILED")
+            print(f"{failures} of {len(selected)} tests FAILED")
             sys.exit(1)
-        print(f"all {len(TESTS)} tests passed")
+        print(f"all {len(selected)} tests passed")
     finally:
         shutil.rmtree(BASE, ignore_errors=True)
 

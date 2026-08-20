@@ -2,8 +2,8 @@
 
 This file applies only when the controller or implementer gives it to a severity-bearing
 discovery reviewer: every SPEC mandate, every PRODUCT REVIEW lens, and the CONSTRUCTION
-code checker. It does not apply to CONSTRUCTION completeness, the design checker,
-finding verifiers, diagnostics, consolidation, gate work, or amendment reach.
+design and code checkers. It does not apply to CONSTRUCTION completeness, finding
+verifiers, diagnostics, consolidation, gate work, or amendment reach.
 
 ## Impact
 
@@ -51,9 +51,9 @@ observation stops being a review candidate. Only its private history entry remai
 does not appear in your report, completion block, counts, final message, or any workflow
 route.
 
-The CONSTRUCTION code checker does not own a `DECISION` output route. It applies this
-table to each concrete new observation. `report` means that the observation enters its
-strict JSON result with its consequence impact. The implementer later owns any
+The CONSTRUCTION design and code checkers do not own a `DECISION` output route. Each
+applies this table to every concrete new observation. `report` means that the observation
+enters its strict JSON result with its consequence impact. The implementer later owns any
 classification as plan ambiguity, `Blocked`, or unsettled product behaviour.
 
 For SPEC mandates and PRODUCT REVIEW lenses, a `DECISION` uses the same table. Assign it
@@ -75,6 +75,10 @@ not workflow authority.
 For a CONSTRUCTION code checker, every logical round and physical regeneration in one
 attempt uses `reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md`.
 Use `Code checker round <R>` as the occurrence label. A new attempt uses a new path.
+
+For a CONSTRUCTION design checker, every logical round and physical regeneration in one
+attempt uses `reports/construction/<lot>/task-<N>-attempt-<K>-design-risk-filtered.md`.
+Use `Design checker round <R>` as the occurrence label. A new attempt uses a new path.
 
 At the start of your review, read the file when it exists. A missing, partial, or lost
 file never blocks the review. No controller, fixer, verifier, other mandate, or

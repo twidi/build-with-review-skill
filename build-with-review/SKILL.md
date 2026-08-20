@@ -86,7 +86,7 @@ Everything below follows from these. A reader who keeps only them is rarely wron
   it.** Somebody else confronts it with reality before it becomes action: the fixer, the
   implementer, or a dedicated verifier — each mode says which.
 - **Severity-bearing discovery review is risk-admitted before it leaves its reviewer.**
-  SPEC mandates, PRODUCT REVIEW lenses, and the CONSTRUCTION code checker use
+  SPEC mandates, PRODUCT REVIEW lenses, and the CONSTRUCTION design and code checkers use
   `prompts/common/review-risk.md`. Each reviewer keeps one private, append-only,
   best-effort history of candidates it filtered by impact and probability. No other
   actor reads it, and its loss is accepted.
@@ -1334,10 +1334,11 @@ what name. Two rules hold across all of them: **nothing is ever overwritten**, a
 
 The private `*-risk-filtered.md` files are the narrow reviewer-memory exception. Fresh
 occurrences of one SPEC mandate or PRODUCT REVIEW lens append to their own fixed history
-path. All code-checker rounds and physical regenerations in one attempt use
-`reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md`; a new attempt uses
-a new path. They never rewrite old entries. These best-effort files are not reports or
-workflow authority, no other actor reads them, and losing one does not block the run.
+path. All design-checker rounds and physical regenerations in one attempt use
+`reports/construction/<lot>/task-<N>-attempt-<K>-design-risk-filtered.md`. All code-checker
+rounds and regenerations use the matching `-code-risk-filtered.md` path. A new attempt
+uses new paths. They never rewrite old entries. These best-effort files are not reports
+or workflow authority, no other actor reads them, and losing one does not block the run.
 
 ---
 
@@ -1637,27 +1638,27 @@ what to act on.
 call sites that pair `bound.spent` with `verdict.consumed` — design checker, code checker,
 amendment consolidation, construction diagnostic — the spend allocates one LOGICAL
 round. On a successful return, before any edit or route, `verdict.consumed` identifies
-the check and outcome in `--data`. Design, consolidation and diagnostic preserve adverse
-text through `--text-file`. Code review instead publishes one strict immutable result
-artifact. It binds the accepted task contract, accepted Design, gated candidate, finite
-file manifest, complete inspection account, checked evidence and exact Finding 1..N set.
-Each admitted finding carries its consequence-based impact. Probability stays private
-and only controls admission of new candidates. Existing admitted identities bypass
-fresh admission. Filtered observations remain only in the attempt-scoped best-effort
-history `reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md` and enter
-no result, count, journal event, correction, or final message.
+the check and outcome in `--data`. Consolidation and diagnostic preserve adverse text
+through `--text-file`. Design and code review publish strict immutable result artifacts.
+Both bind the accepted task contract, accepted Design generation, checked evidence and
+exact Finding 1..N set. Code review also binds the gated candidate and finite file
+manifest. Each admitted finding carries its consequence-based impact. Probability stays
+private and controls only admission of new candidates. Existing admitted identities
+bypass fresh admission. Filtered observations remain only in the attempt-scoped
+best-effort `design-risk-filtered.md` or `code-risk-filtered.md` history and enter no
+result, count, journal event, correction, handoff or final message.
 
 The immutable admitted result derives `critical`, `important`, and `minor` counts for
 its physical terminal and consumed verdict. Callers never supply these counts.
 These file transports preserve code, quotes, newlines and shell-looking lines without
 parsing them.
 
-A code-checker result-validation refusal does not yet make its physical call unusable.
-The controller sends the exact refusal and same manifest back to that checker and asks
-for one complete replacement JSON. It permits at most two repair requests on the same
-open call and stops early if the same refusal repeats. Only then does it close the call
-unusable and use the ordinary one-relaunch boundary. Neither result repair nor physical
-regeneration allocates another logical round or another domain spend. This is a
+A design- or code-checker result-validation refusal does not yet make its physical call
+unusable. The implementer sends the exact refusal and same manifest back to that checker
+and asks for one complete replacement JSON. It permits at most two repair requests on
+the same open call and stops early if the same refusal repeats. Only then does it close
+the call unusable and use the ordinary one-relaunch boundary. Neither result repair nor
+physical regeneration allocates another logical round or another domain spend. This is a
 **live repair context** only. **After compaction**, takeover, loss of its exact count or
 refusal, or loss of checker addressability, the controller sends no guessed follow-up.
 It writes `{"unusable":"lost"}` to **close the exact open call before regeneration**.
@@ -1666,31 +1667,41 @@ The pair is the resume test:
 
 - latest domain `bound.spent`, no matching `verdict.consumed` → the result was never made
   durable. First inspect its physical brackets. A still-open bracket receives its exact
-  terminal before any relaunch. For code review, continue a bounded repair only when its
-  live context survives; otherwise close it as `lost`. Then relaunch the same prompt
-  under the same round identity, with a fresh subagent bracket and **no new domain
-  spend**;
+  terminal before any relaunch. For design and code review, continue a bounded repair
+  only when its live context survives; otherwise close it as `lost`. Then relaunch the
+  same prompt under the same round identity, with a fresh subagent bracket and **no new
+  domain spend**;
 - matching `verdict.consumed` → never regenerate. Act or finish acting from that exact
   note;
 - only a consumed adverse verdict whose correction is complete may allocate the next
-  logical round. Design and consolidation stop after their third logical round. Code
-  checker rounds 1 through 9 can allocate the next round only after one complete
-  correction account and a green ordinary gate. The next immutable manifest carries
-  every prior finding for explicit `addressed` or `still-open` verification. Code checker
-  rounds use one `code.review.resolved` account per adverse round. Round 10 never
-  allocates round 11. Its statuses are `accepted`, `refuted` and `alternative`.
+  logical round. Consolidation stops after its third logical round. Design and code
+  checker rounds 1 through 9 allocate the next round only after one complete correction
+  account. Code additionally requires a green ordinary gate. The next immutable manifest
+  carries every prior finding for explicit `addressed` or `still-open` verification.
+  Design rounds use `design.review.resolved`; code rounds use `code.review.resolved`.
+  Both checkers have ten logical rounds at most.
+  Round 10 never allocates round 11. Its statuses are `accepted`, `refuted` and
+  `alternative`.
   An accepted defect fails through C3.9. A complete account
   containing only refuted findings and valid alternatives can reach the final gate; the
-  alternatives also remain in the plan's `### Disagreement` block. `Blocked` or a
+  alternatives remain in the plan's exact `### Disagreement` block. `Blocked` or a
   `DECISION` stops before that settlement. A lost result regenerates its current logical
-  round, including code-checker round 10.
+  round, including design- or code-checker round 10.
 
   A final accepted defect cannot use a generic or reportless failure close. The exact
   immutable checker batch and complete disposition account enter the failure report.
   `attempt-failed.sh` authenticates and hashes that artifact before mutation. The next
-  `attempt-started.sh` call must name the same report. Its first code-checker generation
-  verifies every accepted identity. The obligation propagates through another failure
-  and ends only with the successful retry that consumed it.
+  `attempt-started.sh` call must name the same report. Its first design- or code-checker
+  generation, according to the source obligation, verifies every accepted identity. The
+  obligation propagates through another failure and ends only with the successful retry
+  that consumed it. An accepted Design defect stops before implementation and cannot use
+  C3.9a. A zero-accepted round-10 Design settlement can authorize implementation without
+  changing the adverse checker result to clean. There is no design round 11. A human
+  triplet `pause` or `abort` remains immediate. When it follows an accepted final Design
+  settlement, the stop note itself preserves the exact verdict, settlement, result hash
+  and accepted identities. The next attempt uses `-` instead of a failure-report path,
+  and its first Design manifest receives those identities. A later stop propagates an
+  inherited obligation until one successful retry consumes it.
 
 The per-call failure retry remains separate. An errored, empty or unusable physical call
 uses *When a subagent fails*'s own `bound.spent`, named as that call's retry; it never
@@ -2026,8 +2037,8 @@ the path quoted, like every path in every command (`vocabulary.md`'s rule).
 retiring one. Where they do, **you never make the TwiCC call separately**: a record
 produced by the act itself cannot drift from it.
 
-**A bounded gesture journals its spend, as it spends it.** Design and consolidation have
-three logical checker rounds. Code has ten. Each task has one logical diagnostic, one
+**A bounded gesture journals its spend, as it spends it.** Design and code each have ten
+logical checker rounds. Consolidation has three. Each task has one logical diagnostic, one
 send-back and one relaunch. Every such count lives in `bound.spent` notes and nowhere
 else once a compaction has passed. **Before allocating a new bounded gesture, count its
 lines in the notes.** A physical regeneration of an unconsumed bounded verdict reuses
