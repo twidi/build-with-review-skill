@@ -5675,6 +5675,44 @@ def risk_admission_has_one_shared_impact_vocabulary():
 
 
 @test
+def risk_admission_rejects_artificially_narrow_probability_bases():
+    with open(os.path.join(COMMON_PROMPTS, "review-risk.md"), encoding="utf-8") as f:
+        risk = f.read()
+    with open(os.path.join(HERE, "prompts", "construction", "design-checker.md"), encoding="utf-8") as f:
+        design = f.read()
+    risk_flat = " ".join(risk.split())
+    design_flat = " ".join(design.split())
+
+    check("every condition necessary for the consequence" in risk_flat,
+          "probability must use only necessary conditions")
+    check("other supported paths to the same consequence" in risk_flat,
+          "probability must account for supported alternative paths")
+    check("Hold the candidate's violated property and causal mechanism fixed" in risk_flat,
+          "alternate paths must remain realizations of the same candidate")
+    check("Do not aggregate an independent candidate that only shares the end consequence" in risk_flat,
+          "independent causes must not inflate this candidate's probability")
+    check("A probability basis contradicted by available evidence is invalid" in risk_flat,
+          "contradicted probability bases must not filter findings")
+    check("affects relevance, not probability" in risk_flat,
+          "pre-existing conditions must not lower probability")
+    check("Classify impact from the consequence alone" in risk_flat,
+          "probability must not lower consequence impact")
+
+    check("A necessary condition is not automatically sufficient" in design_flat,
+          "the Design checker must inspect the complete behavioural predicate")
+    check("Try to falsify every `Achieves`-to-step and `To verify`-to-behaviour match" in design_flat,
+          "the Design checker must challenge its positive mappings")
+    check("a supported counter-path leaves the contract false" in design_flat,
+          "a named step must not stand as proof over a counter-path")
+    check("named files are starting evidence, not a closed read set" in design_flat,
+          "the Design must not close its own evidence boundary")
+    check("directly relevant repository evidence needed to close each asserted predicate" in design_flat,
+          "the checker must follow evidence outside the Design's named files")
+    check("already exists before this task remains in scope" in design_flat,
+          "pre-existing conditions relied on by the Design must stay in scope")
+
+
+@test
 def risk_filtered_decisions_never_use_the_shared_blocker_route():
     with open(os.path.join(COMMON_PROMPTS, "review-risk.md"), encoding="utf-8") as f:
         risk = f.read()

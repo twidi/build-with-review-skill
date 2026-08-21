@@ -16,6 +16,11 @@ impact.
 | **IMPORTANT** | Incorrect behaviour, blocked work, broken recovery, or a false result that remains detectable and recoverable. |
 | **MINOR** | Limited friction, clarity, diagnostics, or maintainability without a credible wrong result. |
 
+Classify impact from the consequence alone. Never lower impact because the scenario is
+narrow or unlikely. Probability owns that question. A concrete incorrect behaviour or
+false result is **IMPORTANT** unless its consequence meets the **CRITICAL** definition.
+**MINOR** requires that no credible wrong result occurs.
+
 ## Probability
 
 Classify the probability of the finding's concrete scenario in this project's real use
@@ -30,6 +35,28 @@ and threat model. Do not classify how confident you are that the finding is corr
 
 An adversarial action is not automatically exceptional. It is plausible when the
 product normally exposes that action to an untrusted actor.
+
+### Build the probability basis
+
+Classify the complete concrete scenario established by the proof. Identify the
+candidate's violated property and causal mechanism. State every condition necessary for
+the consequence. Do not add a condition that only makes one example narrower.
+
+Before assigning **RARE** or **EXCEPTIONAL**:
+
+1. Hold the candidate's violated property and causal mechanism fixed. Remove each stated
+   condition in turn. If another supported realization of that same candidate produces
+   the consequence, that condition cannot justify the lower probability.
+2. Inspect other supported paths to the same consequence only when they realize that
+   same candidate. Classify the probability that any such path produces it, not the
+   probability of the narrowest path. Do not aggregate an independent candidate that
+   only shares the end consequence.
+3. Check the basis against every source available to your mandate, such as the spec,
+   accepted Design, code, tests, or other exact evidence. A probability basis
+   contradicted by available evidence is invalid.
+
+Whether a condition existed before the reviewed change affects relevance, not
+probability. Never use `pre-existing` to lower the probability of a relevant candidate.
 
 ## Admission
 

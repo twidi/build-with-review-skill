@@ -36,7 +36,8 @@ Then read:
 
 1. the plan's Global Constraints and responsibility map;
 2. the spec passage from which the task descends;
-3. the real repository code that the Design names.
+3. the real repository code that the Design names, plus directly relevant code needed
+   to verify its assertions.
 
 For round 2 or later, the manifest carries every finding from the prior round and the
 implementer's exact correction account. Round 1 can instead carry accepted final Design
@@ -67,6 +68,18 @@ and maintainability sweep over the Design.
 - Check that declared behaviours distinguish the selected Design from its alternatives.
 - Check every Global Constraint.
 - Detect behaviour that neither the plan nor the spec settles.
+- For each Design statement that a condition permits, prevents, or guarantees a
+  behaviour, inspect the complete predicate in the spec and repository code. The
+  Design's named files are starting evidence, not a closed read set. Follow directly
+  relevant repository evidence needed to close each asserted predicate, including
+  references, callers, and alternate entry points. A necessary condition is not
+  automatically sufficient. Stay within the current task. Do not review unrelated tasks
+  or architecture.
+- Try to falsify every `Achieves`-to-step and `To verify`-to-behaviour match. Naming a
+  Design step is not proof when a supported counter-path leaves the contract false.
+- A condition that already exists before this task remains in scope when the Design
+  relies on it, changes the result produced from it, or leaves the task contract false
+  because of it.
 
 For every new concrete observation, classify impact and probability through
 `review-risk.md`. Return admitted observations. Record risk-filtered observations only in
