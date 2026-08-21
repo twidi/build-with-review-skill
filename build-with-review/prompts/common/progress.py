@@ -4856,39 +4856,14 @@ def product_verifier_identity(entries, before, mandate, subject):
     return opening_index, opening, built, commit, receipt_index, receipt_data
 
 
-def validate_product_finding_verifier(event, data, mandate):
-    if mandate not in PRODUCT_REVIEW_MANDATES:
-        fail("a product finding-verifier has no fixed lens mandate", mandate)
-    identity_keys = {"pass_commit", "pass_gate", "report_sha256"}
+def validate_product_verifier_terminal(data, identity, receipt_data, mandate, subject):
+    if set(data) == set(identity) | {"unusable"}:
+        if data.get("unusable") not in CONSTRUCTION_UNUSABLE_RESULTS:
+            fail(f"{subject} has an unknown unusable reason", data.get("unusable"))
+        return "unusable"
     verdict_keys = {"confirmed", "disproved", "malformed", "claims"}
-    expected = identity_keys if event == "subagent-started" else identity_keys | verdict_keys
-    if not isinstance(data, dict) or set(data) != expected:
-        fail(f"{event} product finding-verifier has malformed identity or result", data)
-    entries = journal_entries()
-    _, opening, _, commit, receipt_index, receipt_data = product_verifier_identity(
-        entries, len(entries), mandate, f"the {mandate} finding-verifier",
-    )
-    identity = {
-        "pass_commit": commit, "pass_gate": note_data(opening)["gate"],
-        "report_sha256": receipt_data["report_sha256"],
-    }
-    if any(data.get(key) != value for key, value in identity.items()):
-        fail(f"the {mandate} finding-verifier does not consume the current report generation",
-             {"expected": identity, "actual": data})
-    starts = [entry for entry in entries[receipt_index + 1:]
-              if entry.get("event") == "subagent-started"
-              and entry.get("kind") == "finding-verifier" and entry.get("mandate") == mandate]
-    ends = [entry for entry in entries[receipt_index + 1:]
-            if entry.get("event") == "subagent-ended"
-            and entry.get("kind") == "finding-verifier" and entry.get("mandate") == mandate]
-    if event == "subagent-started":
-        if starts or ends:
-            fail(f"the current {mandate} report already has a finding-verifier bracket")
-        return
-    if len(starts) != 1 or ends:
-        fail(f"the {mandate} finding-verifier result has no one exact open bracket")
-    if note_data(starts[0]) != identity:
-        fail(f"the {mandate} finding-verifier result changes its opening identity")
+    if set(data) != set(identity) | verdict_keys:
+        fail(f"{subject} has malformed identity or result", data)
     if any(not isinstance(data.get(key), int) or isinstance(data.get(key), bool)
            or data[key] < 0 for key in ("confirmed", "disproved", "malformed")):
         fail(f"the {mandate} finding-verifier has malformed verdict counts", data)
@@ -4911,6 +4886,74 @@ def validate_product_finding_verifier(event, data, mandate):
             or kinds["decision"] != receipt_data["decision"] \
             or kinds["correction"] != expected_count - receipt_data["decision"]:
         fail(f"the {mandate} finding-verifier result contradicts its accepted report")
+    return "complete"
+
+
+def product_verifier_calls(entries, receipt_index, mandate, identity, receipt_data, subject):
+    events = [entry for entry in entries[receipt_index + 1:]
+              if entry.get("kind") == "finding-verifier"
+              and entry.get("mandate") == mandate
+              and entry.get("event") in {"subagent-started", "subagent-ended"}]
+    calls = []
+    expecting = "start"
+    complete = False
+    for entry in events:
+        if complete:
+            fail(f"{subject} continues after its complete verifier result")
+        if expecting == "start":
+            if entry.get("event") != "subagent-started" or note_data(entry) != identity:
+                fail(f"{subject} has a contradictory physical-call opening")
+            calls.append({"start": entry, "end": None, "terminal": None})
+            expecting = "end"
+            continue
+        if entry.get("event") != "subagent-ended" \
+                or any(note_data(entry).get(key) != value for key, value in identity.items()):
+            fail(f"{subject} changes its physical-call identity")
+        terminal = validate_product_verifier_terminal(
+            note_data(entry), identity, receipt_data, mandate, subject,
+        )
+        calls[-1]["end"] = entry
+        calls[-1]["terminal"] = terminal
+        expecting = "start"
+        complete = terminal == "complete"
+    return calls
+
+
+def validate_product_finding_verifier(event, data, mandate):
+    if mandate not in PRODUCT_REVIEW_MANDATES:
+        fail("a product finding-verifier has no fixed lens mandate", mandate)
+    identity_keys = {"pass_commit", "pass_gate", "report_sha256"}
+    if not isinstance(data, dict) or event == "subagent-started" \
+            and set(data) != identity_keys:
+        fail(f"{event} product finding-verifier has malformed identity or result", data)
+    entries = journal_entries()
+    _, opening, _, commit, receipt_index, receipt_data = product_verifier_identity(
+        entries, len(entries), mandate, f"the {mandate} finding-verifier",
+    )
+    identity = {
+        "pass_commit": commit, "pass_gate": note_data(opening)["gate"],
+        "report_sha256": receipt_data["report_sha256"],
+    }
+    if any(data.get(key) != value for key, value in identity.items()):
+        fail(f"the {mandate} finding-verifier does not consume the current report generation",
+             {"expected": identity, "actual": data})
+    calls = product_verifier_calls(
+        entries, receipt_index, mandate, identity, receipt_data,
+        f"the {mandate} finding-verifier",
+    )
+    if event == "subagent-started":
+        if calls and (calls[-1]["end"] is None or calls[-1]["terminal"] == "complete"):
+            fail(f"the current {mandate} report cannot open another finding-verifier call")
+        if len(calls) >= 2:
+            fail(f"the current {mandate} report already used its one physical verifier relaunch")
+        return
+    if not calls or calls[-1]["end"] is not None:
+        fail(f"the {mandate} finding-verifier result has no one exact open bracket")
+    if note_data(calls[-1]["start"]) != identity:
+        fail(f"the {mandate} finding-verifier result changes its opening identity")
+    validate_product_verifier_terminal(
+        data, identity, receipt_data, mandate, f"the {mandate} finding-verifier",
+    )
 
 
 def pass_verifier_state(commit, report_name):
@@ -4929,17 +4972,15 @@ def pass_verifier_state(commit, report_name):
         entries, opening_index, len(entries), built, mandate,
         "the physical finding-verifier",
     )
-    starts = [entry for entry in entries[receipt_index + 1:]
-              if entry.get("event") == "subagent-started"
-              and entry.get("kind") == "finding-verifier" and entry.get("mandate") == mandate
-              and note_data(entry) == {
-                  "pass_commit": commit, "pass_gate": note_data(opening)["gate"],
-                  "report_sha256": receipt_data["report_sha256"],
-              }]
-    ends = [entry for entry in entries[receipt_index + 1:]
-            if entry.get("event") == "subagent-ended"
-            and entry.get("kind") == "finding-verifier" and entry.get("mandate") == mandate]
-    if len(starts) != 1 or ends:
+    identity = {
+        "pass_commit": commit, "pass_gate": note_data(opening)["gate"],
+        "report_sha256": receipt_data["report_sha256"],
+    }
+    calls = product_verifier_calls(
+        entries, receipt_index, mandate, identity, receipt_data,
+        "the physical finding-verifier",
+    )
+    if not calls or calls[-1]["end"] is not None:
         fail("verify-open.sh has no one exact live finding-verifier bracket")
 
 
@@ -4962,46 +5003,18 @@ def validate_review_receipts(entries, opening_index, before, built, subject):
                     )]
         if reopened:
             fail(f"{subject} has a reopened {mandate} report without a fresh receipt")
-        events = [(index, entry) for index, entry in enumerate(
-            entries[receipt_index + 1:before], receipt_index + 1
-        ) if entry.get("kind") == "finding-verifier" and entry.get("mandate") == mandate]
-        starts = [(index, entry) for index, entry in events if entry.get("event") == "subagent-started"]
-        ends = [(index, entry) for index, entry in events if entry.get("event") == "subagent-ended"]
-        if len(starts) != 1 or len(ends) != 1 or starts[0][0] >= ends[0][0]:
-            fail(f"{subject} has no one settled {mandate} finding-verifier bracket")
         opening_data = note_data(entries[opening_index])
         identity = {
             "pass_commit": opening_data["commit"], "pass_gate": opening_data["gate"],
             "report_sha256": counts["report_sha256"],
         }
-        if note_data(starts[0][1]) != identity:
-            fail(f"{subject}'s {mandate} finding-verifier start changes its pass or report")
-        verdict = note_data(ends[0][1])
-        if set(verdict) != set(identity) | {"confirmed", "disproved", "malformed", "claims"} \
-                or any(verdict.get(key) != value for key, value in identity.items()) \
-                or any(not isinstance(verdict.get(key), int) or isinstance(verdict.get(key), bool)
-                       or verdict[key] < 0 for key in ("confirmed", "disproved", "malformed")):
-            fail(f"{subject} has malformed or stale {mandate} verifier proof", verdict)
-        claims = verdict.get("claims")
-        expected_count = sum(counts[key] for key in REPORT_COUNT_KEYS)
-        expected_ids = [f"F{ordinal}" for ordinal in range(1, expected_count + 1)]
-        actual_ids = []
-        verdict_counts = {"confirmed": 0, "disproved": 0, "malformed": 0}
-        kinds = {"correction": 0, "decision": 0}
-        if not isinstance(claims, list) or len(claims) != expected_count:
-            fail(f"{subject}'s {mandate} verifier lacks one result per accepted report claim")
-        for claim in claims:
-            if not isinstance(claim, dict) or set(claim) != {"id", "kind", "verdict"} \
-                    or claim.get("kind") not in kinds or claim.get("verdict") not in verdict_counts:
-                fail(f"{subject} has a malformed {mandate} verifier claim", claim)
-            actual_ids.append(claim["id"])
-            verdict_counts[claim["verdict"]] += 1
-            kinds[claim["kind"]] += 1
-        if actual_ids != expected_ids \
-                or verdict_counts != {key: verdict[key] for key in verdict_counts} \
-                or kinds["decision"] != counts["decision"] \
-                or kinds["correction"] != expected_count - counts["decision"]:
-            fail(f"{subject}'s {mandate} verifier result contradicts its accepted report")
+        calls = product_verifier_calls(
+            entries[:before], receipt_index, mandate, identity, counts,
+            f"{subject}'s {mandate} finding-verifier",
+        )
+        if not calls or calls[-1]["terminal"] != "complete":
+            fail(f"{subject} has no one settled {mandate} finding-verifier result")
+        verdict = note_data(calls[-1]["end"])
         confirmed_total += verdict["confirmed"]
         confirmed_corrections.extend(
             f"{mandate}/{claim['id']}"

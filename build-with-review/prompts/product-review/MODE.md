@@ -159,6 +159,19 @@ Also give it its private, append-only risk-filtered history:
 label `<built lot>`. Every later pass for this root lot gives the same path. Its loss is
 accepted. It never enters a receipt, the journal, or the public report.
 
+Open and refill the exact PRODUCT reviewer pool through one read-only checkpoint:
+
+```
+python3 "<workspace>/prompts/common/review-pool.py" product-review
+```
+
+Launch every lens under `launch now`, record each successful creation with
+`progress.py session-started <id>`, then run the helper again. Continue only when the cap
+is full or all five lenses have an owner. The helper counts only current-pass PRODUCT
+reviewer sessions with the exact reviewer annotations. A verifier subagent, watchdog,
+implementer, other mode, other lot or older pass never occupies this pool. An `idle` lens
+under verification still owns its reviewer slot until its final retirement.
+
 **Two refs, and they are not interchangeable:**
 
 | | |
@@ -197,11 +210,11 @@ completion block before anything else**: a missing, added, omitted, reordered or
 unticked item goes back to the
 lens — **once, journaled as it goes** (`progress.py note bound.spent --mandate <slug>
 --text "malformed block returned - lens <its session id>"`); a second return still
-malformed takes the silent lens's route below — stop, retire `failed`, free the path,
-relaunch fresh, and the relaunch-once stable-blocker rule holds. **An unticked box with a reason is not
+malformed takes the **R1.2 PRODUCT replacement checkpoint** below, and the
+relaunch-once stable-blocker rule holds. **An unticked box with a reason is not
 settled either.** Lift the reason if you can — the lens is alive, and finishing its own
 reading is always cheaper than replacing it. When you cannot, **treat it as a silent
-lens**: stop its process, retire it `failed`, move its report aside, relaunch fresh. A
+lens** and use the **R1.2 PRODUCT replacement checkpoint**. A
 reading a lens honestly did not do is still a reading nobody did, **and no later pass
 exists to do it** — this mode has no next round that re-covers everything. **And
 relaunch once**: a replacement returning the same reason is a stable blocker, not
@@ -209,6 +222,11 @@ inattention — stop replacing and take it to the human; `SKILL.md`'s audit duty
 the gesture and its journal line. The pass waits on their answer.
 
 Then go to **R2.1** for that report — **do not wait for the others.**
+
+First obey the report's `CONTROLLER HANDOFF — REVIEW POOL`. Run the helper, fill every
+reported free slot, record the new sessions, and run the helper again. Then return to this
+exact report and continue with R2.1. A second report arriving during the refill does not
+replace or cancel either obligation.
 
 **The receipt follows the audit, never precedes it** — `report.received` says accepted:
 a report whose block is still being repaired has not arrived yet, however present its
@@ -237,12 +255,27 @@ the lines naming THIS session — and on the second tick or on no answer you
 the cost is precise: **the two of them write to the same report path**, and a lens that
 wakes late overwrites its replacement's work with an older reading.
 
-**Relaunch it as a fresh session** — a pass with four lenses out of five is not a pass,
-and its missing report is exactly where a defect would have been.
+Use the **R1.2 PRODUCT replacement checkpoint**. A pass with four lenses out of five is
+not a pass, and its missing report is exactly where a defect would have been.
 
-**And free its report path first** — the silent-child rule in `SKILL.md`'s *Retirement*
-section carries the gesture: `<built lot>-<slug>.md` moves to
-`<built lot>-<slug>-failed.md` before the replacement exists.
+#### R1.2 PRODUCT replacement checkpoint
+
+This is the only lens replacement route. Never create the replacement directly.
+
+1. Stop the old lens process.
+2. Record its non-successful retirement.
+3. Move `<built lot>-<slug>.md` to `<built lot>-<slug>-failed.md`. The silent-child rule
+   in `SKILL.md` owns the exact safe gesture. The fixed report path must be free before
+   another writer can exist.
+4. Run `python3 "<workspace>/prompts/common/review-pool.py" product-review`.
+5. Launch only the assignments listed under `launch now`, in that exact order. Record
+   each successful creation with `progress.py session-started <id>`. The failed lens can
+   wait if an earlier pending lens now owns the free slot.
+6. Run the helper again. Then return to the exact report or verifier settlement that the
+   checkpoint interrupted.
+
+The old retirement must precede every replacement start. Another incoming result never
+authorizes a local extra launch. The helper is the sole cap and assignment authority.
 
 When all five reports are verified — **their blocks complete: every box ticked, lifted,
 or its lens replaced** — and nothing survived, first check every `decision.batch.ready`
@@ -319,6 +352,31 @@ commit or report generation before it creates or removes a worktree.
 **Launch it the moment the report arrives.** A malformed finding has to go back while
 its reviewer is still alive.
 
+Retain the provider subagent handle. The `subagent-started` line means the physical call
+is unsettled, not complete. Before another launch, before declaring the result lost, and
+before ending your turn, inspect the provider's active-subagent roster. On Codex, use its
+subagent list.
+
+- If the exact verifier is active, keep it and continue other useful work.
+- If it completed, write its exact complete `subagent-ended` terminal before acting.
+- If it is absent or its result is unavailable, close that exact call first:
+
+```
+progress.py subagent-ended finding-verifier --mandate <slug> \
+  --data '{"pass_commit":"<same pass_commit>","pass_gate":"<same pass_gate>","report_sha256":"<same report_sha256>","unusable":"lost"}'
+```
+
+`error`, `empty`, `lost`, and `unusable` are the only unusable reasons. One unusable
+terminal permits one fresh physical verifier for the same accepted report. A second
+unusable terminal is a stable blocker. A complete terminal forbids another verifier.
+The alternating physical brackets are the durable retry count for this call; do not add
+a second broad retry counter.
+
+Never end a turn with a required verifier forgotten. If no useful controller work
+remains, use the provider-native result or wait mechanism. Never use a TwiCC process-wait
+loop for reviewer sessions; those sessions return asynchronously and the watchdog owns a
+missing wake-up.
+
 **Set that reviewer `idle` as you launch its verifier.** It has stopped working and it is
 not waiting on an answer — it is parked, and it may get work again if a finding comes
 back. Leave it `working` and the watchdog flags it for silence it is entitled to. Set it
@@ -356,6 +414,19 @@ progress.py session-status <id> idle
 progress.py session-retired <id> done --archive --hide
 ```
 
+Record the verifier terminal before any settlement action. Settle the exact report, and
+retire its lens only when no restatement remains. Then run:
+
+```
+python3 "<workspace>/prompts/common/review-pool.py" product-review
+```
+
+Launch every lens under `launch now`, record each `session-started`, and run the helper
+again. Then return to the exact settlement that the checkpoint interrupted. Reconcile
+every other unsettled provider verifier before ending the turn. Run the same checkpoint
+after every reviewer or verifier message and before yielding while an unlaunched lens
+remains.
+
 ### R2.3 · What you may judge, and what you may not
 
 | | | |
@@ -377,7 +448,8 @@ is a new report, and the first verifier's verdicts go with the one they describe
 nothing they confirmed is kept. Record its arrival and verify it exactly as a first
 arrival: R1.2's line, R2.1's fresh verifier. **Still flooded after that one return, the
 lens is the problem, not the report**: stop its process, retire it `failed`, move the
-report aside, and relaunch the reading fresh — the silent lens's route, and the same
+report aside, then continue at the **R1.2 PRODUCT replacement checkpoint** from its
+helper step — the old process, retirement, and path move are already complete. This is the same
 outcome as the authorless case. A single claim closes after its one return; a whole
 reading is never closed, so it is redone.
 
@@ -953,16 +1025,16 @@ with the five lens reports.
 | | |
 |---|---|
 | **A report whose last journal line for its mandate is `report.received`** — no `bound.spent` return after it, inside the slice | settled as of that receipt. At a resume it is verified exactly as if it had just arrived. |
-| **A report file with no receipt — or whose last line for its mandate is a `bound.spent` return** | it may have been cut mid-write, or mid-rewrite — **a receipt proves the write it closed, never the one a return reopened**, and the completion block opens a report, so its presence proves a start, never an end. Treat it as absent: at a resume that reading is relaunched, fresh, **after its file moves aside**, exactly as for a silent lens. |
-| **A verifier that was running** | its call ended at the stop's wait step — returned, or errored out — and its verdicts are discarded. Record **which reports are verified and which are not** — in the stopping-point note the stop procedure writes into the journal; a record left in the conversation dies with it. |
-| **The copy of the tree that verifier was using** | it outlives the subagent that made it: `verify-close.sh` never ran. `git worktree list` shows it, at `<repo>/.superpowers/bwr/tmp/bwr-verify-<run>-<report file name>/w`; close it with `verify-close.sh <that report file name>` — **safe only because the wait step already ran**: a force-remove under a call still writing in the copy races its last writes. The closer repeats the physical-ground checks and removes only an exact worktree registration owned by this repository; a symlink or unregistered directory is refused untouched. |
+| **A report file with no receipt — or whose last line for its mandate is a `bound.spent` return** | it may have been cut mid-write, or mid-rewrite — **a receipt proves the write it closed, never the one a return reopened**, and the completion block opens a report, so its presence proves a start, never an end. Treat it as absent. Use the **R1.2 PRODUCT replacement checkpoint**: stop and retire any surviving owner first, move its file aside, then let the helper select the next assignments. |
+| **A verifier that was running** | inspect the provider's active-subagent roster. Keep an active exact call. Record a completed exact result. If the call is absent or its result is unavailable, close its exact bracket with `unusable:"lost"`; never guess a verdict. Relaunch the same accepted report only when its one physical relaunch remains. Record **which reports are verified and which are not** in the stopping-point note. |
+| **The copy of the tree that verifier was using** | it outlives the subagent that made it: `verify-close.sh` never ran. Close it only after the provider roster proves no verifier call still writes there and the exact call has a terminal. `git worktree list` shows it at `<repo>/.superpowers/bwr/tmp/bwr-verify-<run>-<report file name>/w`; close it with `verify-close.sh <that report file name>`. The closer repeats the physical-ground checks and removes only an exact worktree registration owned by this repository; a symlink or unregistered directory is refused untouched. |
 
 **A finding whose author was cancelled has nobody to send it back to.** If it turns out
 malformed at the resume, it is closed with that as the reason — the same outcome as a
 finding that comes back still vague. **A report that would go back whole** — flooded
 with trivia — **is never closed that way: a pass that drops a lens is not a pass.** It
 takes the silent lens's route instead: its file moves aside, and a fresh session is
-relaunched. One claim closes because it had its one return; a whole reading is redone
+selected only through the **R1.2 PRODUCT replacement checkpoint**. One claim closes because it had its one return; a whole reading is redone
 because nobody else covers it.
 
 **And the resume lands on the last phase boundary the slice records — the report table

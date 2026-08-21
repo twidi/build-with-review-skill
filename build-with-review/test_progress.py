@@ -3803,6 +3803,126 @@ def product_verifier_and_physical_copy_consume_one_exact_pass_generation():
     )
     check(ended.returncode == 0, ended.stdout + ended.stderr)
 
+
+@test
+def product_verifier_unusable_terminal_allows_exact_regeneration():
+    commit, gate, owner = seed_task_gate("lot-1", "verifier-regeneration")
+    append_note("pass.opened", {
+        "built": "lot-1", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": owner,
+        "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
+    })
+    identities = {}
+    for mandate in ("unlooked", "user", "meaning", "quality", "coverage"):
+        content = product_report_text(mandate)
+        report_sha = write_report(
+            f"reports/product-review/lot-1/lot-1-{mandate}.md", content,
+        )
+        receipt = run_progress(
+            "note", "report.received", "--mandate", mandate,
+            "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+        )
+        check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+        identities[mandate] = {
+            "pass_commit": commit, "pass_gate": gate, "report_sha256": report_sha,
+        }
+
+    identity = identities["user"]
+    first = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(first.returncode == 0, first.stdout + first.stderr)
+    before = len(journal_lines())
+    overlapping = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(overlapping.returncode != 0 and len(journal_lines()) == before,
+          "a second physical verifier opened over an unsettled call")
+    unusable = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps({**identity, "unusable": "lost"}),
+    )
+    check(unusable.returncode == 0, unusable.stdout + unusable.stderr)
+    before = len(journal_lines())
+    terminal_without_start = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps({
+            **identity, "confirmed": 0, "disproved": 0, "malformed": 0, "claims": [],
+        }),
+    )
+    check(terminal_without_start.returncode != 0 and len(journal_lines()) == before,
+          "a result landed without a regenerated physical opening")
+    second = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(second.returncode == 0, second.stdout + second.stderr)
+
+    for mandate, current_identity in identities.items():
+        if mandate != "user":
+            started = run_progress(
+                "subagent-started", "finding-verifier", "--mandate", mandate,
+                "--data", json.dumps(current_identity),
+            )
+            check(started.returncode == 0, started.stdout + started.stderr)
+        ended = run_progress(
+            "subagent-ended", "finding-verifier", "--mandate", mandate,
+            "--data", json.dumps({
+                **current_identity,
+                "confirmed": 0, "disproved": 0, "malformed": 0, "claims": [],
+            }),
+        )
+        check(ended.returncode == 0, ended.stdout + ended.stderr)
+
+    before = len(journal_lines())
+    after_result = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(after_result.returncode != 0 and len(journal_lines()) == before,
+          "a complete verifier result allowed another physical call")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":0}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+
+
+@test
+def product_verifier_refuses_a_second_physical_relaunch():
+    commit, gate, _ = seed_task_gate("lot-1", "verifier-relaunch-limit")
+    append_note("pass.opened", {
+        "built": "lot-1", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
+        "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
+    })
+    content = product_report_text("user")
+    report_sha = write_report("reports/product-review/lot-1/lot-1-user.md", content)
+    receipt = run_progress(
+        "note", "report.received", "--mandate", "user",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    identity = {"pass_commit": commit, "pass_gate": gate, "report_sha256": report_sha}
+    for reason in ("error", "lost"):
+        started = run_progress(
+            "subagent-started", "finding-verifier", "--mandate", "user",
+            "--data", json.dumps(identity),
+        )
+        check(started.returncode == 0, started.stdout + started.stderr)
+        ended = run_progress(
+            "subagent-ended", "finding-verifier", "--mandate", "user",
+            "--data", json.dumps({**identity, "unusable": reason}),
+        )
+        check(ended.returncode == 0, ended.stdout + ended.stderr)
+    before = len(journal_lines())
+    third = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(third.returncode != 0 and len(journal_lines()) == before,
+          "a finding verifier received a second physical relaunch")
+
+
 @test
 def pass_close_requires_all_five_settled_receipts_and_verifiers():
     seed_review_pass(omit="coverage")

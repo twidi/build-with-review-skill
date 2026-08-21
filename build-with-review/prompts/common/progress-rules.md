@@ -155,10 +155,13 @@ matching workspace and committed task manifest, every stable task result, the fi
 task result and the exact `lot.built` boundary. It cannot hide an open prior pass. Each
 lens has one fixed completion account. `report.received` audits it, derives the four
 typed counts from every exact structured report finding, and freezes the pass
-commit, gate and report SHA-256. Each finding-verifier bracket consumes those same
+commit, gate and report SHA-256. Each finding-verifier physical call consumes those same
 identities, and `verify-open.sh` refuses any other commit or report generation before
-touching its detached copy. An ordinary `pass.closed` consumes the latest exact pass
-opening, five settled report receipts and their completed verifier brackets. A positive close also authenticates its allocation,
+touching its detached copy. Calls alternate start and terminal. A terminal is one complete
+finding account or one exact `error`, `empty`, `lost` or `unusable` result. An unusable
+terminal permits one relaunch against the same receipt. It never settles that receipt. A
+complete result permits no later call. An ordinary `pass.closed` consumes the latest exact
+pass opening, five settled report receipts and their final completed verifier calls. A positive close also authenticates its allocation,
 confirmed artifact, plan and carried batch work. A clean close refuses any allocation or
 unfinished answer work. A voided close consumes one exact product-review amendment
 opening. `lot.delivered` consumes only the current clean close, its reviewed SHA, the

@@ -113,6 +113,19 @@ Never ask questions in that message. State assumptions instead.
 
 **The block goes in the message, not only in the file** — it is what lets the controller check your coverage without opening anything.
 
+End the same message with this controller handoff:
+
+```text
+CONTROLLER HANDOFF — REVIEW POOL
+Run: python3 <workspace>/prompts/common/review-pool.py spec
+Launch every assignment listed under "launch now" and record each session-started.
+Then return to this exact report and finish its receipt and retirement.
+Run the helper again after retirement, refill again, then resume the interrupted round work.
+```
+
+This handoff is part of every result. Another reviewer message can arrive while the
+controller handles yours. It must not erase the refill or this report's settlement.
+
 ## Re-review rounds
 
 From round 2 on, the round message carries three short lists, and nothing else of the past:

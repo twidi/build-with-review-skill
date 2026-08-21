@@ -215,6 +215,18 @@ The call also publishes one immutable snapshot at
 `reports/spec-review/round-<N>-spec.md`. Every reviewer in this round reads that snapshot,
 not a mutable final path. The opening records its SHA-256 and exact source boundary.
 
+Immediately reconcile the exact reviewer pool:
+
+```
+python3 "<workspace>/prompts/common/review-pool.py" spec
+```
+
+Launch every mandate listed under `launch now`, and record each successful creation with
+`progress.py session-started <id>`. Run the helper again after those launches. Continue
+only when the cap is full or the queue is empty. The helper counts only current-round
+SPEC reviewer sessions with the exact reviewer annotations. A fixer, watchdog, subagent,
+other mode, other lot or other round never occupies this pool.
+
 ### S3.2 · Assembling a reviewer prompt
 
 `mcp__twicc__create_session` per reviewer: the provider the human chose **for reviewers**,
@@ -301,6 +313,18 @@ wait for the fixer handoff:
 ```
 progress.py session-retired <id> done --archive --hide
 ```
+
+The accepted retirement frees one reviewer slot. Run the exact pool checkpoint now:
+
+```
+python3 "<workspace>/prompts/common/review-pool.py" spec
+```
+
+Launch every mandate under `launch now`, record each `session-started`, and run the helper
+again. Then return to the exact report, verifier result or fixer work that this checkpoint
+interrupted. Also run this checkpoint after every reviewer message and before yielding
+while this round still has an unlaunched mandate. An incoming second result never cancels
+the refill obligation created by the first result.
 
 ### S3.4 · The fixer
 
@@ -605,8 +629,27 @@ same order.**
 **The session stays live and `working` for ONE repair, journaled as you send it back**
 — `progress.py note bound.spent --mandate <slug> --text "malformed block returned -
 <its session id>"`. A second return still malformed is not a block to repair:
-`SKILL.md`'s audit duty carries the route — the silent-child treatment, and its
-stable-blocker exit.
+`SKILL.md`'s audit duty carries the stop, retirement and report-path move. Then use the
+**S3.3 SPEC reviewer replacement checkpoint** below. Its stable-blocker exit remains.
+
+#### S3.3 SPEC reviewer replacement checkpoint
+
+This checkpoint applies only to a current-round SPEC reviewer replacement. It does not
+change the direct replacement rules for fixers or other child roles.
+
+1. Stop the old reviewer process.
+2. Record its non-successful retirement.
+3. Move its fixed round-and-mandate report aside through `SKILL.md`'s silent-child rule.
+   The report path must be free before another writer exists.
+4. Run `python3 "<workspace>/prompts/common/review-pool.py" spec`.
+5. Launch only the mandates under `launch now`, in that exact order. Record every
+   successful creation with `progress.py session-started <id>`.
+6. Run the helper again. Then return to the exact report work that this checkpoint
+   interrupted.
+
+The failed mandate can remain queued when an earlier pending mandate receives the slot.
+The old retirement must precede every replacement start. Never create the remembered
+mandate directly.
 
 ### An infeasible contract
 
@@ -732,9 +775,11 @@ write every permitted direct terminal before opening any new ordinary conflict.
   mandate, as the re-entry rules at the top of this file say.
 - **A round is open and reports are missing** — its `round.opened` lists mandates with
   no `report.received` **carrying that round** — the receipt's own `--round` value,
-  since mandates repeat from round to round: **finish the round.** Fresh reviewers for the
-  missing mandates only, same round number, each partial file moved aside first — an
-  accepted report stands, and its reviewer owes nothing.
+  since mandates repeat from round to round: **finish the round.** Replacement reviewers
+  for missing mandates are selected only through the **S3.3 SPEC reviewer replacement
+  checkpoint**. Stop and non-successfully retire any surviving old owner, move each
+  partial file aside, then run the helper. Launch only `launch now`; never create a
+  remembered mandate directly. An accepted report stands, and its reviewer owes nothing.
 - **The round is complete and its findings are not applied** — no `fixer.returned`
   since that round's reports: **recreate the fixer** — a fresh session, created as
   S3.4 says, inheriting the decisions log — **and dispatch the round's findings again,

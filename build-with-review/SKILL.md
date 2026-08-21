@@ -1581,7 +1581,7 @@ session already carries the trace, so there is nothing to reread on its own. The
 verifiers are the same. A reviewer reports to *you*, and its work has to be auditable by
 itself.
 
-### Two rules for every subagent you launch
+### Three rules for every subagent you launch
 
 **A subagent is your provider's own mechanism, never a TwiCC session.** The `Agent` tool
 on Claude Code, its equivalent on Codex. If you find yourself calling `create_session`
@@ -1600,6 +1600,23 @@ messages while one runs.
 
 *Otherwise you are frozen until it answers, and everything else that was working for you
 waits with you.*
+
+**3 · Its physical bracket reaches one terminal before you forget it.** A
+`subagent-started` line proves only that the provider call is unsettled. It does not prove
+that the provider still runs it. Before you duplicate a call, classify it as lost, or end
+your own turn, inspect the provider's active-subagent roster. On Codex, use its subagent
+list. Do not use TwiCC session process tools for provider subagents.
+
+- Still active: keep that call, continue useful work, and reconcile it again before your
+  turn ends.
+- Completed: write its exact `subagent-ended` terminal before you act on the result.
+- Absent or result unavailable: use the call site's unusable terminal, when it defines
+  one, before any regeneration.
+
+Never end a turn with a required provider subagent forgotten. If no other useful work
+remains, use the provider-native result or wait mechanism. A TwiCC child session is
+different: it messages you asynchronously, and the watchdog owns a missing wake-up.
+Never start a TwiCC process-wait loop for a child session.
 
 ### When a subagent fails
 
@@ -1623,6 +1640,10 @@ granted a second. **Before repeating, count only the lines that name THIS call.*
 
 Models fail transiently, and a second call usually returns.
 
+The PRODUCT finding verifier is the exact structured exception. Its unusable terminal
+and alternating physical bracket count carry its one relaunch. Do not add this generic
+`bound.spent` counter to that call.
+
 **Twice means the problem is in its prompt or in what you gave it**, not in the agent.
 Treat it as a blocker: say what you asked, what came back twice, and stop.
 
@@ -1641,10 +1662,18 @@ lost result follows the ordinary rule directly.
 What makes the loss safe is already the design: a subagent is handed **paths, never
 contents**, so every input it read — a frozen prompt, a report, a ref, the tree — is
 still there. **A result lost before it was consumed is regenerated, never remembered:
-relaunch the subagent, same prompt, and act on what comes back.** The relaunch writes a
-new journal bracket, and kinds repeat. Never rebuild a lost verdict from memory, and
-never act on the journal's aggregate alone — the counts say how much came back, never
+close its exact open bracket first when its call site has an unusable terminal, then
+relaunch the subagent with the same prompt and act on what comes back.** The relaunch
+writes a new journal bracket, and kinds repeat. Never rebuild a lost verdict from memory,
+and never act on the journal's aggregate alone — the counts say how much came back, never
 what to act on.
+
+A PRODUCT REVIEW finding verifier uses its report identity as the physical-call identity.
+Its terminal is the complete structured finding account or `{"unusable":"error"}`,
+`{"unusable":"empty"}`, `{"unusable":"lost"}` or `{"unusable":"unusable"}`, together
+with the unchanged pass commit, gate and report SHA-256. The unusable terminal does not
+settle the report. It permits one physical relaunch against the same report. A second
+unusable call is a stable blocker. A complete result forbids another call.
 
 **A bounded domain round is not the physical call that returns its result.** At the four
 call sites that pair `bound.spent` with `verdict.consumed` — design checker, code checker,
@@ -1816,17 +1845,29 @@ you get 20 rows and no warning about the rest.
 
 - **Never hide a running session.** Hide it at its retirement point, where you also
   archive it.
-- **The cap counts active child sessions, except the watchdog.** A reviewer, a fixer and an
-  implementer each hold one slot. **Subagents are not counted** — a reviewer whose verifier
-  is running is parked, so the pair costs the one slot the reviewer already holds, and
-  counting the verifier would leave a full pool unable to launch the very thing that frees
-  a slot.
+- **In SPEC and PRODUCT REVIEW, the cap counts only exact reviewer sessions in that
+  review pool.** Match `job`, `mode`, feature workspace, lot, round and mandate as the
+  mode defines them. A fixer, implementer, watchdog, other generation or provider
+  subagent does not consume that reviewer pool. A reviewer whose verifier is running is
+  parked and still owns its one reviewer slot.
 - **A child holds its slot until its work is accepted**, which can be well after the
   moment its report lands. Launch the next wave on that, or you go over the cap.
 - **The human sets the cap**, once, in the same widget call as the provider. Record it and
   apply it throughout. Never raise it because a phase has more work.
-- Run a pool of that many slots: as each child reports, passes your check, and is retired,
-  launch the next.
+- **Never refill a review pool from memory.** At every possible slot change, run the
+  frozen read-only helper for the current mode:
+
+  ```sh
+  python3 "<workspace>/prompts/common/review-pool.py" spec
+  python3 "<workspace>/prompts/common/review-pool.py" product-review
+  ```
+
+  Launch every assignment under `launch now`, record each `session-started` immediately,
+  and rerun the helper. Continue only when the pool is full or the pending queue is empty.
+  Then return to the exact report or verifier result that triggered the checkpoint.
+- Run this checkpoint after every accepted retirement, every incoming reviewer or verifier
+  message, every replacement, and before yielding while review assignments remain. An
+  incoming second message never cancels a refill already exposed by the journal.
 
 **Where parallelism actually exists**
 

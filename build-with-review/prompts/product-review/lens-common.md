@@ -238,4 +238,15 @@ Say so, and **name the three or four things you looked at hardest**. A report th
 found nothing is only useful if it says where it looked.
 
 **Your final message is a pointer to your report**, plus its verdict in one line and
-the count by severity. Not the report itself.
+the count by severity. Not the report itself. End that same message with:
+
+```text
+CONTROLLER HANDOFF — REVIEW POOL
+Run: python3 <workspace>/prompts/common/review-pool.py product-review
+Launch every assignment listed under "launch now" and record each session-started.
+Then return to this exact lens report, accept its receipt, and launch its finding verifier.
+After later settlement and retirement, run the helper again and resume interrupted work.
+```
+
+Another lens can report while the controller handles yours. It must not erase the refill
+or this report's adjudication.

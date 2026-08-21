@@ -181,4 +181,16 @@ Then one line: how many confirmed, disproved, malformed.
 **If two findings in this report are the same finding**, say so — you are the first
 reader to see them side by side.
 
-Your final message is the report. Begin with the counts.
+Your final message is the report. Begin with the counts. End it with:
+
+```text
+CONTROLLER HANDOFF — SUBAGENT TERMINAL FIRST
+Record subagent-ended for this exact verifier result before any other action.
+Settle this exact lens report. Retire its lens only when no restatement remains.
+Run: python3 <workspace>/prompts/common/review-pool.py product-review
+Launch every assignment listed under "launch now" and record each session-started.
+Then return to unfinished settlement work and reconcile every other unsettled provider subagent before yielding.
+```
+
+Your returned message is not itself the durable terminal. The controller records that
+terminal before it uses your verdicts.
