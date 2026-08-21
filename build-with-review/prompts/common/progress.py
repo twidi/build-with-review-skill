@@ -5068,8 +5068,12 @@ def validate_current_direct_terminals(entries, before, subject):
                 and note_data(entry).get("ruling") == ruling,
                 f"{subject}'s current authority for {ruling}",
             )
-        else:
-            owner, conflict = state_ref.rsplit("/C", 1)
+            terminal_authority = state_kind, state_ref, authority_artifact_sha(authority)
+        elif state_kind == "decision.conflict.ready":
+            match = re.fullmatch(r"(.+)/C([1-9][0-9]*)", str(state_ref))
+            if match is None:
+                fail(f"{subject}'s current conflict authority for {ruling} is malformed", state_ref)
+            owner, conflict = match.groups()
             authority = exact_matches(
                 entries[:before],
                 lambda entry: entry.get("kind") == state_kind
@@ -5077,13 +5081,61 @@ def validate_current_direct_terminals(entries, before, subject):
                 and note_data(entry).get("conflict") == int(conflict),
                 f"{subject}'s current authority for {ruling}",
             )
-        authority_sha = authority_artifact_sha(authority)
+            terminal_authority = state_kind, state_ref, authority_artifact_sha(authority)
+        elif state_kind == "decision.recheck.completed":
+            recheck = exact_matches(
+                entries[:before],
+                lambda entry: entry.get("kind") == state_kind
+                and note_data(entry).get("commit_op") == state_ref
+                and note_data(entry).get("accepted") is True
+                and note_data(entry).get("missing") == []
+                and any(isinstance(action, dict) and action.get("answer") == ruling
+                        for action in (note_data(entry).get("actions") or [])),
+                f"{subject}'s current recheck for {ruling}",
+            )
+            recheck_data = note_data(recheck)
+            recheck_index = next(index for index, entry in enumerate(entries[:before])
+                                 if entry is recheck)
+            if recheck_data.get("owner") == ruling:
+                validate_recheck_artifact(entries[:before], recheck_index, recheck)
+                commit = exact_matches(
+                    entries[:recheck_index],
+                    lambda entry: entry.get("kind") == "spec.committed"
+                    and note_data(entry).get("ruling") == ruling
+                    and note_data(entry).get("op") == state_ref
+                    and note_data(entry).get("sha") == recheck_data.get("sha"),
+                    f"{subject}'s current recheck commit for {ruling}",
+                )
+                commit_data = note_data(commit)
+                terminal_authority = (
+                    commit_data.get("state_kind"), commit_data.get("state_ref"),
+                    commit_data.get("artifact_sha256"),
+                )
+            elif recheck_data.get("owner") == "spec-loop":
+                try:
+                    validate_spec_loop_generation(entries[:before], recheck_index)
+                except AuthorityPrecedenceError as exc:
+                    fail(f"{subject}'s current SPEC-loop recheck for {ruling} is invalid", exc)
+                validate_spec_loop_artifact(recheck)
+                members = [member for member in (recheck_data.get("rulings") or [])
+                           if isinstance(member, dict) and member.get("ruling") == ruling]
+                if len(members) != 1:
+                    fail(f"{subject}'s current SPEC-loop recheck for {ruling} is incomplete")
+                terminal_authority = tuple_from(members[0])
+            else:
+                fail(f"{subject}'s current recheck for {ruling} has an unknown owner",
+                     recheck_data.get("owner"))
+            if terminal_authority is None or not all(terminal_authority):
+                fail(f"{subject}'s current recheck for {ruling} has no terminal authority")
+        else:
+            fail(f"{subject}'s current authority for {ruling} has an unknown generation", state_kind)
+        authority_kind, authority_ref, authority_sha = terminal_authority
         terminals = [entry for entry in entries[:before]
                      if entry.get("kind") == "ruling.applied"
                      and note_data(entry).get("ruling") == ruling
                      and note_data(entry).get("route") == answer.get("route")
-                     and note_data(entry).get("authority_kind") == state_kind
-                     and note_data(entry).get("authority_ref") == state_ref
+                     and note_data(entry).get("authority_kind") == authority_kind
+                     and note_data(entry).get("authority_ref") == authority_ref
                      and note_data(entry).get("authority_sha256") == authority_sha]
         if len(terminals) != 1:
             fail(f"{subject} requires one current terminal for {ruling}", f"found {len(terminals)}")

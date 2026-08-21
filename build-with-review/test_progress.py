@@ -4080,6 +4080,121 @@ def pass_close_rejects_an_unapplied_current_direct_ruling():
           "a pass close bypassed an unapplied current direct ruling")
 
 
+def seed_applied_direct_recheck():
+    state_path = seed_direct_ruling()
+    sha = "a" * 40
+    seed_bound_commit(
+        "R1", "edit-r1", sha, state_kind="ruling.ready", state_ref="R1",
+        state_path=state_path,
+    )
+    report_path = "reports/answers/R1-recheck.md"
+    report_sha = write_report(report_path, "direct accepted recheck\n")
+    action = [{"answer": "R1", "status": "active", "route": "spec-in-place"}]
+    recheck = run_progress(
+        "note", "decision.recheck.completed",
+        "--data", json.dumps(recheck_data(
+            "R1", "edit-r1", sha, action, artifact_sha=report_sha,
+        )),
+        "--text", report_path,
+    )
+    check(recheck.returncode == 0, recheck.stdout + recheck.stderr)
+
+    terminal = {
+        "answer": "R1", "ruling": "R1", "route": "spec-in-place",
+        "sha": sha, "recheck_op": "edit-r1", "authority_kind": "ruling.ready",
+        "authority_ref": "R1", "authority_sha256": file_sha256(state_path),
+    }
+    applied = run_progress("note", "ruling.applied", "--data", json.dumps(terminal))
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    return report_path
+
+
+def seed_applied_spec_loop_recheck():
+    state_path = seed_direct_ruling(route="spec-fixer")
+    authority = {
+        "authority_kind": "ruling.ready", "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    }
+    append_note("fixer.dispatched", {"ruling": "R1", "route": "spec-fixer", **authority})
+    commit_op, sha = "close-op-1", "a" * 40
+    append_note("spec.committed", {
+        "op": commit_op, "sha": sha, "spec_round": 4,
+        "review_sha256": "b" * 64, "spec_sha256": "c" * 64,
+    })
+    common = {
+        "owner": "spec-loop", "commit_op": commit_op, "sha": sha,
+        "ruling": "R1", **authority,
+    }
+    started = run_progress("subagent-started", "finding-verifier", "--data", json.dumps(common))
+    check(started.returncode == 0, started.stdout + started.stderr)
+    ended = run_progress(
+        "subagent-ended", "finding-verifier", "--data", json.dumps({**common, "present": True})
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    recheck_data_value = {
+        "owner": "spec-loop", "sha": sha, "commit_op": commit_op,
+        "accepted": True, "missing": [],
+        "rulings": [{"ruling": "R1", **authority}],
+        "actions": [{"answer": "R1", "status": "active", "route": "spec-fixer"}],
+        "verifiers": [{"ruling": "R1", "present": True}],
+    }
+    artifact_path = "reports/answers/spec-loop-close-op-1.json"
+    write_report(artifact_path, json.dumps(recheck_data_value, sort_keys=True))
+    recheck_data_value["artifact_sha256"] = file_sha256(artifact_path)
+    recheck = run_progress(
+        "note", "decision.recheck.completed", "--text", artifact_path,
+        "--data", json.dumps(recheck_data_value),
+    )
+    check(recheck.returncode == 0, recheck.stdout + recheck.stderr)
+    terminal = {
+        "answer": "R1", "ruling": "R1", "route": "spec-fixer",
+        "sha": sha, "recheck_op": commit_op, **authority,
+    }
+    applied = run_progress("note", "ruling.applied", "--data", json.dumps(terminal))
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    return artifact_path
+
+
+@test
+def pass_close_accepts_an_applied_direct_recheck_generation():
+    seed_applied_direct_recheck()
+
+    seed_review_pass()
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":0}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+
+
+@test
+def pass_close_accepts_an_applied_spec_loop_recheck_generation():
+    seed_applied_spec_loop_recheck()
+
+    seed_review_pass()
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":0}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+
+
+@test
+def pass_close_rejects_changed_applied_direct_recheck_artifact():
+    artifact_path = seed_applied_direct_recheck()
+    write_report(artifact_path, "changed direct recheck\n")
+    seed_review_pass()
+    before = len(journal_lines())
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":0}')
+    check(closed.returncode != 0 and len(journal_lines()) == before,
+          "a pass close accepted a changed direct recheck artifact")
+
+
+@test
+def pass_close_rejects_changed_applied_spec_loop_recheck_artifact():
+    artifact_path = seed_applied_spec_loop_recheck()
+    write_report(artifact_path, "{}")
+    seed_review_pass()
+    before = len(journal_lines())
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":0}')
+    check(closed.returncode != 0 and len(journal_lines()) == before,
+          "a pass close accepted a changed SPEC-loop recheck artifact")
+
+
 @test
 def positive_pass_close_requires_exact_allocation_and_artifacts():
     seed_review_pass(confirmed=1)
