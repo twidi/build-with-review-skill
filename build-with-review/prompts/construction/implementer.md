@@ -729,18 +729,23 @@ Now spawn one fresh **gate runner** before you commit:
   never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
   Never test either file directly;
 
-- give it the real checkout-local `gate.md` path and the exact operation, gate blob,
-  candidate tree, predecessor and gate-execution identity printed by `gate-check.sh`;
-- give it the exact output and verification inputs:
+- give it only this operation-specific input:
 
   ```text
-  report: <workspace>/reports/gate/<op>.json
-  verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>
+  operation: <op>
   ```
 
-It uses that verify command around the shared executor. It runs the exact frozen schedule
-only through `gate_execution.py run <op>`. Never copy the gate lines or a schedule into
-its message.
+- tell it to derive every gate-specific input before other gate work through:
+
+  ```sh
+  bash <workspace>/prompts/construction/gate-check.sh runner-input <op>
+  ```
+
+Never copy a gate path, blob, tree, predecessor, execution identity, report path,
+verification command, gate line or schedule into its message. The helper returns the
+complete authoritative input from the live marker. The runner uses the derived verify
+command around the shared executor. It runs the exact frozen schedule only through the
+derived run command.
 
 It consumes that complete list again through the same executor used by the ordinary gate.
 It also scans the living repository's instruction
@@ -748,11 +753,13 @@ documents, task/build manifests and CI configurations. This final run is the tas
 acceptance measurement. It catches a verification command this task added, removed or
 renamed after C0.
 
-It atomically writes the whole physical result to
-`<workspace>/reports/gate/<op>.json`. The artifact contains every exact executable gate
-command in order, one result for each command, no comment result, the completed
-repository-cleanliness comparison and the completed surface scan. Its final message is
-only a readable view of that durable result.
+It supplies only result summaries, the completed repository-cleanliness comparison and
+the completed surface scan to the derived `bash
+<workspace>/prompts/construction/gate-check.sh publish-report <op>` command. That command
+injects every immutable identity and atomically writes the whole physical result. The
+artifact contains every exact executable gate command in order, one result for each
+command and no comment result. Its final message is only a readable view of that durable
+result.
 
 If the shared executor instead reports candidate mutation, the runner writes no report.
 Abandon that exact op, retain its path evidence, and return to free work before preparing

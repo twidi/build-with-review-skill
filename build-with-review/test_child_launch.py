@@ -140,10 +140,19 @@ def gate_runner_requires_the_exact_workspace_and_output_path():
 
     check("report: none" in c0, "first gate discovery does not explicitly forbid an artifact")
     for subject, text in (("gate-runner.md", prompt), ("C0 launch", c0), ("final gate launch", final)):
-        check("reports/gate/<op>.json" in text,
-              f"{subject} does not carry the exact op-scoped report path")
-        check("gate-check.sh verify <op>" in text,
-              f"{subject} does not carry the exact verification command")
+        check("operation: <op>" in text,
+              f"{subject} does not carry the sole operation-specific input")
+        check("gate-check.sh runner-input <op>" in text,
+              f"{subject} does not derive the exact gate-runner input")
+        check("gate-check.sh publish-report <op>" in text,
+              f"{subject} does not use mechanical report publication")
+    for subject, text in (("C0 launch", c0), ("final gate launch", final)):
+        check("only this operation-specific input" in text,
+              f"{subject} does not limit the launch message to the operation")
+        check("report: <workspace>/reports/gate/<op>.json" not in text,
+              f"{subject} still asks the controller to transcribe the report path")
+        check("verify: bash <workspace>" not in text,
+              f"{subject} still asks the controller to transcribe the verify command")
 
 
 @test

@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Audit one complete op-scoped physical gate-runner report."""
+"""Publish or audit one complete op-scoped physical gate-runner report."""
 import hashlib
 import json
-import os
 import pathlib
 import re
 import subprocess
 import sys
 
 from gate_file import GateFileError, read_gate_commands
-from gate_execution import canonical_bytes, read_account, validate_frozen_execution
+from gate_execution import (
+    GateExecutionError,
+    atomic_publish,
+    canonical_bytes,
+    ensure_report_ground,
+    frozen_execution,
+    read_account,
+    validate_frozen_execution,
+    verify_frozen,
+)
 
 
 def refuse(message):
@@ -20,6 +28,8 @@ def refuse(message):
 HERE = pathlib.Path(__file__).resolve().parent
 WORKSPACE = HERE.parent.parent
 REPO = WORKSPACE.parent.parent.parent.resolve()
+REPORT_GROUND = WORKSPACE / "reports" / "gate"
+MAX_OBSERVATION_BYTES = 1024 * 1024
 
 
 def real_file(path, root, subject):
@@ -37,7 +47,7 @@ def real_file(path, root, subject):
     return current
 
 
-def audit(op, expected_gate, expected_tree, expected_execution="-"):
+def validate_identity(op, expected_gate, expected_tree, expected_execution):
     if not re.fullmatch(r"[0-9a-f]{64}", op):
         refuse("the operation identity is invalid")
     if not re.fullmatch(r"[0-9a-f]{40,64}", expected_gate):
@@ -47,6 +57,8 @@ def audit(op, expected_gate, expected_tree, expected_execution="-"):
     if expected_execution != "-" and not re.fullmatch(r"[0-9a-f]{64}", expected_execution):
         refuse("the frozen gate execution identity is invalid")
 
+
+def gate_commands(expected_gate):
     gate = real_file(REPO / ".superpowers" / "bwr" / "gate.md", REPO, "gate.md")
     actual_gate = subprocess.check_output(
         ["git", "-C", str(REPO), "hash-object", str(gate)], text=True
@@ -57,14 +69,11 @@ def audit(op, expected_gate, expected_tree, expected_execution="-"):
         commands = read_gate_commands(gate)
     except (OSError, UnicodeError, GateFileError) as exc:
         refuse(str(exc))
+    return commands
 
-    relative = pathlib.PurePosixPath("reports", "gate", f"{op}.json")
-    report_path = real_file(WORKSPACE / relative, WORKSPACE, "the physical gate report")
-    raw = report_path.read_bytes()
-    try:
-        report = json.loads(raw)
-    except (UnicodeDecodeError, ValueError) as exc:
-        refuse(f"the physical gate report is not complete JSON: {exc}")
+
+def validate_report(report, op, expected_gate, expected_tree, expected_execution, commands,
+                    account_results, account_sha256):
     legacy_keys = {"op", "gate", "tree", "commands", "cleanliness", "surface"}
     expected_keys = legacy_keys if expected_execution == "-" else legacy_keys | {
         "execution", "command_account_sha256"
@@ -74,7 +83,6 @@ def audit(op, expected_gate, expected_tree, expected_execution="-"):
     if report["op"] != op or report["gate"] != expected_gate or report["tree"] != expected_tree:
         refuse("the physical gate report belongs to another frozen logical check")
 
-    account_results = None
     if expected_execution != "-":
         try:
             execution = validate_frozen_execution(
@@ -84,12 +92,8 @@ def audit(op, expected_gate, expected_tree, expected_execution="-"):
             refuse(str(exc))
         if hashlib.sha256(canonical_bytes(execution)).hexdigest() != expected_execution:
             refuse("the physical gate report carries another frozen execution")
-        account, account_sha256 = read_account(
-            op, expected_execution, commands, authenticate_outputs=True,
-        )
         if report["command_account_sha256"] != account_sha256:
             refuse("the physical gate report names another command account")
-        account_results = account["commands"]
 
     results = report["commands"]
     if not isinstance(results, list) or len(results) != len(commands):
@@ -146,9 +150,35 @@ def audit(op, expected_gate, expected_tree, expected_execution="-"):
     if surface["status"] == "different" and not surface["candidates"]:
         refuse("a different gate surface carries no candidate evidence")
 
+    return command_green
+
+
+def audit(op, expected_gate, expected_tree, expected_execution="-"):
+    validate_identity(op, expected_gate, expected_tree, expected_execution)
+    commands = gate_commands(expected_gate)
+    account_results = None
+    account_sha256 = None
+    if expected_execution != "-":
+        account, account_sha256 = read_account(
+            op, expected_execution, commands, authenticate_outputs=True,
+        )
+        account_results = account["commands"]
+
+    relative = pathlib.PurePosixPath("reports", "gate", f"{op}.json")
+    report_path = real_file(WORKSPACE / relative, WORKSPACE, "the physical gate report")
+    raw = report_path.read_bytes()
+    try:
+        report = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        refuse(f"the physical gate report is not complete JSON: {exc}")
+    command_green = validate_report(
+        report, op, expected_gate, expected_tree, expected_execution, commands,
+        account_results, account_sha256,
+    )
+
     outcome = {
-        "green": command_green and cleanliness["unchanged"],
-        "surface": surface["status"],
+        "green": command_green and report["cleanliness"]["unchanged"],
+        "surface": report["surface"]["status"],
         "report": str(relative),
         "report_sha256": hashlib.sha256(raw).hexdigest(),
         "commands": len(commands),
@@ -156,10 +186,81 @@ def audit(op, expected_gate, expected_tree, expected_execution="-"):
     print(json.dumps(outcome, separators=(",", ":"), sort_keys=True))
 
 
+def read_observations():
+    raw = sys.stdin.buffer.read(MAX_OBSERVATION_BYTES + 1)
+    if len(raw) > MAX_OBSERVATION_BYTES:
+        refuse("gate observations exceed the one-megabyte limit")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        refuse(f"gate observations are not complete JSON: {exc}")
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "commands", "cleanliness", "surface"
+    } or value.get("schema") != 1:
+        refuse("gate observations have an incomplete top-level shape")
+    return value
+
+
+def publish(op, expected_gate, expected_tree, expected_execution):
+    validate_identity(op, expected_gate, expected_tree, expected_execution)
+    marker, execution, execution_hash = frozen_execution(op)
+    if marker["gate"] != expected_gate or marker["tree"] != expected_tree \
+            or execution_hash != expected_execution:
+        refuse("the report publisher received another logical gate identity")
+    verify_frozen(marker)
+    commands = gate_commands(expected_gate)
+    account, account_sha256 = read_account(
+        op, expected_execution, commands, authenticate_outputs=True,
+    )
+    observations = read_observations()
+    summaries = observations["commands"]
+    if not isinstance(summaries, list) or len(summaries) != len(commands):
+        refuse("gate observations have no one summary per frozen gate command")
+    results = []
+    for number, (summary, account_result) in enumerate(zip(summaries, account["commands"]), 1):
+        if not isinstance(summary, dict) or set(summary) != {"count", "example"}:
+            refuse(f"gate observation {number} has an invalid shape")
+        results.append({
+            "command": account_result["command"],
+            "status": "green" if account_result["returncode"] == 0 else "red",
+            "count": summary["count"],
+            "example": summary["example"],
+        })
+    report = {
+        "op": op,
+        "gate": expected_gate,
+        "tree": expected_tree,
+        "commands": results,
+        "cleanliness": observations["cleanliness"],
+        "surface": observations["surface"],
+    }
+    if expected_execution != "-":
+        report["execution"] = execution
+        report["command_account_sha256"] = account_sha256
+    validate_report(
+        report, op, expected_gate, expected_tree, expected_execution, commands,
+        account["commands"], account_sha256,
+    )
+    ensure_report_ground()
+    verify_frozen(marker)
+    target = REPORT_GROUND / f"{op}.json"
+    atomic_publish(target, canonical_bytes(report))
+    print(f"GATE REPORT {op}")
+
+
 def main():
-    if len(sys.argv) not in {4, 5}:
-        refuse("usage: gate_report.py <op> <frozen gate blob> <frozen tree> [execution sha256|-]")
-    audit(*sys.argv[1:])
+    try:
+        if len(sys.argv) == 6 and sys.argv[1] == "publish":
+            publish(*sys.argv[2:])
+        elif len(sys.argv) in {4, 5}:
+            audit(*sys.argv[1:])
+        else:
+            refuse(
+                "usage: gate_report.py <op> <frozen gate blob> <frozen tree> "
+                "[execution sha256|-] | gate_report.py publish <op> <gate> <tree> <execution>"
+            )
+    except GateExecutionError as exc:
+        refuse(str(exc))
 
 
 if __name__ == "__main__":

@@ -1232,7 +1232,9 @@ def controller_and_runner_contracts_share_one_bounded_schedule():
         "length-at-most-65536",
         "inspect` and `result` read no raw output bytes",
         "never materializes that complete output or another command's output",
-        "command_account_sha256",
+        "gate-check.sh runner-input <op>",
+        "gate-check.sh publish-report <op>",
+        "publisher derives those values from the live marker and authenticated command account",
     ):
         check(required in runner, f"gate runner lost frozen execution rule: {required}")
     check("same executor used by the ordinary gate" in implementer,

@@ -187,6 +187,45 @@ audit_report() {
     python3 "$GATE_REPORT" "$1" "$2" "$3" "$4"
 }
 
+runner_input() {
+    local op=$1
+    read_marker
+    [ "$M_OP" = "$op" ] || die "the live gate marker belongs to $M_OP, not $op"
+    validate_frozen_state
+    python3 - "$M_OP" "$GATE" "$M_GATE" "$M_TREE" "$M_HEAD" "$M_BASE" \
+        "$M_EXECUTION_HASH" "$WORKSPACE/reports/gate/$M_OP.json" \
+        "$HERE/gate-check.sh" "$GATE_EXECUTION" <<'PY'
+import json, sys
+
+op, gate_path, gate, tree, head, base, execution, report, gate_check, gate_execution = sys.argv[1:]
+print(json.dumps({
+    "schema": 1,
+    "operation": op,
+    "gate_path": gate_path,
+    "gate_blob": gate,
+    "candidate_tree": tree,
+    "head": head,
+    "predecessor": base,
+    "execution": execution,
+    "report_path": report,
+    "commands": {
+        "verify": ["bash", gate_check, "verify", op],
+        "run": ["python3", gate_execution, "run", op],
+        "inspect": ["python3", gate_execution, "inspect", op],
+        "publish_report": ["bash", gate_check, "publish-report", op],
+    },
+}, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+publish_report() {
+    local op=$1
+    read_marker
+    [ "$M_OP" = "$op" ] || die "the live gate marker belongs to $M_OP, not $op"
+    validate_frozen_state
+    python3 "$GATE_REPORT" publish "$M_OP" "$M_GATE" "$M_TREE" "$M_EXECUTION_HASH"
+}
+
 terminal_matches_audit() {
     local event=$1 audit=$2 expected
     expected=$(event_data "$audit")
@@ -519,6 +558,14 @@ case ${1:-} in
         validate_frozen_state
         printf 'VERIFIED %s\n' "$M_OP"
         ;;
+    runner-input)
+        [ $# -eq 2 ] || die "usage: gate-check.sh runner-input <op>"
+        runner_input "$2"
+        ;;
+    publish-report)
+        [ $# -eq 2 ] || die "usage: gate-check.sh publish-report <op>"
+        publish_report "$2"
+        ;;
     close)
         [ $# -eq 2 ] || die "usage: gate-check.sh close <op>"
         close_check "$2"
@@ -572,6 +619,6 @@ case ${1:-} in
         find_task "$2" "$3" "$4" "$5"
         ;;
     *)
-        die "usage: gate-check.sh <open|verify|close|lost|abandon|require-review|require-task|require-baseline|require-current|require-pass|find-task> ..."
+        die "usage: gate-check.sh <open|runner-input|publish-report|verify|close|lost|abandon|require-review|require-task|require-baseline|require-current|require-pass|find-task> ..."
         ;;
 esac

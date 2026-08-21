@@ -342,27 +342,33 @@ bash <workspace>/prompts/construction/gate-check.sh open baseline \
   c0/<current-HEAD> - 0 0 HEAD
 ```
 
-Give the runner the real gate path and the operation, gate blob, candidate tree and
-predecessor, and gate-execution identity printed by that call. Also give these two exact
-values:
+Give the runner only this operation-specific input:
 
 ```text
-report: <workspace>/reports/gate/<op>.json
-verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>
+operation: <op>
 ```
 
-Never copy a command list into its message. The runner reads the exact physical gate. It
-uses the verify command around the shared executor and runs the frozen schedule only
-through `gate_execution.py run <op>`.
+Tell it to derive every gate-specific input before other gate work through:
+
+```sh
+bash <workspace>/prompts/construction/gate-check.sh runner-input <op>
+```
+
+Never copy a gate path, blob, tree, predecessor, execution identity, report path,
+verification command, command list or schedule into its message. The helper returns the
+complete authoritative input from the live marker. The runner reads the exact physical
+gate. It uses the derived verify command around the shared executor and runs the frozen
+schedule only through the derived run command.
 
 The shared executor atomically publishes the complete per-command account directory. Its
 small canonical manifest binds one separate raw output per command through exact size,
 whole hash and fixed-size chunk hashes. Bounded metadata reads touch no raw output. A
-bounded output read touches only its requested command chunks. The runner writes the whole
-canonical result to `<workspace>/reports/gate/<op>.json`. That report binds the account,
-contains every exact gate command in order, one result per command, the completed
-cleanliness comparison and the completed gate-surface scan. Its final message is only a
-readable view of the same result. It fixes nothing.
+bounded output read touches only its requested command chunks. The runner supplies only
+the result summaries, completed cleanliness comparison and completed gate-surface scan to
+the derived `bash <workspace>/prompts/construction/gate-check.sh publish-report <op>`
+command. That command injects the immutable operation, gate, tree, execution, account,
+command and status identities. It then atomically writes the whole canonical report. The
+runner's final message is only a readable view of that result. It fixes nothing.
 
 `gate-check.sh open` writes the structured start. Close the exact returned result with:
 

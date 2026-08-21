@@ -478,6 +478,44 @@ else:
         temporary.replace(path)
         return path
 
+    def gate_observations(self, op, *, extra=None, cleanliness=True, surface="unchanged"):
+        account = json.loads(
+            (self.workspace / "reports" / "gate" / f"{op}.commands" / "account.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        candidates = [] if surface == "unchanged" else [
+            {"kind": "addition", "evidence": "README documents python -m extra_check"}
+        ]
+        observations = {
+            "schema": 1,
+            "commands": [
+                {"count": 1, "example": result["example"]}
+                for result in account["commands"]
+            ],
+            "cleanliness": {
+                "completed": True,
+                "unchanged": cleanliness,
+                "paths": [] if cleanliness else ["generated.txt"],
+            },
+            "surface": {"completed": True, "status": surface, "candidates": candidates},
+        }
+        observations.update(extra or {})
+        return observations
+
+    def publish_gate_report(self, op, *, extra=None, cleanliness=True, surface="unchanged",
+                            run_execution=True, ok=True):
+        execution_helper = self.workspace / "prompts" / "construction" / "gate_execution.py"
+        if run_execution:
+            self.run(sys.executable, execution_helper, "run", op, ok=True)
+        observations = self.gate_observations(
+            op, extra=extra, cleanliness=cleanliness, surface=surface,
+        )
+        return self.run(
+            "bash", self.gate_check, "publish-report", op,
+            input_text=json.dumps(observations), ok=ok,
+        )
+
     def close_gate(self, op, *, report=True, ok=True):
         if report and not (self.workspace / "reports" / "gate" / f"{op}.json").exists():
             self.write_gate_report(op)
@@ -553,7 +591,7 @@ def logical_gate_freezes_and_consumes_the_semantic_parallel_schedule():
         execution_hash = re.search(
             r"^EXECUTION ([0-9a-f]{64})$", opened.stdout, re.MULTILINE
         ).group(1)
-        fixture.write_gate_report(op)
+        fixture.publish_gate_report(op)
         fixture.close_gate(op, report=False)
         terminal = fixture.journal()[-1]
         check(terminal["data"]["execution"] == execution_hash, terminal)
@@ -664,7 +702,7 @@ def lost_gate_runner_closes_before_same_operation_regeneration():
         second = fixture.run(*opening, ok=True)
         replacement_op = re.search(r"^OP ([0-9a-f]{64})$", second.stdout, re.MULTILINE).group(1)
         check(replacement_op == op, "gate-runner regeneration changed the logical operation")
-        fixture.write_gate_report(op)
+        fixture.publish_gate_report(op)
         fixture.close_gate(op, report=False)
         terminals = [entry["data"] for entry in fixture.journal()
                      if entry.get("event") == "subagent-ended"
@@ -699,6 +737,235 @@ def close_refuses_when_no_physical_report_exists():
         check(after == before, "close without a physical report appended a terminal")
         check((fixture.workspace / "gate-check-in-progress").exists(),
               "close without a physical report removed the logical owner")
+    finally:
+        fixture.close()
+
+
+@test
+def gate_runner_input_derives_every_frozen_value_from_the_live_marker():
+    fixture = Fixture()
+    try:
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        marker = fixture.gate_marker()
+        context = json.loads(
+            fixture.run("bash", fixture.gate_check, "runner-input", op, ok=True).stdout
+        )
+        expected = {
+            "schema": 1,
+            "operation": op,
+            "gate_path": str(fixture.repo / ".superpowers" / "bwr" / "gate.md"),
+            "gate_blob": marker["gate"],
+            "candidate_tree": marker["tree"],
+            "head": marker["head"],
+            "predecessor": marker["base"],
+            "execution": re.search(
+                r"^EXECUTION ([0-9a-f]{64})$", opened.stdout, re.MULTILINE
+            ).group(1),
+            "report_path": str(fixture.workspace / "reports" / "gate" / f"{op}.json"),
+            "commands": {
+                "verify": ["bash", str(fixture.gate_check), "verify", op],
+                "run": [
+                    "python3",
+                    str(fixture.workspace / "prompts" / "construction" / "gate_execution.py"),
+                    "run", op,
+                ],
+                "inspect": [
+                    "python3",
+                    str(fixture.workspace / "prompts" / "construction" / "gate_execution.py"),
+                    "inspect", op,
+                ],
+                "publish_report": ["bash", str(fixture.gate_check), "publish-report", op],
+            },
+        }
+        check(context == expected, f"runner-input did not derive the exact marker identity: {context}")
+        fixture.run("bash", fixture.gate_check, "runner-input", "0" * 64, ok=False)
+    finally:
+        fixture.close()
+
+
+@test
+def gate_report_publication_injects_frozen_identity_and_closes():
+    fixture = Fixture()
+    try:
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        marker = fixture.gate_marker()
+        fixture.publish_gate_report(op)
+        report_path = fixture.workspace / "reports" / "gate" / f"{op}.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        check(report["op"] == op, "the publisher did not inject the frozen operation")
+        check(report["gate"] == marker["gate"], "the publisher did not inject the frozen gate")
+        check(report["tree"] == marker["tree"], "the publisher did not inject the frozen tree")
+        check(report["commands"][0]["command"] == "git diff --check",
+              "the publisher did not inject the frozen command")
+        check(report["commands"][0]["status"] == "green",
+              "the publisher did not derive the physical command status")
+        fixture.close_gate(op, report=False)
+        check(fixture.journal()[-1]["data"]["green"] is True,
+              "the mechanically published report did not close green")
+    finally:
+        fixture.close()
+
+
+@test
+def gate_report_publication_refuses_identity_fields_and_candidate_drift():
+    fixture = Fixture()
+    try:
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        result = fixture.publish_gate_report(op, extra={"tree": head}, ok=False)
+        check(result.returncode != 0, "a runner-supplied tree was accepted")
+        report_path = fixture.workspace / "reports" / "gate" / f"{op}.json"
+        check(not report_path.exists(), "a refused runner-supplied identity published a report")
+
+        (fixture.repo / "app.txt").write_text("drift after opening\n", encoding="utf-8")
+        fixture.run("bash", fixture.gate_check, "runner-input", op, ok=False)
+        result = fixture.publish_gate_report(op, run_execution=False, ok=False)
+        check(result.returncode != 0, "a changed candidate published a gate report")
+        check(not report_path.exists(), "candidate drift left a canonical report")
+    finally:
+        fixture.close()
+
+
+@test
+def gate_report_publication_rechecks_drift_after_reading_observations():
+    fixture = Fixture()
+    publisher = None
+    try:
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        marker = fixture.gate_marker()
+        execution = re.search(
+            r"^EXECUTION ([0-9a-f]{64})$", opened.stdout, re.MULTILINE
+        ).group(1)
+        execution_helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
+        fixture.run(sys.executable, execution_helper, "run", op, ok=True)
+        observations = fixture.gate_observations(op)
+        report_helper = fixture.workspace / "prompts" / "construction" / "gate_report.py"
+        publisher = subprocess.Popen(
+            [
+                sys.executable, str(report_helper), "publish", op,
+                marker["gate"], marker["tree"], execution,
+            ],
+            cwd=fixture.repo, env=fixture.env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        waiting = False
+        for _ in range(500):
+            if publisher.poll() is not None:
+                break
+            try:
+                waiting = "pipe_read" in pathlib.Path(
+                    f"/proc/{publisher.pid}/wchan"
+                ).read_text(encoding="utf-8")
+            except OSError:
+                waiting = False
+            if waiting:
+                break
+            time.sleep(0.01)
+        check(waiting, "the publisher did not reach its observation-read boundary")
+
+        (fixture.repo / "app.txt").write_text("drift during publication\n", encoding="utf-8")
+        stdout, stderr = publisher.communicate(json.dumps(observations), timeout=10)
+        check(publisher.returncode != 0, f"publication crossed candidate drift: {stdout} {stderr}")
+        check(not (fixture.workspace / "reports" / "gate" / f"{op}.json").exists(),
+              "publication after candidate drift left a canonical report")
+    finally:
+        if publisher is not None and publisher.poll() is None:
+            publisher.kill()
+            publisher.wait()
+        fixture.close()
+
+
+@test
+def gate_report_publication_is_idempotent_and_refuses_foreign_bytes():
+    fixture = Fixture()
+    try:
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        fixture.publish_gate_report(op)
+        report_path = fixture.workspace / "reports" / "gate" / f"{op}.json"
+        original = report_path.read_bytes()
+        fixture.publish_gate_report(op)
+        check(report_path.read_bytes() == original,
+              "idempotent publication changed the canonical report")
+
+        report_path.unlink()
+        report_path.write_text("foreign\n", encoding="utf-8")
+        result = fixture.publish_gate_report(op, run_execution=False, ok=False)
+        check(result.returncode != 0, "foreign report bytes were replaced")
+        check(report_path.read_text(encoding="utf-8") == "foreign\n",
+              "publication changed a foreign report occupant")
+    finally:
+        fixture.close()
+
+
+@test
+def gate_report_publication_derives_red_status_and_refuses_bad_summaries():
+    fixture = Fixture()
+    try:
+        gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
+        gate.write_text("bash -c 'echo failed; exit 7'\n", encoding="utf-8")
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        fixture.publish_gate_report(op)
+        report_path = fixture.workspace / "reports" / "gate" / f"{op}.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        check(report["commands"][0]["status"] == "red",
+              "the publisher did not derive RED from the command account")
+        fixture.close_gate(op, report=False)
+        check(fixture.journal()[-1]["data"]["green"] is False,
+              "the RED command became a green logical gate result")
+    finally:
+        fixture.close()
+
+    fixture = Fixture()
+    try:
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD", ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        execution_helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
+        fixture.run(sys.executable, execution_helper, "run", op, ok=True)
+        bad = {
+            "schema": 1,
+            "commands": [{"count": True, "example": "not a valid count"}],
+            "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+            "surface": {"completed": True, "status": "unchanged", "candidates": []},
+        }
+        fixture.run(
+            "bash", fixture.gate_check, "publish-report", op,
+            input_text=json.dumps(bad), ok=False,
+        )
+        check(not (fixture.workspace / "reports" / "gate" / f"{op}.json").exists(),
+              "invalid summaries left a canonical report")
     finally:
         fixture.close()
 
@@ -1752,8 +2019,10 @@ def gate_runner_contract_covers_real_gate_and_semantic_surface_drift():
         "semantically admitted compatible group",
         "continues after a RED",
         "canonical report",
-        "command_account_sha256",
-        "every frozen executable gate command exactly once and in order",
+        "operation: <op>",
+        "gate-check.sh runner-input <op>",
+        "gate-check.sh publish-report <op>",
+        "contains no operation, gate, tree, execution, account, command or status",
         "full-line comment",
         "not a machine exemption",
     ):

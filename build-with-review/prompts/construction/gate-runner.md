@@ -1,9 +1,9 @@
 # Gate runner
 
 You run this project's full verification suite and report what came back. **You fix
-nothing and change no project file.** Your only direct write is the canonical
-physical-result artifact described under **Reporting**. The shared executor alone writes
-the durable command account.
+nothing and change no project file.** You do not directly write a workspace file. The
+shared executor writes the durable command account. The report publisher writes the
+canonical physical-result artifact described under **Reporting**.
 
 You are given this exact block, with absolute paths:
 
@@ -38,18 +38,28 @@ never a blocker. Non-empty stdout is human instructions. Only a helper refusal b
 Never test either file directly.
 
 For first discovery, you also receive `report: none`. Write no file and create no
-directory. For an existing logical gate operation, you instead receive all of:
+directory. For an existing logical gate operation, you instead receive only:
 
-- the **real checkout-local `gate.md` path** and its expected Git blob identity;
-- one logical gate operation, candidate tree and predecessor commit;
-- the frozen gate-execution identity printed by the opening command;
-- `report: <workspace>/reports/gate/<op>.json`;
-- `verify: bash <workspace>/prompts/construction/gate-check.sh verify <op>`.
+```text
+operation: <op>
+```
 
-Never accept a copied command list or improvise an execution schedule. For an existing
-gate, prove that the real file is one regular non-symlink leaf and has the expected blob
-identity. Read every command directly from that file, in order. Run the verify command,
-then execute the exact frozen schedule through:
+Derive every other gate-specific input before other gate work through:
+
+```sh
+bash <workspace>/prompts/construction/gate-check.sh runner-input <op>
+```
+
+This command returns one exact JSON object. It contains the real checkout-local `gate.md`
+path, expected gate blob, operation, candidate tree, `HEAD`, predecessor, frozen execution
+identity, canonical report path and exact command arrays for verify, run, inspect and
+publish-report. Treat that object as the only authority. If it refuses, stop. Never infer,
+guess, accept or copy any missing value from the launch message, current directory or Git.
+
+Never accept a copied command list or improvise an execution schedule. Prove that the
+derived gate path is one regular non-symlink leaf and has the derived blob identity. Read
+every command directly from that file, in order. Run the derived verify command, then
+execute the exact frozen schedule through the derived run command. Its equivalent form is:
 
 ```sh
 python3 <workspace>/prompts/construction/gate_execution.py run <op>
@@ -69,10 +79,11 @@ continues after a RED command. Before it starts any gate command, it authenticat
 frozen policy and narrow compatibility triggers against the exact candidate tree. It also
 checks the frozen repository state before and after every active group. If it refuses,
 stop. The logical candidate or exact scheduling input changed. Report the exact refusal;
-never improvise another schedule. Run the verify command once more after the helper
+never improvise another schedule. Run the derived verify command once more after the helper
 returns.
 
-Then inspect the exact frozen execution and durable command-account identities through:
+Then inspect the exact frozen execution and durable command-account identities through
+the derived inspect command. Its equivalent form is:
 
 ```sh
 python3 <workspace>/prompts/construction/gate_execution.py inspect <op>
@@ -193,71 +204,46 @@ file extensions. Then run all discovered candidates.
 ## Reporting
 
 For an existing logical gate operation, after the shared executor publishes its complete
-command account, publish one whole canonical report at:
+command account, pass one complete observation object on stdin to the derived
+publish-report command. Its equivalent form is:
 
+```sh
+bash <workspace>/prompts/construction/gate-check.sh publish-report <op>
 ```
-<workspace>/reports/gate/<op>.json
-```
 
-Create `reports/gate/` as real directories. Refuse a symlink or other occupant in that
-path. Write the complete JSON to one real same-directory temporary file. Atomically
-rename that file to the final absent path. Never overwrite an existing report. A lost
-final message leaves this whole result for `gate-check.sh close <op>` to consume without
-another physical run.
-
-The JSON has this exact shape:
+The observation JSON has this exact shape:
 
 ```json
 {
-  "op": "<op>",
-  "gate": "<expected gate blob>",
-  "tree": "<candidate tree>",
-  "execution": {
-    "schema": 2,
-    "gate": "<expected gate blob>",
-    "policy": {
-      "sha256": "<canonical policy SHA-256>",
-      "value": {"schema": 1, "max_parallel": 2, "rulings": []}
-    },
-    "max_parallel": 2,
-    "compatible_groups": [["<command 1>", "<command 2>"], ["<command 3>"]],
-    "compatibility": [
-      {
-        "commands": [1, 2],
-        "decision": "compatible",
-        "basis": {
-          "kind": "analysis",
-          "probability": "EXCEPTIONAL",
-          "reason": "<concrete compatibility reason>"
-        },
-        "triggers": []
-      }
-    ]
-  },
-  "command_account_sha256": "<exact account SHA-256>",
+  "schema": 1,
   "commands": [
-    {"command": "<exact gate line>", "status": "green", "count": 412, "example": "412 passed"}
+    {"count": 412, "example": "412 passed"}
   ],
-    "cleanliness": {"completed": true, "unchanged": true, "paths": []},
+  "cleanliness": {"completed": true, "unchanged": true, "paths": []},
   "surface": {"completed": true, "status": "unchanged", "candidates": []}
 }
 ```
 
-`execution` and `command_account_sha256` come exactly from `gate_execution.py inspect`.
-`commands` contains every frozen executable gate command exactly once and in order.
-It contains no comment line. `status` is
-`green` or `red`. `count` is a non-negative integer. `example` is one non-empty result
-summary. A completed scheduled execution always has unchanged cleanliness; a mutation
-invalidates the operation before this report. A different surface uses
-`status:"different"` and one or more candidates. Each
-candidate has exactly `kind` and `evidence`. `kind` is `addition`, `removal`, `rename`,
-`definition-change`, or `uncovered-target`.
+The object contains no operation, gate, tree, execution, account, command or status
+identity. The publisher derives those values from the live marker and authenticated
+command account. It refuses every extra top-level or command-summary field. It requires
+one ordered `count` and `example` summary per frozen executable command. `count` is a
+non-negative integer. `example` is one non-empty result summary.
+
+A completed scheduled execution always has unchanged cleanliness. A mutation invalidates
+the operation before publication. A different surface uses `status:"different"` and one
+or more candidates. Each candidate has exactly `kind` and `evidence`. `kind` is
+`addition`, `removal`, `rename`, `definition-change`, or `uncovered-target`.
 
 The command-account artifact is controller-owned proof. Never create or edit it. Publish
 no report until all commands, the final cleanliness comparison and the full surface scan
-are complete. A partial or malformed artifact cannot authorize close.
-The close derives its green and surface verdicts from this file. The controller never
-supplies those verdicts.
+are complete. The publisher authenticates the frozen candidate, every complete output and
+the exact report target. It injects every immutable field and atomically writes the
+canonical report. It never rewrites different or foreign bytes. A lost final message
+leaves this whole result for `gate-check.sh close <op>` to consume without another
+physical run. A partial or malformed observation cannot authorize close. The close derives
+its green and surface verdicts from this file. The controller never supplies those
+verdicts.
 
 Your final message is a readable view of the same report. It has three parts and nothing
 else. For first discovery, there is no op-scoped artifact; the final message remains the
