@@ -633,6 +633,8 @@ def lost_gate_runner_closes_before_same_operation_regeneration():
     fixture = Fixture()
     try:
         head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        run = "refs/bwr/2026-08-19-demo/lot-1"
+        fixture.git("update-ref", f"{run}/task-0", head)
         opening = (
             "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
             "-", "0", "0", "HEAD",
@@ -655,6 +657,13 @@ def lost_gate_runner_closes_before_same_operation_regeneration():
         check(len(terminals) == 2 and terminals[0].get("unusable") == "lost"
               and terminals[1].get("green") is True,
               f"the physical gate calls did not retain exact separate terminals: {terminals}")
+        current = fixture.run("bash", fixture.gate_check, "require-current", ok=True)
+        check(current.stdout.strip() == op,
+              "the accepted retry result did not become the current logical gate proof")
+        started = fixture.workspace / "prompts" / "construction" / "attempt-started.sh"
+        fixture.run("bash", started, "lot-1", "1", "1", ok=True)
+        check((fixture.workspace / "attempt-in-flight").is_file(),
+              "the accepted retry result did not authorize the next attempt")
     finally:
         fixture.close()
 

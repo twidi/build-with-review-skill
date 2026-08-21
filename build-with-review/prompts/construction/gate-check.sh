@@ -329,21 +329,18 @@ validate_result() {
         code_proof=$(latest_code_proof "$lot" "$task" "$attempt") \
             || die "the task gate consumes no exact proved final code-review result"
     fi
-    python3 - "$JOURNAL" "$op" "$mode" "$lot" "$task" "$attempt" "$commit" "$GATE_SHA" "$REPO" "$GATE_REPORT" "$code_proof" <<'PY'
+    python3 - "$JOURNAL" "$result" "$op" "$mode" "$lot" "$task" "$attempt" "$commit" "$GATE_SHA" "$REPO" "$GATE_REPORT" "$code_proof" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
 
-journal, op, mode, lot, task, attempt, commit, gate, repo, report_helper, code_proof = sys.argv[1:]
+journal, accepted, op, mode, lot, task, attempt, commit, gate, repo, report_helper, code_proof = sys.argv[1:]
 task, attempt = int(task), int(attempt)
-events = []
 raw_lines = pathlib.Path(journal).read_bytes().splitlines()
-for raw in raw_lines:
-    event = json.loads(raw)
-    if event.get("event") == "subagent-ended" and event.get("kind") == "gate-runner" \
-            and (event.get("data") or {}).get("op") == op:
-        events.append(event)
-if len(events) != 1:
-    raise SystemExit("no unique gate result")
-d = events[0]["data"]
+event = json.loads(accepted)
+if event.get("event") != "subagent-ended" or event.get("kind") != "gate-runner" \
+        or (event.get("data") or {}).get("op") != op \
+        or "unusable" in (event.get("data") or {}):
+    raise SystemExit("the selected gate result is not one accepted terminal")
+d = event["data"]
 required = {"op","scope","owner","lot","task","attempt","head","base","tree","gate","code",
             "green","surface","report","report_sha256","commands"}
 if set(d) not in (required, required | {"execution"}) \
