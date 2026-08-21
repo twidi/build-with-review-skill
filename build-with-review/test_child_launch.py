@@ -156,6 +156,24 @@ def gate_runner_requires_the_exact_workspace_and_output_path():
 
 
 @test
+def gate_runner_corrects_one_local_helper_invocation_without_replacement():
+    prompt = read("prompts/construction/gate-runner.md")
+    c0 = section("prompts/construction/MODE.md", "### C0.3", "### C0.4")
+    final = section("prompts/construction/implementer.md", "## Final gate surface", "## Commit")
+
+    for subject, text in (("gate-runner.md", prompt), ("C0 launch", c0), ("final gate launch", final)):
+        normalized = " ".join(text.lower().split())
+        check("correct only that invocation once" in normalized,
+              f"{subject} does not require one bounded local invocation correction")
+        check("same live gate runner" in normalized and "same physical bracket" in normalized,
+              f"{subject} replaces the live gate runner for its own invocation error")
+        check("does not consume a replacement" in normalized,
+              f"{subject} charges a local invocation correction as a replacement")
+        check("exact corrected invocation" in normalized and "blocker" in normalized,
+              f"{subject} does not stop after the corrected authoritative invocation refuses")
+
+
+@test
 def closed_form_session_messages_carry_the_complete_runtime_identity():
     implementer_launch = section(
         "prompts/construction/MODE.md", "### Launching an attempt", "### What comes back"

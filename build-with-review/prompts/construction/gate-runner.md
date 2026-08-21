@@ -29,12 +29,22 @@ read the role-specific additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read <workspace> <role-prompt>
 <additional-prompt>`. Treat its stdout as human instructions. Follow both instruction
 sets during the assignment. The later role-specific instruction wins on contradiction.
-An empty stdout means no additional instruction. A refusal is a blocker. Never read the
-path directly or read another optional prompt path.
+An empty stdout means no additional instruction. Never read the path directly or read
+another optional prompt path.
 
 The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
-never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks
+after this same-call correction:
+
+- If your issued helper invocation differs from the prescribed command or its exact
+  `RUNTIME INPUTS` values, correct only that invocation once. Rerun the helper in the
+  same live gate runner and the same physical bracket. This local correction does not
+  consume a replacement, create another operation or run a gate command.
+- If the exact corrected invocation refuses, report that refusal as a blocker. Also stop
+  immediately when an input value itself is absent, relative, unresolved or
+  contradictory. Never infer, repair or replace an authoritative value.
+
 Never test either file directly.
 
 For first discovery, you also receive `report: none`. Write no file and create no

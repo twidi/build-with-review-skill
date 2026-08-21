@@ -308,8 +308,12 @@ Tell it to treat its stdout as human instructions and follow both instruction se
 the assignment. The later role-specific instruction wins on contradiction.
 The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
-never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
-Never test either file directly.
+never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks
+after this gate-runner correction. If its issued helper invocation differs from the
+prescribed command or exact `RUNTIME INPUTS`, it must correct only that invocation once
+in the same live gate runner and same physical bracket. This does not consume a
+replacement. An exact corrected invocation that still refuses is a blocker. Never test
+either file directly or infer a replacement value.
 
 On first discovery, add `report: none`. That means no gate-specific input and no file or
 directory write. It does not mean the runtime-input block is absent.
