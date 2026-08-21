@@ -1246,8 +1246,14 @@ def write_gate_report(op, gate_blob, tree):
     return report_relative, report_sha
 
 
-def seed_task_gate(built="lot-1", token=None, *, tasks=1, add_lot_built=True):
+def seed_task_gate(built="lot-1", token=None, *, tasks=1, add_lot_built=True,
+                   precommit_head=True):
     commit, tree, gate_blob = prepare_review_commit(built, token, tasks)
+    head = commit
+    if precommit_head:
+        head = subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", f"{commit}^"], text=True,
+        ).strip()
     gate = hashlib.sha256(f"gate:{built}:{commit}".encode()).hexdigest()
     owner = f"{built}/task-1/attempt-1"
     append_checker_verdict("code", lot=built, task=1, attempt=1)
@@ -1258,7 +1264,7 @@ def seed_task_gate(built="lot-1", token=None, *, tasks=1, add_lot_built=True):
     append_subagent(
         "subagent-ended", "gate-runner", mandate="gate",
         data={"op": gate, "scope": "task", "owner": owner, "lot": built,
-              "task": 1, "attempt": 1, "head": commit, "base": commit,
+              "task": 1, "attempt": 1, "head": head, "base": head,
               "tree": tree, "gate": gate_blob, "code": code_proof,
               "green": True, "surface": "unchanged", "report": report_relative,
               "report_sha256": report_sha, "commands": 1},
@@ -3353,6 +3359,56 @@ def batch_close_rejects_malformed_identity_and_unproved_prior_terminal():
 
 
 # ------------------------------------------------ product-review terminals
+
+@test
+def task_pass_accepts_a_precommit_final_gate():
+    commit, gate, _ = seed_task_gate(
+        "lot-1", "precommit-final-gate", precommit_head=True,
+    )
+    opening = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opening.returncode == 0, opening.stdout + opening.stderr)
+
+
+@test
+def historical_task_pass_rejects_a_gate_tree_from_another_commit():
+    commit, gate, _ = seed_task_gate(
+        "lot-1", "historical-tree", precommit_head=False,
+    )
+    opening = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opening.returncode == 0, opening.stdout + opening.stderr)
+
+    wrong_tree = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{commit}^^{{tree}}"], text=True,
+    ).strip()
+    entries = journal_lines()
+    result = next(
+        entry for entry in entries
+        if entry.get("event") == "subagent-ended" and entry.get("kind") == "gate-runner"
+        and (entry.get("data") or {}).get("op") == gate
+    )
+    result["data"]["tree"] = wrong_tree
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in entries:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    write_report(
+        "reports/product-review/lot-1/lot-1-user.md",
+        product_report_text("user"),
+    )
+    before = len(journal_lines())
+    receipt = run_progress(
+        "note", "report.received", "--mandate", "user",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(receipt.returncode != 0 and len(journal_lines()) == before,
+          "a historical task pass retained a gate result for another candidate tree")
+
 
 @test
 def pass_opening_binds_the_exact_task_lot_and_one_open_generation():

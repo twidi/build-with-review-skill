@@ -4379,11 +4379,17 @@ def exact_pass_gate_result(entries, before, data, subject):
     if any(result.get(key) != value for key, value in expected.items()) \
             or result.get("green") is not True or result.get("surface") != "unchanged":
         fail(f"{subject}'s durable gate result changes its source identity", result)
-    if result.get("head") != data["commit"]:
-        fail(f"{subject}'s durable gate result checked another commit")
-    if data["source_scope"] == "baseline" and result.get("head") != data["commit"]:
-        fail(f"{subject}'s baseline gate checked another commit")
-    if data["source_scope"] == "task":
+    if data["source_scope"] == "baseline":
+        if result.get("head") != data["commit"]:
+            fail(f"{subject}'s baseline gate checked another commit")
+    else:
+        commit_tree = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{data['commit']}^{{tree}}"],
+            capture_output=True, text=True,
+        )
+        if commit_tree.returncode != 0 or result.get("tree") != commit_tree.stdout.strip():
+            fail(f"{subject}'s task gate checked another candidate tree")
         successes = [entry for entry in entries[:before]
                      if entry.get("kind") == "attempt.succeeded"
                      and entry.get("lot") == data["source_lot"]
