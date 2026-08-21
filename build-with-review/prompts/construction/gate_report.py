@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 from gate_file import GateFileError, read_gate_commands
-from gate_execution import canonical_bytes, read_account, validate_execution
+from gate_execution import canonical_bytes, read_account, validate_frozen_execution
 
 
 def refuse(message):
@@ -77,7 +77,7 @@ def audit(op, expected_gate, expected_tree, expected_execution="-"):
     account_results = None
     if expected_execution != "-":
         try:
-            execution = validate_execution(
+            execution = validate_frozen_execution(
                 report["execution"], expected_gate, commands, expected_tree,
             )
         except ValueError as exc:

@@ -338,6 +338,83 @@ def validate_execution(value, gate_sha, commands, tree=None, current_policy=None
     return value
 
 
+def legacy_evidence_path(value):
+    if value == ".":
+        return value
+    if not isinstance(value, str) or not value or "\\" in value \
+            or value.startswith("/") or posixpath.normpath(value) != value \
+            or ".." in pathlib.PurePosixPath(value).parts:
+        refuse("a legacy compatibility evidence path is not canonical")
+    return value
+
+
+def legacy_evidence_identity(tree, path):
+    path = legacy_evidence_path(path)
+    if path == ".":
+        raw = f"040000 tree {tree}\t.\0".encode()
+    else:
+        result = subprocess.run(
+            ["git", "-C", str(REPO), "ls-tree", "-z", tree, "--", path],
+            capture_output=True,
+        )
+        if result.returncode or not result.stdout or result.stdout.count(b"\0") != 1:
+            refuse(f"legacy compatibility evidence has no one exact Git object: {path}")
+        raw = result.stdout
+    return hashlib.sha256(raw).hexdigest()
+
+
+def validate_legacy_execution(value, gate_sha, commands, tree):
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "gate", "max_parallel", "compatible_groups", "compatibility_evidence"
+    }:
+        refuse("legacy gate execution has an incomplete top-level shape")
+    maximum = value.get("max_parallel")
+    groups = value.get("compatible_groups")
+    evidence = value.get("compatibility_evidence")
+    if value.get("schema") != 1 or value.get("gate") != gate_sha:
+        refuse("legacy gate execution belongs to another gate.md generation")
+    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
+        refuse("legacy max_parallel must be one positive integer")
+    if not isinstance(groups, list) or not groups:
+        refuse("legacy compatible_groups must be one non-empty ordered partition")
+    flattened = []
+    for number, group in enumerate(groups, 1):
+        if not isinstance(group, list) or not group \
+                or any(not isinstance(command, str) or not command for command in group):
+            refuse(f"legacy compatible group {number} is not one non-empty command list")
+        flattened.extend(group)
+    if flattened != commands:
+        refuse("legacy compatible_groups omitted, reordered, added or changed a gate command")
+    if not isinstance(evidence, list):
+        refuse("legacy compatibility_evidence must be one complete ordered list")
+    paths = []
+    for number, item in enumerate(evidence, 1):
+        if not isinstance(item, dict) or set(item) != {"path", "identity"} \
+                or not isinstance(item.get("identity"), str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", item["identity"]):
+            refuse(f"legacy compatibility evidence item {number} has an invalid shape")
+        paths.append(legacy_evidence_path(item.get("path")))
+    if len(set(paths)) != len(paths) or paths != sorted(paths):
+        refuse("legacy compatibility evidence paths must be unique and sorted")
+    if any(len(group) > 1 for group in groups) and not evidence:
+        refuse("a legacy parallel compatible group requires explicit project evidence")
+    current_evidence = [
+        {"path": path, "identity": legacy_evidence_identity(tree, path)} for path in paths
+    ]
+    if evidence != current_evidence:
+        changed = [expected["path"] for expected, current in zip(evidence, current_evidence)
+                   if expected != current]
+        refuse("project evidence for parallel gate compatibility changed: "
+               + ", ".join(changed))
+    return value
+
+
+def validate_frozen_execution(value, gate_sha, commands, tree):
+    if isinstance(value, dict) and value.get("schema") == 1:
+        return validate_legacy_execution(value, gate_sha, commands, tree)
+    return validate_execution(value, gate_sha, commands, tree)
+
+
 def default_execution(gate_sha, commands, policy=None):
     policy = policy or configured_policy()
     return {

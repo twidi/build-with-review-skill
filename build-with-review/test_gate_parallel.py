@@ -2,6 +2,7 @@
 """Focused tests for frozen gate-command parallel execution."""
 import base64
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -1067,6 +1068,78 @@ raise SystemExit(0 if other.exists() else 9)
             sys.executable, fixture.prompts / "gate_report.py", "d" * 64,
             fixture.gate_hash(), fixture.tree(), token["sha256"], ok=False,
         )
+    finally:
+        fixture.close()
+
+
+@test
+def historical_schema_one_report_remains_readable_but_not_publishable():
+    fixture = Fixture()
+    try:
+        commands = ["printf first", "printf second"]
+        fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+        fixture.publish(2, [commands])
+        op = "4" * 64
+        fixture.open_marker(op, scope="review")
+        fixture.run(sys.executable, fixture.prompts / "ordinary_gate.py", op)
+
+        tree = fixture.tree()
+        evidence = subprocess.check_output(
+            ["git", "-C", str(fixture.repo), "ls-tree", "-z", tree, "--", "tracked.txt"],
+        )
+        legacy = {
+            "schema": 1,
+            "gate": fixture.gate_hash(),
+            "max_parallel": 2,
+            "compatible_groups": [commands],
+            "compatibility_evidence": [{
+                "path": "tracked.txt", "identity": hashlib.sha256(evidence).hexdigest(),
+            }],
+        }
+
+        def canonical(value):
+            return (json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ) + "\n").encode()
+
+        report_path = fixture.workspace / "reports" / "gate" / f"{op}.json"
+        account_path = fixture.workspace / "reports" / "gate" / f"{op}.commands" / "account.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        account = json.loads(account_path.read_text(encoding="utf-8"))
+
+        legacy_hash = hashlib.sha256(canonical(legacy)).hexdigest()
+        account["execution"] = legacy_hash
+        account_raw = canonical(account)
+        account_path.write_bytes(account_raw)
+        report["execution"] = legacy
+        report["command_account_sha256"] = hashlib.sha256(account_raw).hexdigest()
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+
+        audited = fixture.run(
+            sys.executable, fixture.prompts / "gate_report.py", op,
+            fixture.gate_hash(), tree, legacy_hash,
+        )
+        outcome = json.loads(audited.stdout)
+        check(outcome["green"] is True and outcome["commands"] == 2, outcome)
+
+        config = fixture.workspace / "gate-execution.json"
+        config.write_bytes(canonical(legacy))
+        fixture.helper("show", ok=False)
+
+        legacy["compatibility_evidence"][0]["identity"] = "0" * 64
+        damaged_hash = hashlib.sha256(canonical(legacy)).hexdigest()
+        account["execution"] = damaged_hash
+        account_raw = canonical(account)
+        account_path.write_bytes(account_raw)
+        report["execution"] = legacy
+        report["command_account_sha256"] = hashlib.sha256(account_raw).hexdigest()
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        damaged = fixture.run(
+            sys.executable, fixture.prompts / "gate_report.py", op,
+            fixture.gate_hash(), tree, damaged_hash, ok=False,
+        )
+        check("project evidence for parallel gate compatibility changed" in damaged.stderr,
+              damaged.stderr)
     finally:
         fixture.close()
 
