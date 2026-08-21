@@ -1607,11 +1607,20 @@ that the provider still runs it. Before you duplicate a call, classify it as los
 your own turn, inspect the provider's active-subagent roster. On Codex, use its subagent
 list. Do not use TwiCC session process tools for provider subagents.
 
+Every successful opening also prints a `SUBAGENT OPEN` reminder on stderr. It does not
+change the call's stdout. Keep the provider-native handle and follow that reminder until
+the exact bracket has one durable terminal.
+
 - Still active: keep that call, continue useful work, and reconcile it again before your
   turn ends.
 - Completed: write its exact `subagent-ended` terminal before you act on the result.
 - Absent or result unavailable: use the call site's unusable terminal, when it defines
   one, before any regeneration.
+
+The supported discovery, gate-runner, completeness, SPEC-loop finding-verifier and
+amendment-consolidation loss routes all define that terminal. Each replacement starts
+only after the prior physical bracket closes. A gate replacement also proves that its
+executor and orphaned commands no longer own the operation.
 
 Never end a turn with a required provider subagent forgotten. If no other useful work
 remains, use the provider-native result or wait mechanism. A TwiCC child session is
@@ -2054,6 +2063,15 @@ send as the creation prompt.
 - Each tick carries, per child, its live state, **how long it has been in that state**, and
   **how long since it last wrote anything**. Together those separate a child that is
   working from one that is stuck; neither number does it alone.
+- Each tick also reports every exact open provider-subagent bracket from the journal.
+  The controller checks the named owner's provider-native roster. It never invents a
+  result, launches a duplicate or uses TwiCC process wait for that call.
+- Every tick ends with a `RESUME CHECK`. With open provider subagents, reconcile them
+  first and then resume interrupted work. Without one, resume unfinished work now. A
+  blocked controller pings the human once only when that exact blocker is new or unseen.
+- A watchdog dependency error keeps the state unknown. Its final `RESUME CHECK` requires
+  one exact state-inspection retry before dependent work can resume. It never reports an
+  empty child or provider-subagent set by inference.
 - `⚠` marks 40 minutes without a write, and it marks **what somebody has to act on**.
   - A child whose status is `idle` is **never** marked: you parked it with nothing
     pending, and it may sit there for hours doing exactly what it should.

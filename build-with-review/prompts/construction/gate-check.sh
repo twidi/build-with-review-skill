@@ -122,7 +122,7 @@ latest_code_proof() {
 }
 
 journal_gate_result() {
-    # Print zero, one or many exact ended-event JSON objects for this op.
+    # Print zero, one or many accepted physical-result terminals for this op.
     python3 - "$JOURNAL" "$1" <<'PY'
 import json, pathlib, sys
 path, op = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -131,15 +131,37 @@ if not path.exists():
 for raw in path.read_text(encoding="utf-8").splitlines():
     event = json.loads(raw)
     if event.get("event") == "subagent-ended" and event.get("kind") == "gate-runner" \
-            and (event.get("data") or {}).get("op") == op:
+            and (event.get("data") or {}).get("op") == op \
+            and "unusable" not in (event.get("data") or {}):
         print(json.dumps(event, separators=(",", ":"), sort_keys=True))
 PY
 }
 
+open_gate_call() {
+    python3 - "$JOURNAL" "$1" <<'PY'
+import json, pathlib, sys
+path, op = pathlib.Path(sys.argv[1]), sys.argv[2]
+balance = 0
+if path.exists():
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        event = json.loads(raw)
+        if event.get("kind") != "gate-runner" or (event.get("data") or {}).get("op") != op:
+            continue
+        if event.get("event") == "subagent-started":
+            balance += 1
+        elif event.get("event") == "subagent-ended":
+            balance -= 1
+        if balance not in {0, 1}:
+            raise SystemExit("the gate operation has malformed physical-call brackets")
+print("yes" if balance == 1 else "no")
+PY
+}
+
 event_data() {
-    local audit=${1:-}
+    local audit=${1:-} unusable=${2:-}
     python3 - "$M_OP" "$M_SCOPE" "$M_OWNER" "$M_LOT" "$M_TASK" "$M_ATTEMPT" \
-        "$M_HEAD" "$M_BASE" "$M_TREE" "$M_GATE" "$M_CODE" "$M_EXECUTION_HASH" "$audit" <<'PY'
+        "$M_HEAD" "$M_BASE" "$M_TREE" "$M_GATE" "$M_CODE" "$M_EXECUTION_HASH" \
+        "$audit" "$unusable" <<'PY'
 import json, sys
 keys = ("op", "scope", "owner", "lot", "task", "attempt", "head", "base", "tree", "gate", "code", "execution")
 values = sys.argv[1:13]
@@ -148,7 +170,11 @@ data["task"] = int(data["task"])
 data["attempt"] = int(data["attempt"])
 if data["execution"] == "-":
     del data["execution"]
-if sys.argv[13]:
+if sys.argv[14]:
+    if sys.argv[14] not in {"error", "empty", "lost", "unusable"}:
+        raise SystemExit("the gate-runner unusable reason is invalid")
+    data["unusable"] = sys.argv[14]
+elif sys.argv[13]:
     outcome = json.loads(sys.argv[13])
     if set(outcome) != {"green", "surface", "report", "report_sha256", "commands"}:
         raise SystemExit("the gate report audit has an invalid result shape")
@@ -275,6 +301,22 @@ close_check() {
     green=$(python3 -c 'import json,sys; print(str(json.loads(sys.argv[1])["green"]).lower())' "$audit")
     surface=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["surface"])' "$audit")
     printf 'GATE RESULT %s green=%s surface=%s\n' "$op" "$green" "$surface"
+}
+
+lost_check() {
+    local op=$1
+    read_marker
+    [ "$M_OP" = "$op" ] || die "the live gate marker belongs to $M_OP, not $op"
+    [ -z "$(journal_gate_result "$op")" ] \
+        || die "gate check $op already has a durable result and cannot become lost"
+    [ "$(open_gate_call "$op")" = yes ] \
+        || die "gate check $op has no one exact open physical runner"
+    if [ "$M_EXECUTION" != - ]; then
+        python3 "$GATE_EXECUTION" idle "$op" \
+            || die "gate check $op still has a live executor or command; do not lose its owner"
+    fi
+    "$PROGRESS" subagent-ended gate-runner --data "$(event_data "" lost)"
+    printf 'GATE RUNNER LOST %s\n' "$op"
 }
 
 validate_result() {
@@ -420,7 +462,8 @@ import json, pathlib, sys
 journal, op, commit = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
 results = [e["data"] for e in events if e.get("event") == "subagent-ended"
-           and e.get("kind") == "gate-runner" and (e.get("data") or {}).get("op") == op]
+           and e.get("kind") == "gate-runner" and (e.get("data") or {}).get("op") == op
+           and "unusable" not in (e.get("data") or {})]
 if len(results) != 1:
     raise SystemExit("the pass gate has no unique result")
 d = results[0]
@@ -483,6 +526,10 @@ case ${1:-} in
         [ $# -eq 2 ] || die "usage: gate-check.sh close <op>"
         close_check "$2"
         ;;
+    lost)
+        [ $# -eq 2 ] || die "usage: gate-check.sh lost <op>"
+        lost_check "$2"
+        ;;
     abandon)
         [ $# -eq 2 ] || die "usage: gate-check.sh abandon <op>"
         read_marker
@@ -492,6 +539,9 @@ case ${1:-} in
         if [ "$M_EXECUTION" != - ]; then
             python3 "$GATE_EXECUTION" idle "$2" \
                 || die "gate check $2 still has a live executor or command; do not abandon its owner"
+        fi
+        if [ "$(open_gate_call "$2")" = yes ]; then
+            "$PROGRESS" subagent-ended gate-runner --data "$(event_data "" unusable)"
         fi
         rm -f "$MARKER"
         printf 'ABANDONED %s\n' "$2"
@@ -525,6 +575,6 @@ case ${1:-} in
         find_task "$2" "$3" "$4" "$5"
         ;;
     *)
-        die "usage: gate-check.sh <open|verify|close|abandon|require-review|require-task|require-baseline|require-current|require-pass|find-task> ..."
+        die "usage: gate-check.sh <open|verify|close|lost|abandon|require-review|require-task|require-baseline|require-current|require-pass|find-task> ..."
         ;;
 esac

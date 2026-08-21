@@ -51,8 +51,9 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 >
 > The coordinating session spawns child sessions and then waits. A coordinator that stops
 > mid-work stays silent, and at night nobody notices. Your job is to give it a heartbeat:
-> every `<INTERVAL>` minutes you report the state of its open child sessions. Receiving
-> your message is also what wakes it up if it has stalled.
+> every `<INTERVAL>` minutes you report the state of its open child sessions and exact
+> open provider-subagent brackets. Receiving your message is also what wakes it up if it
+> has stalled.
 >
 > ## What you will run
 >
@@ -60,10 +61,15 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 >
 >     <WORKSPACE>/prompts/common/watchdog.py
 >
-> It reads session metadata through the `twicc` CLI — titles, states, timestamps — and
-> sends your parent one entry per open child. **It delivers the report itself, and it
-> writes nothing, anywhere.** Read it first if you want to see for yourself; that is
-> welcome.
+> It reads session metadata through the `twicc` CLI — titles, states, timestamps. It asks
+> `progress.py` for the journal's exact open provider-subagent brackets. It sends both to
+> your parent. Every report ends with a `RESUME CHECK`: it resumes unfinished work now
+> when no bracket needs reconciliation, or after the listed brackets are reconciled.
+> A dependency error keeps the state unknown and still ends with a safe `RESUME CHECK`.
+> It tells the controller to retry the exact watchdog state inspection. It never treats
+> the failure as zero children or zero subagents.
+> **It delivers the report itself, and it writes nothing, anywhere.** Read it first if
+> you want to see for yourself; that is welcome.
 >
 > ## Step 1 — schedule the heartbeat
 >

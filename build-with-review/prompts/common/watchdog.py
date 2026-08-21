@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watchdog snapshot: the controller's open direct children.
+"""Watchdog snapshot: the controller's open children and provider subagents.
 
 Usage: python3 watchdog.py <controller-session-id> [stale-minutes] [--print-only]
 
@@ -17,7 +17,8 @@ A child generating for 45 minutes that wrote 30 seconds ago is working. The same
 child quiet for 45 minutes is stuck. `⚠` marks a quiet longer than
 <stale-minutes> (default 40).
 
-Reads session metadata through the `twicc` CLI. Writes nothing.
+It also asks progress.py for exact open provider-subagent brackets. It never infers
+provider state. Reads session metadata and the journal. Writes nothing.
 """
 import json
 import os
@@ -36,6 +37,7 @@ TITLE_MAX = 58
 # pointing at the instance that owns these sessions.
 TWICC = shlex.split(os.environ.get("TWICC_BIN") or "twicc")
 NEUTRAL_CWD = tempfile.gettempdir()
+PROGRESS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "progress.py")
 
 
 def fail(what, detail):
@@ -44,8 +46,16 @@ def fail(what, detail):
     print()
     print(f"    {str(detail)[:400]}")
     print()
-    print("**YOUR CHILDREN WERE NOT CHECKED.** This is not a report of zero children:")
-    print("their state is unknown. Change nothing on the strength of this tick.")
+    print("**THE WATCHDOG STATE WAS NOT CHECKED.** This is not a report of zero children")
+    print("or provider subagents. Their state is unknown. Change nothing on this tick.")
+    print()
+    print(
+        "**RESUME CHECK** — Retry the exact watchdog state inspection now. Do not infer "
+        "zero children or provider subagents, and do not resume work that depends on this "
+        "unknown state. If the retry still fails and the human has not received this exact "
+        "blocker, ping them once. If the human already acknowledged it and nothing changed, "
+        "wait without repeating the same ping."
+    )
     sys.exit(1)
 
 
@@ -62,6 +72,66 @@ def run(args):
         return json.loads(out.stdout)
     except ValueError as exc:
         fail(f"`{' '.join(args)}` returned unreadable output", f"{exc} — first bytes: {out.stdout[:200]!r}")
+
+
+def open_provider_subagents():
+    try:
+        out = subprocess.run(
+            [sys.executable, PROGRESS, "subagents-open"],
+            cwd=NEUTRAL_CWD, capture_output=True, text=True, timeout=90,
+        )
+    except Exception as exc:
+        fail("could not inspect open provider subagents", exc)
+    if out.returncode != 0:
+        fail("progress.py subagents-open refused", out.stderr.strip() or out.stdout.strip())
+    try:
+        rows = json.loads(out.stdout)
+    except ValueError as exc:
+        fail("progress.py subagents-open returned unreadable output", exc)
+    if not isinstance(rows, list):
+        fail("progress.py subagents-open returned the wrong shape", type(rows).__name__)
+    return rows
+
+
+def provider_subagent_blocks(rows):
+    if not rows:
+        return []
+    blocks = [f"**OPEN PROVIDER SUBAGENTS — {len(rows)}**"]
+    for row in rows:
+        context = row.get("context") or {}
+        context_text = " · ".join(
+            f"{key}={context[key]}"
+            for key in ("mode", "lot", "task", "attempt", "round", "mandate", "job")
+            if key in context
+        ) or "no workflow context"
+        blocks.append(
+            f"• **{row.get('kind', 'unknown')}** — {context_text}  \n"
+            f"owner session: `{row.get('owner', 'unknown')}`  \n"
+            f"started: `{row.get('started', 'unknown')}`"
+        )
+    blocks.append(
+        "Find each owner session. Inspect its provider-native subagent roster. If the call "
+        "is active, keep its bracket open. If it completed, follow its exact call-site route "
+        "and record `subagent-ended` before downstream work. If its exact result was already "
+        "handled, record only the missing durable boundary when that result remains available; "
+        "do not replay the work. If the call or result is unavailable, follow its call-site "
+        "lost or unusable route. Message the owner when it is another session. Never invent a "
+        "result, launch a duplicate, or use TwiCC process wait."
+    )
+    return blocks
+
+
+def resume_check(has_open_subagents):
+    if has_open_subagents:
+        first = ("After you reconcile every open provider subagent above, resume any unfinished "
+                 "work unless a valid blocker prevents it.")
+    else:
+        first = "If you have unfinished work and no valid blocker, resume it now."
+    return (
+        f"**RESUME CHECK** — {first} If you are blocked and the human has not received this "
+        "exact blocker, ping them once. If the human already acknowledged it and nothing "
+        "changed, wait without repeating the same ping."
+    )
 
 
 def minutes_since(stamp):
@@ -128,6 +198,7 @@ def main():
     parent = run(["session", controller])
     parent_title = parent.get("title") if isinstance(parent, dict) else None
     mine = own_session_id()
+    subagents = open_provider_subagents()
     # `--spawned-by` is what makes hidden children visible here: a plain `processes`
     # call omits them, and a running child would be reported as having no process.
     procs = {p.get("session_id"): p for p in run(["processes", "--spawned-by", controller])}
@@ -156,10 +227,6 @@ def main():
     of_whom = f' of "{parent_title}"' if parent_title else ""
     noun = "child" if len(rows) == 1 else "children"
 
-    if not rows:
-        deliver(controller, f"**watchdog {now}** · NO open {noun}{of_whom}")
-        return
-
     # An unreadable timestamp sorts and marks as the worst case: a child whose
     # silence cannot be measured is the one to look at, never the one to skip.
     #
@@ -187,7 +254,8 @@ def main():
     # never a whole line, which bolds nothing at all. The trailing DOUBLE SPACE
     # before each \n is a Markdown hard break: strip it and the three lines of an
     # entry collapse into one paragraph.
-    head = f"**watchdog {now}** · **{len(rows)}** open {noun}{of_whom}"
+    head = (f"**watchdog {now}** · **{len(rows)}** open {noun}{of_whom}"
+            if rows else f"**watchdog {now}** · NO open {noun}{of_whom}")
     if stale:
         head += f"  \n⚠ **{len(stale)}** with nothing written for **{stale_after}min** or more"
 
@@ -203,6 +271,8 @@ def main():
     blocks.append(
         "_turn = time in the current process state · quiet = time since the child last wrote anything_"
     )
+    blocks.extend(provider_subagent_blocks(subagents))
+    blocks.append(resume_check(bool(subagents)))
     deliver(controller, "\n\n".join(blocks))
 
 

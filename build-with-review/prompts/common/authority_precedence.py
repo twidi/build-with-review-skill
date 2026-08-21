@@ -644,15 +644,30 @@ def validate_spec_loop_generation(entries, recheck_index):
                 and note_data(candidate).get("owner") == "spec-loop"
                 and note_data(candidate).get("commit_op") == commit_op
                 and note_data(candidate).get("ruling") == ruling]
-        if len(starts) != 1 or len(ends) != 1 or starts[0][0] >= ends[0][0]:
-            raise AuthorityPrecedenceError(f"SPEC-loop recheck lacks one fresh verifier bracket for {ruling}")
-        start_data, end_data = note_data(starts[0][1]), note_data(ends[0][1])
         common = {
             "owner": "spec-loop", "commit_op": commit_op, "sha": sha, "ruling": ruling,
             **{key: member[key] for key in ("authority_kind", "authority_ref", "authority_sha256")},
         }
-        if start_data != common or end_data != {**common, "present": actual_verifiers[ruling]}:
-            raise AuthorityPrecedenceError(f"SPEC-loop verifier bracket for {ruling} changes its identity or result")
+        if not 1 <= len(starts) == len(ends) <= 2:
+            raise AuthorityPrecedenceError(
+                f"SPEC-loop recheck lacks one bounded completed verifier chain for {ruling}"
+            )
+        for call, ((start_index, start), (end_index, end)) in enumerate(zip(starts, ends), 1):
+            if start_index >= end_index or call < len(starts) \
+                    and end_index >= starts[call][0]:
+                raise AuthorityPrecedenceError(
+                    f"SPEC-loop verifier physical calls for {ruling} are out of order"
+                )
+            start_data, end_data = note_data(start), note_data(end)
+            expected_end = ({**common, "present": actual_verifiers[ruling]}
+                            if call == len(starts) else {**common, "unusable": end_data.get("unusable")})
+            if start_data != common or end_data != expected_end \
+                    or call < len(starts) and end_data.get("unusable") not in {
+                        "error", "empty", "lost", "unusable",
+                    }:
+                raise AuthorityPrecedenceError(
+                    f"SPEC-loop verifier bracket for {ruling} changes its identity or result"
+                )
 
     missing = data.get("missing")
     expected_missing = sorted(ruling for ruling, present in actual_verifiers.items() if not present)

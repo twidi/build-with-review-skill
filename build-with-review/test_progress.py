@@ -1261,12 +1261,15 @@ def seed_task_gate(built="lot-1", token=None, *, tasks=1, add_lot_built=True,
         raw_lines = journal.read().splitlines()
     code_proof = f"{len(raw_lines) - 1}:{hashlib.sha256(raw_lines[-1]).hexdigest()}"
     report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
+    gate_data = {
+        "op": gate, "scope": "task", "owner": owner, "lot": built,
+        "task": 1, "attempt": 1, "head": head, "base": head,
+        "tree": tree, "gate": gate_blob, "code": code_proof,
+    }
+    append_subagent("subagent-started", "gate-runner", mandate="gate", data=gate_data)
     append_subagent(
         "subagent-ended", "gate-runner", mandate="gate",
-        data={"op": gate, "scope": "task", "owner": owner, "lot": built,
-              "task": 1, "attempt": 1, "head": head, "base": head,
-              "tree": tree, "gate": gate_blob, "code": code_proof,
-              "green": True, "surface": "unchanged", "report": report_relative,
+        data={**gate_data, "green": True, "surface": "unchanged", "report": report_relative,
               "report_sha256": report_sha, "commands": 1},
     )
     append_note(
@@ -1295,11 +1298,15 @@ def seed_baseline_gate(owner, commit, base):
     ).strip()
     gate = hashlib.sha256(f"baseline:{owner}:{commit}".encode()).hexdigest()
     report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
+    gate_data = {
+        "op": gate, "scope": "baseline", "owner": owner, "lot": "-",
+        "task": 0, "attempt": 0, "head": commit, "base": base,
+        "tree": tree, "gate": gate_blob, "code": "-",
+    }
+    append_subagent("subagent-started", "gate-runner", mandate="gate", data=gate_data)
     append_subagent(
         "subagent-ended", "gate-runner", mandate="gate",
-        data={"op": gate, "scope": "baseline", "owner": owner, "lot": "-",
-              "task": 0, "attempt": 0, "head": commit, "base": base,
-              "tree": tree, "gate": gate_blob, "code": "-", "green": True,
+        data={**gate_data, "green": True,
               "surface": "unchanged", "report": report_relative,
               "report_sha256": report_sha, "commands": 1},
     )
@@ -1501,6 +1508,109 @@ def subagent_started_uses_caller_context():
 
 
 @test
+def subagent_watchdog_started_prints_a_reminder_without_changing_stdout():
+    started = run_progress("subagent-started", "completeness")
+    check(started.returncode == 0, started.stdout + started.stderr)
+    check(started.stdout == "", "a generic subagent opening gained stdout")
+    check("SUBAGENT OPEN" in started.stderr, started.stderr)
+    check("provider-native" in started.stderr, started.stderr)
+    check("Never use TwiCC process wait" in started.stderr, started.stderr)
+
+
+@test
+def subagent_watchdog_lists_only_exact_open_brackets():
+    started = run_progress("subagent-started", "completeness", "--round", "4")
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+    listed = run_progress("subagents-open")
+    check(listed.returncode == 0, listed.stdout + listed.stderr)
+    rows = json.loads(listed.stdout)
+    check(len(rows) == 1, rows)
+    row = rows[0]
+    check(row["kind"] == "completeness" and row["owner"] == CALLER, row)
+    check(row["context"]["round"] == 4 and row["context"]["lot"] == "lot-1", row)
+    check(row["started"] == journal_lines()[0]["ts"], row)
+    check(isinstance(row["opening"], str) and re.fullmatch(r"0:[0-9a-f]{64}", row["opening"]), row)
+
+    ended = run_progress(
+        "subagent-ended", "completeness", "--round", "4",
+        "--data", '{"decisions":"1/1"}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    listed = run_progress("subagents-open")
+    check(listed.returncode == 0 and json.loads(listed.stdout) == [],
+          listed.stdout + listed.stderr)
+
+
+@test
+def subagent_watchdog_accepts_a_late_exact_terminal():
+    started = run_progress("subagent-started", "completeness", "--round", "2")
+    check(started.returncode == 0, started.stdout + started.stderr)
+    path = os.path.join(WORKSPACE, "progress.jsonl")
+    lines = journal_lines()
+    lines[0]["ts"] = "2020-01-01T00:00:00Z"
+    with open(path, "w", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(json.dumps(line, separators=(",", ":")) + "\n")
+
+    ended = run_progress(
+        "subagent-ended", "completeness", "--round", "2",
+        "--data", '{"decisions":"1/1"}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    listed = run_progress("subagents-open")
+    check(listed.returncode == 0 and json.loads(listed.stdout) == [],
+          listed.stdout + listed.stderr)
+
+
+@test
+def subagent_recovery_discovery_closes_lost_before_regeneration():
+    started = run_progress(
+        "subagent-started", "gate-runner", "--data", '{"scope":"discovery"}'
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    lost = run_progress(
+        "subagent-ended", "gate-runner",
+        "--data", '{"scope":"discovery","unusable":"lost"}',
+    )
+    check(lost.returncode == 0, lost.stdout + lost.stderr)
+    check(json.loads(run_progress("subagents-open").stdout) == [],
+          "the lost discovery bracket remained open")
+    replacement = run_progress(
+        "subagent-started", "gate-runner", "--data", '{"scope":"discovery"}'
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    ended = run_progress(
+        "subagent-ended", "gate-runner",
+        "--data", '{"scope":"discovery","green":true,"surface":"different"}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    check(json.loads(run_progress("subagents-open").stdout) == [],
+          "the replacement discovery bracket remained open")
+
+
+@test
+def subagent_recovery_completeness_requires_one_closed_physical_call():
+    started = run_progress("subagent-started", "completeness")
+    check(started.returncode == 0, started.stdout + started.stderr)
+    duplicate = run_progress("subagent-started", "completeness")
+    check(duplicate.returncode != 0, "a duplicate completeness bracket opened")
+    lost = run_progress(
+        "subagent-ended", "completeness", "--data", '{"unusable":"lost"}'
+    )
+    check(lost.returncode == 0, lost.stdout + lost.stderr)
+    replacement = run_progress("subagent-started", "completeness")
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    ended = run_progress(
+        "subagent-ended", "completeness",
+        "--data", '{"decisions":"1/1","tasks":"1/1","deps":"1/1","constraints":"ok","parent":"n/a"}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    check(json.loads(run_progress("subagents-open").stdout) == [],
+          "the completed completeness bracket remained open")
+
+
+@test
 def subagent_unknown_kind_is_refused():
     refused(run_progress("subagent-started", "gate-checker"))
     refused(run_progress("subagent-ended", "verifier"))
@@ -1508,6 +1618,8 @@ def subagent_unknown_kind_is_refused():
 
 @test
 def subagent_ended_carries_data():
+    started = run_progress("subagent-started", "completeness")
+    check(started.returncode == 0, started.stdout + started.stderr)
     line = the_line(run_progress("subagent-ended", "completeness",
                                  "--data", '{"decisions":"12/12","tasks":"7/8"}'))
     check(line["kind"] == "completeness", line)
@@ -4881,6 +4993,80 @@ def spec_loop_recheck_requires_exact_fresh_verifier_brackets_and_artifact():
                 "sha": sha, "recheck_op": commit_op, **authority}
     closed = run_progress("note", "ruling.applied", "--data", json.dumps(terminal))
     check(closed.returncode == 0, closed.stdout + closed.stderr)
+
+
+@test
+def subagent_recovery_spec_loop_closes_lost_before_regeneration():
+    state_path = seed_direct_ruling(ruling="R1", route="spec-fixer")
+    authority = {
+        "authority_kind": "ruling.ready", "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    }
+    append_note("fixer.dispatched", {"ruling": "R1", "route": "spec-fixer", **authority})
+    common = {
+        "owner": "spec-loop", "commit_op": "close-op-1", "sha": "a" * 40,
+        "ruling": "R1", **authority,
+    }
+    append_note("spec.committed", {
+        "op": common["commit_op"], "sha": common["sha"], "spec_round": 4,
+        "review_sha256": "b" * 64, "spec_sha256": "c" * 64,
+    })
+    started = run_progress(
+        "subagent-started", "finding-verifier", "--data", json.dumps(common)
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    lost = run_progress(
+        "subagent-ended", "finding-verifier",
+        "--data", json.dumps({**common, "unusable": "lost"}),
+    )
+    check(lost.returncode == 0, lost.stdout + lost.stderr)
+    replacement = run_progress(
+        "subagent-started", "finding-verifier", "--data", json.dumps(common)
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    ended = run_progress(
+        "subagent-ended", "finding-verifier",
+        "--data", json.dumps({**common, "present": True}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    check(json.loads(run_progress("subagents-open").stdout) == [],
+          "the replacement SPEC-loop verifier remained open")
+
+
+@test
+def subagent_recovery_consolidation_closes_lost_before_same_round_regeneration():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_reach_session(1)
+    swept = run_progress(
+        "note", "sweep.reported", "--round", "1",
+        "--data", '{"hop":1,"places":0,"closed":true}',
+    )
+    check(swept.returncode == 0, swept.stdout + swept.stderr)
+    returned = run_progress("note", "fixer.returned", "--data", '{"applied":1,"declined":0}')
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    relative = next(entry["text"] for entry in journal_lines()
+                    if entry.get("kind") == "spec.written")
+    write_project(relative, spec_document(status="amended"))
+    started = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(started.returncode == 0, started.stdout + started.stderr)
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1", "--text", "consolidation round 1 of 3"
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    lost = run_progress(
+        "subagent-ended", "consolidation", "--round", "1",
+        "--data", '{"unusable":"lost"}',
+    )
+    check(lost.returncode == 0, lost.stdout + lost.stderr)
+    replacement = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    ended = run_progress(
+        "subagent-ended", "consolidation", "--round", "1", "--data", '{"exact":true}'
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    check(json.loads(run_progress("subagents-open").stdout) == [],
+          "the replacement consolidation checker remained open")
 
 
 @test

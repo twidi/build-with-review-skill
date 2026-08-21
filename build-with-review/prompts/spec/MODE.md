@@ -493,6 +493,16 @@ In this order, and it is an order:
 
    `present` is the verifier's structured result. A lost final message consumes this
    durable result and does not launch another physical call.
+   If the exact call or its result is unavailable before that terminal, close its bracket
+   first:
+
+   ```sh
+   progress.py subagent-ended finding-verifier \
+     --data '{"owner":"spec-loop","commit_op":"<closing op>","sha":"<closing sha>","ruling":"R1","authority_kind":"<kind>","authority_ref":"<ref>","authority_sha256":"<sha256>","unusable":"lost"}'
+   ```
+
+   Only then may one replacement verifier open with the unchanged identity. Never open
+   that replacement over the old physical call.
 
    ```sh
    progress.py note decision.recheck.completed \
@@ -832,9 +842,12 @@ write every permitted direct terminal before opening any new ordinary conflict.
 | `verifier`, `feasibility`, `judge`, `scoped` | session | `Reviewer` |
 | the fixer | session | `Fixer` |
 | a new controller session, at the close | session | `Controller` |
+| the close-time `spec-fixer` finding verifier from step 4 | subagent | provider-native |
 
-**No subagent runs in this mode.** Every actor is a session, because every one of them
-produces something the human must be able to reread on its own.
+Every ordinary reviewer, fixer and successor controller is a session because its work
+must remain separately readable. The close-time `spec-fixer` presence check in step 4 is
+the only subagent in this mode. Its structured result becomes durable in the shared
+recheck artifact and journal boundary.
 
 ---
 

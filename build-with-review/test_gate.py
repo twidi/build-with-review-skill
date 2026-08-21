@@ -629,6 +629,37 @@ def logical_gate_cannot_be_abandoned_while_its_executor_owner_is_live():
 
 
 @test
+def lost_gate_runner_closes_before_same_operation_regeneration():
+    fixture = Fixture()
+    try:
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        opening = (
+            "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
+            "-", "0", "0", "HEAD",
+        )
+        first = fixture.run(*opening, ok=True)
+        op = re.search(r"^OP ([0-9a-f]{64})$", first.stdout, re.MULTILINE).group(1)
+        fixture.run("bash", fixture.gate_check, "lost", op, ok=True)
+        open_calls = fixture.run(sys.executable, fixture.progress, "subagents-open", ok=True)
+        check(json.loads(open_calls.stdout) == [], "the lost gate-runner bracket remained open")
+
+        second = fixture.run(*opening, ok=True)
+        replacement_op = re.search(r"^OP ([0-9a-f]{64})$", second.stdout, re.MULTILINE).group(1)
+        check(replacement_op == op, "gate-runner regeneration changed the logical operation")
+        fixture.write_gate_report(op)
+        fixture.close_gate(op, report=False)
+        terminals = [entry["data"] for entry in fixture.journal()
+                     if entry.get("event") == "subagent-ended"
+                     and entry.get("kind") == "gate-runner"
+                     and entry.get("data", {}).get("op") == op]
+        check(len(terminals) == 2 and terminals[0].get("unusable") == "lost"
+              and terminals[1].get("green") is True,
+              f"the physical gate calls did not retain exact separate terminals: {terminals}")
+    finally:
+        fixture.close()
+
+
+@test
 def close_refuses_when_no_physical_report_exists():
     fixture = Fixture()
     try:

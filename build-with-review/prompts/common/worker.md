@@ -141,6 +141,10 @@ Before launching a duplicate, treating the result as lost, or ending your own tu
 inspect the provider's active-subagent roster. On Codex, use its subagent list. A
 `subagent-started` line means unsettled; it does not prove that the call is still active.
 
+Every successful opening prints a `SUBAGENT OPEN` reminder on stderr. It preserves stdout.
+Keep the provider-native handle and follow that reminder until the bracket has one exact
+durable terminal.
+
 - If the call is active, do not duplicate or terminalize it. Continue useful work and
   reconcile it again before ending the turn.
 - If it completed, write the exact `subagent-ended` result before acting on it.
@@ -148,8 +152,8 @@ inspect the provider's active-subagent roster. On Codex, use its subagent list. 
   before regeneration when that terminal exists.
 
 Do not end a turn with a required provider subagent forgotten. Use only the
-provider-native result or wait mechanism when no other useful work remains. Never use a
-TwiCC process-wait loop for a child session; sessions report asynchronously and the
+provider-native result or wait mechanism when no other useful work remains. Never use
+TwiCC process wait for a child session; sessions report asynchronously and the
 watchdog owns missing wake-ups.
 
 **Never launch an extra reviewer for a second opinion.** This workflow already gives

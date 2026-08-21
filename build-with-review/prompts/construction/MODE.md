@@ -323,6 +323,17 @@ progress.py subagent-ended gate-runner \
 ```
 
 This result proposes a list. It is not a gate proof and no consumer accepts it as one.
+If the provider call or its result becomes unavailable, close that exact physical call
+first:
+
+```sh
+progress.py subagent-ended gate-runner \
+  --data '{"scope":"discovery","unusable":"lost"}'
+```
+
+Only then may the one permitted replacement open with the same discovery identity. Use
+the exact `error`, `empty`, `lost` or `unusable` reason. Never open a replacement over the
+old bracket.
 
 When the real gate exists, first open one logical controller baseline check:
 
@@ -375,12 +386,15 @@ clean checker verdict or one complete round-10 resolution without an accepted de
 Resume it as follows:
 
 - marker and no terminal result: if the whole canonical report exists, rerun `close`
-  without regenerating the physical runner. Otherwise rerun the exact `open` call. It
-  returns the same op only when every frozen value still matches. The regenerated runner
-  reuses a complete durable command account, or reruns the same frozen schedule if no
-  complete account landed. Its executor call first joins the op's ownership lock. If the
-  prior executor died, every orphaned active command retains that lock until it exits, so
-  the replacement cannot overlap it;
+  without regenerating the physical runner. Otherwise inspect the provider-native
+  subagent roster. If the exact runner or its result is unavailable, first run
+  `gate-check.sh lost <op>`. It proves that no executor or orphaned command remains and
+  closes that physical bracket as `unusable:"lost"`. Only then rerun the exact `open`
+  call. It returns the same op only when every frozen value still matches. The regenerated
+  runner reuses a complete durable command account, or reruns the same frozen schedule if
+  no complete account landed. Its executor call first joins the op's ownership lock. If
+  the prior executor died, every orphaned active command retains that lock until it exits,
+  so neither `lost` nor the replacement can overlap it;
 - terminal result and marker: rerun `close` with that op. It removes only the orphan tail;
 - terminal result and no marker: consume it. Never run the gate again for lost output;
 - changed candidate or gate: stop the physical runner. Use `gate-check.sh abandon <op>`,
@@ -707,6 +721,16 @@ make.
 progress.py subagent-started completeness
 progress.py subagent-ended completeness --data '{"decisions":"<N/N>","tasks":"<N/N>","deps":"<N/N>","constraints":"<ok, or N broken>","parent":"<ok, or N broken - on a sub-lot; n/a on a normal lot>"}'
 ```
+
+If the call or result is unavailable, close its physical bracket before any replacement:
+
+```sh
+progress.py subagent-ended completeness --data '{"unusable":"lost"}'
+```
+
+Then use the one generic failure retry from `SKILL.md`, including its exact
+`bound.spent` line, and reopen completeness. Never append another start while the prior
+physical call remains open.
 
 **The counts are the checker's real ones, every marker filled.** A sample copied
 verbatim is a journal that says the plan is incomplete — or complete — regardless of the

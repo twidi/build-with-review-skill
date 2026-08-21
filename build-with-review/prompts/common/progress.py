@@ -8,6 +8,7 @@ Usage:
   progress.py session-retired <id> <status> [--archive] [--hide]
   progress.py subagent-started <kind> [--mandate S] [--task N] [--round K]
   progress.py subagent-ended   <kind> [--mandate S] [--task N] [--round K] [--data '<json>']
+  progress.py subagents-open
   progress.py note <kind> [--mandate S] [--task N] [--round K]
                    [--text "<sentence>" | --text-file PATH] [--data '<json>']
   progress.py notes
@@ -2218,7 +2219,8 @@ def construction_design_proof(entries, before, identity, generation, subject):
 def construction_review_gate(entries, before, base, gate, tree, subject):
     matches = [(index, note_data(entry)) for index, entry in enumerate(entries[:before])
                if entry.get("event") == "subagent-ended" and entry.get("kind") == "gate-runner"
-               and note_data(entry).get("op") == gate]
+               and note_data(entry).get("op") == gate
+               and "unusable" not in note_data(entry)]
     if len(matches) != 1:
         fail(f"{subject} has no one exact ordinary gate terminal")
     index, data = matches[0]
@@ -3920,15 +3922,19 @@ def validate_consolidation_started(entries, index, entry):
 def normalize_consolidation_ended(entries, data, round_number):
     if not isinstance(round_number, int) or round_number > 3 or not isinstance(data, dict):
         fail("a consolidation result requires one structured round 1, 2 or 3")
-    if data.get("exact") is True and set(data) != {"exact"}:
+    unavailable = set(data) == {"unusable"} \
+        and data.get("unusable") in CONSTRUCTION_UNUSABLE_RESULTS
+    if "unusable" in data and not unavailable:
+        fail("an unavailable consolidation result has an invalid shape", data)
+    if not unavailable and data.get("exact") is True and set(data) != {"exact"}:
         fail("an exact consolidation result has unexpected fields", data)
-    if data.get("exact") is False and (
+    if not unavailable and data.get("exact") is False and (
         set(data) != {"exact", "discrepancies"}
         or not isinstance(data.get("discrepancies"), int)
         or isinstance(data.get("discrepancies"), bool) or data["discrepancies"] < 1
     ):
         fail("an adverse consolidation result needs one positive discrepancy count", data)
-    if data.get("exact") not in {True, False}:
+    if not unavailable and data.get("exact") not in {True, False}:
         fail("a consolidation result needs exact true or false")
     openings = amendment_openings(entries)
     if not openings:
@@ -3942,10 +3948,12 @@ def normalize_consolidation_ended(entries, data, round_number):
            for entry in entries[start_index + 1:]):
         fail("this physical consolidation call already has a result")
     validate_consolidation_started(entries, start_index, start)
+    start_data = note_data(start)
+    if unavailable:
+        return {**start_data, **data}
     state, amendment_sha, spec_sha = amendment_content_identity(
         entries, len(entries), "a consolidation result",
     )
-    start_data = note_data(start)
     if amendment_sha != start_data.get("amendment_sha256") \
             or spec_sha != start_data.get("spec_sha256"):
         fail("the amendment or spec changed while the consolidation checker ran")
@@ -4169,27 +4177,29 @@ def validate_amendment_commit_entry(entries, index, entry, *, require_current=Fa
 def validate_gate_subagent(event, data):
     """A gate receipt consumes the exact live logical check marker."""
     if isinstance(data, dict) and data.get("scope") == "discovery":
-        expected = {"scope"} if event == "subagent-started" else {"scope", "green", "surface"}
-        if set(data) != expected:
+        expected = {"scope"} if event == "subagent-started" else None
+        terminal_shape = set(data) in ({"scope", "green", "surface"}, {"scope", "unusable"})
+        if event == "subagent-started" and set(data) != expected \
+                or event == "subagent-ended" and not terminal_shape:
             fail(f"{event} discovery gate-runner has malformed data", data)
-        if event == "subagent-ended" and (
-            not isinstance(data.get("green"), bool)
-            or data.get("surface") not in {"unchanged", "different"}
+        if event == "subagent-ended" and "unusable" in data \
+                and data["unusable"] not in CONSTRUCTION_UNUSABLE_RESULTS:
+            fail("subagent-ended discovery gate-runner has an invalid unusable result", data)
+        if event == "subagent-ended" and "unusable" not in data and (
+                not isinstance(data.get("green"), bool)
+                or data.get("surface") not in {"unchanged", "different"}
         ):
             fail("subagent-ended discovery gate-runner has an invalid result", data)
         entries = journal_entries()
-        starts = sum(
-            entry.get("event") == "subagent-started" and entry.get("kind") == "gate-runner"
-            and note_data(entry).get("scope") == "discovery" for entry in entries
-        )
-        ends = sum(
-            entry.get("event") == "subagent-ended" and entry.get("kind") == "gate-runner"
-            and note_data(entry).get("scope") == "discovery" for entry in entries
-        )
-        if event == "subagent-started" and starts != ends:
-            fail("a discovery gate-runner is already open")
-        if event == "subagent-ended" and starts != ends + 1:
-            fail("a discovery gate-runner has no unique open physical call")
+        starts = [entry for entry in entries if entry.get("event") == "subagent-started"
+                  and entry.get("kind") == "gate-runner"
+                  and note_data(entry).get("scope") == "discovery"]
+        ends = [entry for entry in entries if entry.get("event") == "subagent-ended"
+                and entry.get("kind") == "gate-runner"
+                and note_data(entry).get("scope") == "discovery"]
+        completed = [entry for entry in ends if "unusable" not in note_data(entry)]
+        if event == "subagent-started" and (completed or len(starts) >= 2):
+            fail("the discovery gate-runner cannot open another physical call")
         return
 
     base_keys = {
@@ -4197,8 +4207,11 @@ def validate_gate_subagent(event, data):
         "tree", "gate", "code",
     }
     result_keys = {"green", "surface", "report", "report_sha256", "commands"}
-    expected_keys = base_keys if event == "subagent-started" else base_keys | result_keys
-    if not isinstance(data, dict) or set(data) not in (expected_keys, expected_keys | {"execution"}):
+    identity_keys = base_keys | ({"execution"} if isinstance(data, dict) and "execution" in data else set())
+    expected_shapes = (identity_keys,) if event == "subagent-started" else (
+        identity_keys | result_keys, identity_keys | {"unusable"},
+    )
+    if not isinstance(data, dict) or set(data) not in expected_shapes:
         fail(f"{event} gate-runner has an incomplete logical-check identity", data)
     if not isinstance(data.get("op"), str) or not re.fullmatch(r"[0-9a-f]{64}", data["op"]):
         fail(f"{event} gate-runner has an invalid operation identity")
@@ -4209,7 +4222,10 @@ def validate_gate_subagent(event, data):
     if not isinstance(data.get("task"), int) or isinstance(data.get("task"), bool) \
             or not isinstance(data.get("attempt"), int) or isinstance(data.get("attempt"), bool):
         fail(f"{event} gate-runner has an invalid task identity")
-    if event == "subagent-ended":
+    if event == "subagent-ended" and "unusable" in data:
+        if data["unusable"] not in CONSTRUCTION_UNUSABLE_RESULTS:
+            fail("subagent-ended gate-runner has an invalid unusable result")
+    elif event == "subagent-ended":
         if not isinstance(data.get("green"), bool) \
                 or data.get("surface") not in {"unchanged", "different"} \
                 or not isinstance(data.get("report"), str) \
@@ -4250,20 +4266,30 @@ def validate_gate_subagent(event, data):
         normalized["execution"] = execution.stdout.strip()
     identity_keys = base_keys | ({"execution"} if "execution" in marker else set())
     if set(data) != (identity_keys if event == "subagent-started" else identity_keys | result_keys):
-        fail("the gate-runner event and marker disagree about execution identity", data)
+        if event != "subagent-ended" or set(data) != identity_keys | {"unusable"}:
+            fail("the gate-runner event and marker disagree about execution identity", data)
     if any(data[key] != normalized[key] for key in identity_keys):
         fail("the gate-runner event does not match the live logical check", {
             "event": {key: data[key] for key in sorted(identity_keys)},
             "marker": {key: normalized[key] for key in sorted(identity_keys)},
         })
 
-    check = subprocess.run(
-        ["bash", GATE_CHECK, "verify", data["op"]], capture_output=True, text=True
-    )
-    if check.returncode != 0:
-        fail("the gate-runner candidate or gate changed before its event", check.stderr or check.stdout)
+    if event != "subagent-ended" or "unusable" not in data:
+        check = subprocess.run(
+            ["bash", GATE_CHECK, "verify", data["op"]], capture_output=True, text=True
+        )
+        if check.returncode != 0:
+            fail("the gate-runner candidate or gate changed before its event", check.stderr or check.stdout)
+    elif "execution" in data:
+        idle = subprocess.run(
+            [sys.executable, GATE_EXECUTION, "idle", data["op"]],
+            capture_output=True, text=True,
+        )
+        if idle.returncode != 0:
+            fail("the unavailable gate-runner still owns a live executor or command",
+                 idle.stderr or idle.stdout)
 
-    if event == "subagent-ended":
+    if event == "subagent-ended" and "unusable" not in data:
         audit = subprocess.run(
             [sys.executable, GATE_REPORT, data["op"], data["gate"], data["tree"],
              data.get("execution", "-")],
@@ -4293,14 +4319,12 @@ def validate_gate_subagent(event, data):
         if entry.get("event") == "subagent-ended" and entry.get("kind") == "gate-runner"
         and note_data(entry).get("op") == data["op"]
     ]
+    completed_ends = [entry for entry in matching_ends if "unusable" not in note_data(entry)]
     if event == "subagent-started":
-        if matching_ends:
+        if completed_ends or len(matching_starts) >= 2:
             fail(f"logical gate check {data['op']} already has a terminal result")
-    else:
-        if not matching_starts:
-            fail(f"logical gate check {data['op']} has no physical-call opening")
-        if matching_ends:
-            fail(f"logical gate check {data['op']} already has a terminal result")
+    elif "unusable" not in data and completed_ends:
+        fail(f"logical gate check {data['op']} already has a terminal result")
 
 
 def validate_spec_loop_verifier(event, data):
@@ -4308,8 +4332,10 @@ def validate_spec_loop_verifier(event, data):
         "owner", "commit_op", "sha", "ruling",
         "authority_kind", "authority_ref", "authority_sha256",
     }
-    expected_keys = common_keys if event == "subagent-started" else common_keys | {"present"}
-    if not isinstance(data, dict) or set(data) != expected_keys \
+    expected_shapes = (common_keys,) if event == "subagent-started" else (
+        common_keys | {"present"}, common_keys | {"unusable"},
+    )
+    if not isinstance(data, dict) or set(data) not in expected_shapes \
             or data.get("owner") != "spec-loop" \
             or not re.fullmatch(r"[A-Za-z0-9._:-]+", str(data.get("commit_op"))) \
             or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("sha"))) \
@@ -4317,7 +4343,10 @@ def validate_spec_loop_verifier(event, data):
             or data.get("authority_kind") not in DIRECT_AUTHORITY_KINDS \
             or not isinstance(data.get("authority_ref"), str) \
             or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("authority_sha256"))) \
-            or event == "subagent-ended" and not isinstance(data.get("present"), bool):
+            or (event == "subagent-ended" and "present" in data
+                and not isinstance(data.get("present"), bool)) \
+            or (event == "subagent-ended" and "unusable" in data
+                and data.get("unusable") not in CONSTRUCTION_UNUSABLE_RESULTS):
         fail("a SPEC-loop finding-verifier event has malformed exact identity or result", data)
     entries = journal_entries()
     commits = [entry for entry in entries if entry.get("kind") == "spec.committed"
@@ -4343,14 +4372,12 @@ def validate_spec_loop_verifier(event, data):
             and note_data(entry).get("owner") == "spec-loop"
             and note_data(entry).get("commit_op") == data["commit_op"]
             and note_data(entry).get("ruling") == data["ruling"]]
-    if event == "subagent-started":
-        if starts or ends:
-            fail("the SPEC-loop verifier bracket already exists for this ruling and close")
-    else:
-        if len(starts) != 1 or ends:
-            fail("the SPEC-loop verifier result has no one exact open bracket")
-        if any(note_data(starts[0]).get(key) != data[key] for key in common_keys):
-            fail("the SPEC-loop verifier result changes its opening identity")
+    completed = [entry for entry in ends if "unusable" not in note_data(entry)]
+    if event == "subagent-started" and (completed or len(starts) >= 2):
+        fail("the SPEC-loop verifier cannot open another physical call")
+    if event == "subagent-ended" and starts \
+            and any(note_data(starts[-1]).get(key) != data[key] for key in common_keys):
+        fail("the SPEC-loop verifier result changes its opening identity")
 PASS_OPENING_KEYS = {
     "built", "commit", "gate", "source_scope", "source_owner",
     "source_lot", "source_task", "source_attempt",
@@ -4367,7 +4394,8 @@ def exact_pass_gate_result(entries, before, data, subject):
     matches = [entry for entry in entries[:before]
                if entry.get("event") == "subagent-ended"
                and entry.get("kind") == "gate-runner"
-               and note_data(entry).get("op") == data["gate"]]
+               and note_data(entry).get("op") == data["gate"]
+               and "unusable" not in note_data(entry)]
     if len(matches) != 1:
         fail(f"{subject} has no one exact durable gate result")
     result = note_data(matches[0])
@@ -6471,8 +6499,10 @@ def cmd_subagent_started(args):
             context.pop("round", None)
     elif data is not None:
         fail(f"subagent-started {args.kind} does not take structured data")
-    append_event(me["session_id"], "subagent-started", kind=args.kind, data=data,
-                 **context)
+    validate_subagent_transition(
+        journal_entries(), "subagent-started", me["session_id"], args.kind, context, data,
+    )
+    append_event(me["session_id"], "subagent-started", kind=args.kind, data=data, **context)
     if args.kind in {"design-checker", "code-checker"}:
         print(json.dumps({
             "manifest": data["manifest"], "manifest_sha256": data["manifest_sha256"],
@@ -6480,6 +6510,16 @@ def cmd_subagent_started(args):
                if args.kind == "code-checker" else {}),
             "call": data["call"],
         }, separators=(",", ":"), sort_keys=True))
+    print(
+        "SUBAGENT OPEN\n"
+        "Keep the exact provider handle.\n"
+        "Do not end this turn while this bracket remains open.\n"
+        "Continue other useful work, then inspect the provider-native subagent roster.\n"
+        "If no useful work remains, use the provider-native result or wait mechanism.\n"
+        "Record subagent-ended before acting on the result.\n"
+        "Never use TwiCC process wait for this provider subagent.",
+        file=sys.stderr,
+    )
 
 
 def cmd_subagent_ended(args):
@@ -6506,8 +6546,91 @@ def cmd_subagent_ended(args):
         context.update({key: data[key] for key in ("lot", "task", "attempt")})
         if check == "diagnostic":
             context.pop("round", None)
-    append_event(me["session_id"], "subagent-ended", kind=args.kind, data=data,
-                 **context)
+    validate_subagent_transition(
+        journal_entries(), "subagent-ended", me["session_id"], args.kind, context, data,
+    )
+    append_event(me["session_id"], "subagent-ended", kind=args.kind, data=data, **context)
+
+
+def subagent_event_context(entry):
+    return {key: entry[key] for key in CONTEXT_FIELDS if key in entry}
+
+
+def subagent_terminal_matches(opening, terminal):
+    if opening.get("by") != terminal.get("by") \
+            or opening.get("kind") != terminal.get("kind") \
+            or subagent_event_context(opening) != subagent_event_context(terminal):
+        return False
+    opening_data = opening.get("data")
+    if opening_data is None:
+        return True
+    terminal_data = terminal.get("data")
+    return isinstance(terminal_data, dict) and all(
+        terminal_data.get(key) == value for key, value in opening_data.items()
+    )
+
+
+def open_subagent_brackets(entries):
+    """Return exact unsettled provider calls from one validated journal history."""
+    open_calls = []
+    for index, entry in enumerate(entries):
+        event = entry.get("event")
+        if event not in {"subagent-started", "subagent-ended"}:
+            continue
+        if not isinstance(entry.get("ts"), str) or not entry["ts"] \
+                or not isinstance(entry.get("by"), str) or not entry["by"] \
+                or entry.get("kind") not in SUBAGENT_KINDS \
+                or "data" in entry and not isinstance(entry.get("data"), dict):
+            fail("the journal has a malformed provider-subagent boundary",
+                 f"progress.jsonl line {index + 1}")
+        if event == "subagent-started":
+            duplicate = [candidate for _, candidate in open_calls
+                         if subagent_terminal_matches(candidate, entry)
+                         and subagent_terminal_matches(entry, candidate)]
+            if duplicate:
+                fail("the journal opens the same provider-subagent identity twice",
+                     f"progress.jsonl line {index + 1}")
+            open_calls.append((index, entry))
+            continue
+        matches = [(position, item) for position, item in enumerate(open_calls)
+                   if subagent_terminal_matches(item[1], entry)]
+        if len(matches) != 1:
+            fail("the journal has no one exact opening for a provider-subagent terminal",
+                 f"progress.jsonl line {index + 1}")
+        del open_calls[matches[0][0]]
+    return open_calls
+
+
+def validate_subagent_transition(entries, event, owner, kind, context, data):
+    candidate = {"event": event, "by": owner, "kind": kind, **context}
+    if data is not None:
+        candidate["data"] = data
+    open_calls = open_subagent_brackets(entries)
+    if event == "subagent-started":
+        duplicates = [opening for _, opening in open_calls
+                      if subagent_terminal_matches(opening, candidate)
+                      and subagent_terminal_matches(candidate, opening)]
+        if duplicates:
+            fail("this exact provider-subagent physical call is already open")
+        return
+    matches = [opening for _, opening in open_calls
+               if subagent_terminal_matches(opening, candidate)]
+    if len(matches) != 1:
+        fail("the provider-subagent terminal has no one exact open physical call")
+
+
+def cmd_subagents_open(args):
+    rows = []
+    for index, entry in open_subagent_brackets(journal_entries()):
+        rows.append({
+            "kind": entry["kind"],
+            "owner": entry["by"],
+            "started": entry["ts"],
+            "context": subagent_event_context(entry),
+            "identity": entry.get("data") or {},
+            "opening": journal_line_proof(index),
+        })
+    print(json.dumps(rows, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
 
 
 def note_text(args):
@@ -6863,6 +6986,9 @@ def build_parser():
     sp.add_argument("--data", metavar="JSON")
     sp.set_defaults(func=cmd_subagent_ended)
 
+    sp = sub.add_parser("subagents-open", help="print exact unsettled provider-subagent brackets")
+    sp.set_defaults(func=cmd_subagents_open)
+
     sp = sub.add_parser("note", help="record one event of the run")
     sp.add_argument("kind")
     add_context_flags(sp)
@@ -6926,9 +7052,11 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
-    repair_journal_tail()
+    if args.command != "subagents-open":
+        repair_journal_tail()
     args.func(args)
-    refresh_dashboard()
+    if args.command != "subagents-open":
+        refresh_dashboard()
 
 
 if __name__ == "__main__":

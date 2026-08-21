@@ -188,6 +188,25 @@ Prints only the notes — timestamped, with who wrote each one. **That is what a
 reads after a compaction**, or when it takes a run over: what the human ruled, what was
 refuted and by what, and where the work stands. You never parse the journal yourself.
 
+The watchdog has one separate read-only query:
+
+```
+python3 "<workspace>/prompts/common/progress.py" subagents-open
+```
+
+It prints one JSON array with every exact unsettled provider-subagent bracket. It repairs
+nothing, refreshes nothing and writes nothing. The watchdog uses it; agents do not parse
+the journal to reconstruct this state.
+
+Every successful `subagent-started` has one exact physical terminal before another call
+uses the same identity. A supported unavailable-result route writes an exact unusable
+terminal first. Discovery, gate execution, SPEC-loop verification, completeness and
+amendment consolidation all define that route at their direct call site.
+
+Every successful `subagent-started` also prints `SUBAGENT OPEN` guidance on stderr. The
+opening's defined stdout stays unchanged. Keep the provider-native handle and close the
+exact bracket before acting on its result.
+
 ---
 
 ## What you never do

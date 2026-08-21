@@ -725,6 +725,7 @@ task, the plan being written; the run resumes where it stood.
    progress.py note bound.spent --round <n> --text "consolidation round <n> of 3"
    progress.py subagent-ended consolidation --round <n> --data '{"exact":true}'
    progress.py subagent-ended consolidation --round <n> --data '{"exact":false,"discrepancies":<N>}'
+   progress.py subagent-ended consolidation --round <n> --data '{"unusable":"lost"}'
    progress.py note verdict.consumed --round <n> --data '{"check":"consolidation","outcome":"exact"}'
    progress.py note verdict.consumed --round <n> --data '{"check":"consolidation","outcome":"discrepancies"}' --text-file "$JOURNAL_TEXT_FILE"
    ```
@@ -737,6 +738,11 @@ task, the plan being written; the run resumes where it stood.
    Preserve discrepancies through `progress-rules.md`'s `--text-file` transport. Never
    put their bytes into shell source. Three consumed adverse rounds mean the exit below, never a
    fourth logical round.*
+
+   An unavailable physical call has no `verdict.consumed`. Close its exact bracket with
+   `unusable:"<error|empty|lost|unusable>"` before the one generic failure retry from
+   `SKILL.md`. The replacement uses the same logical round and no second consolidation
+   domain spend.
 
    **a strong model, effort medium**, prompt
    `<workspace>/prompts/amendment/consolidation.md`. Give it that path, the workspace path,
@@ -1125,8 +1131,10 @@ breach lifecycle events remain able to complete their own state.
     then write its one domain spend.
   - **The latest consolidation domain spend has no matching
     `verdict.consumed` for its round** → its actionable result was lost before it became
-    durable. Relaunch the same checker under the same round and a fresh bracket, **with
-    no new domain spend**. Then record and route the regenerated verdict.
+    durable. Inspect the provider-native roster. If the exact call or result is
+    unavailable, close that physical bracket as unusable before opening a fresh bracket.
+    Relaunch the same checker under the same round, **with no new domain spend**. Then
+    record and route the regenerated verdict.
   - **The latest consolidation verdict is consumed as `exact`** → the check is closed
     and never repeats. The status line is already inside the checked bytes. Resume at the
     commit only.
