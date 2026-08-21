@@ -55,6 +55,13 @@ then execute the exact frozen schedule through:
 python3 <workspace>/prompts/construction/gate_execution.py run <op>
 ```
 
+`run` can take several minutes. Wait for this exact command to reach a terminal result.
+If the invocation tool returns while the command remains active, continue that same
+invocation through the tool's continuation mechanism. That intermediate return is not
+command completion. Do not run the second verify, run `inspect`, end the assignment or
+report a blocker before `run` terminates. Only a terminal zero exit authorizes the next
+verify and account inspection.
+
 The helper runs only commands from the real gate. It starts commands concurrently only
 inside one semantically admitted compatible group, up to the frozen workspace maximum.
 It waits for every command in an active group, preserves each output separately, and

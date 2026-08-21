@@ -324,6 +324,50 @@ def concurrent_same_op_callers_join_one_executor_owner():
 
 
 @test
+def inspect_reports_an_active_executor_before_the_account_exists():
+    fixture = Fixture()
+    executor = None
+    try:
+        ready = fixture.temp / "inspect-ready"
+        release = fixture.temp / "inspect-release"
+        command = py_command(
+            fixture.temp / "inspect-active.py",
+            "import pathlib, time\n"
+            f"ready=pathlib.Path({str(ready)!r}); release=pathlib.Path({str(release)!r})\n"
+            "ready.write_text('ready')\n"
+            "while not release.exists(): time.sleep(0.01)\n"
+            "print('complete')\n",
+        )
+        fixture.gate.write_text(f"{command}\n", encoding="utf-8")
+        fixture.publish(1, [[command]])
+        op = "0" * 64
+        fixture.open_marker(op)
+
+        idle_inspection = fixture.helper("inspect", op, ok=False)
+        check("gate command execution is idle but no complete account exists"
+              in idle_inspection.stderr, idle_inspection.stderr)
+
+        executor = fixture.start_helper("run", op)
+        wait_for(ready, "the executor never entered its command")
+
+        inspection = fixture.helper("inspect", op, ok=False)
+        release.write_text("release", encoding="utf-8")
+        output = executor.communicate(timeout=10)
+
+        check(executor.returncode == 0, output)
+        check("gate command execution is still active" in inspection.stderr,
+              inspection.stderr)
+        fixture.helper("inspect", op)
+    finally:
+        release = fixture.temp / "inspect-release"
+        release.write_text("release", encoding="utf-8")
+        if executor is not None and executor.poll() is None:
+            executor.kill()
+            executor.wait()
+        fixture.close()
+
+
+@test
 def orphaned_wave_holds_ownership_until_its_command_exits():
     fixture = Fixture()
     first = replacement = None
@@ -1179,6 +1223,9 @@ def controller_and_runner_contracts_share_one_bounded_schedule():
         "frozen policy and narrow compatibility triggers",
         "One op has one executor owner",
         "active commands retain ownership until all of them exit",
+        "`run` can take several minutes",
+        "That intermediate return is not command completion",
+        "report a blocker before `run` terminates",
         "gate_execution.py inspect <op>",
         "gate_execution.py result <op> <item-number>",
         "gate_execution.py output",

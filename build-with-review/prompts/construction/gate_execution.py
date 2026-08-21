@@ -705,7 +705,7 @@ def validate_op(op):
 
 
 @contextlib.contextmanager
-def execution_lock(op, *, blocking=True):
+def execution_lock(op, *, blocking=True, busy_message=None):
     validate_op(op)
     ensure_report_ground()
     path = REPORT_GROUND / f"{op}.execution.lock"
@@ -720,7 +720,7 @@ def execution_lock(op, *, blocking=True):
         try:
             fcntl.flock(descriptor, operation)
         except BlockingIOError:
-            refuse("the exact gate executor or one of its command processes is still live")
+            refuse(busy_message or "the exact gate executor or one of its command processes is still live")
         yield descriptor
     finally:
         # Do not call LOCK_UN here. Active commands inherit this open-file
@@ -856,6 +856,18 @@ def account_state(op):
     validate_op(op)
     _, execution, execution_hash = frozen_execution(op)
     commands = [item for group in execution["compatible_groups"] for item in group]
+    target = account_path(op)
+    if not target.exists() and not target.is_symlink():
+        with execution_lock(
+            op,
+            blocking=False,
+            busy_message=(
+                "gate command execution is still active; wait for its terminal result "
+                "before inspecting the account"
+            ),
+        ):
+            if not target.exists() and not target.is_symlink():
+                refuse("gate command execution is idle but no complete account exists")
     account, account_hash = read_account(op, execution_hash, commands)
     return execution, execution_hash, account, account_hash
 
