@@ -997,19 +997,22 @@ one edit at each close that changes what it records**: the spec loop's close, an
 landing, a re-entered loop's close, each mode naming its own. It is a status word in a
 header, it changes no behaviour, and no gate or reviewer has anything to say about it.
 
-**And four artifacts of the machinery itself, each with no other valid writer:**
+**And five artifacts of the machinery itself, each with no other valid writer:**
 
 - **`gate.md`** — the runner proposes, the human validates, **you publish through
   `gate-write.sh`**: written by anyone earlier, the file would read as approved before
   it was; the helper exposes only a complete atomically renamed file. A full-line `#`
   comment preserves validated rationale but is never a command or a gate-surface
   exemption;
-- **`<workspace>/gate-execution.json`** — after the exact gate list exists, you propose
-  compatible command groups and their complete project-local compatibility evidence. The
-  human validates the groups, evidence paths and maximum, and **you publish through
-  `gate_execution.py`**. Proven absence means strict sequential execution. Every logical
-  gate freezes the complete schedule and evidence, so later config or relevant project
-  changes cannot authorize concurrent execution;
+- **`<workspace>/gate-policy.json`** — one workspace-local positive parallel maximum and
+  exact human compatibility rulings. Ask the maximum once for a fresh workspace. Publish
+  each complete human-owned generation through `gate_execution.py`; schedule replacement
+  never changes this file;
+- **`<workspace>/gate-execution.json`** — after the exact gate list exists, derive one
+  semantic command schedule under the current policy. Admit a shared pair only through a
+  RARE or EXCEPTIONAL interference analysis, or one exact compatible human ruling. Publish
+  through `gate_execution.py`. Proven absence means singleton groups. Every logical gate
+  freezes the complete schedule and policy snapshot;
 - **the confirmed-findings file** that closes a review pass — the sub-lot's source,
   distilled from verdicts only you hold together, and no child is assigned to it;
 - **the `.superpowers/` ignore rule** when workspace creation refuses —
@@ -1095,12 +1098,16 @@ writes only to a path proven absent immediately beforehand. Growth authenticates
 old blob. Both prepare the complete command list in one real same-directory temporary and
 publish it by atomic rename, so interruption cannot expose a partial final leaf.
 
-The optional workspace-local `gate-execution.json` binds one exact gate blob to one
-human-approved ordered compatibility partition, one complete set of project-local
-compatibility evidence and one positive parallel maximum. The controller publishes or
-removes it only through `gate_execution.py`, and only between logical gate operations.
-Proven absence derives a sequential schedule. A changed evidence identity refuses before
-any gate command. Baseline, ordinary and final gates use the same executor. Each operation
+The optional workspace-local `gate-policy.json` owns the positive parallel maximum and
+exact human compatibility rulings for the complete workspace. The separate optional
+`gate-execution.json` binds one exact gate blob to one ordered semantic compatibility
+partition and one immutable snapshot of that policy. The controller publishes either
+artifact only through `gate_execution.py`, and only between logical gate operations.
+Proven schedule absence derives singleton groups under the effective policy. A changed
+gate, policy or narrow compatibility trigger refuses before any gate command. Baseline,
+ordinary and final gates use the same executor. Fresh marker publication and every policy
+or schedule mutation share one workspace authority lock. One side completes first; the
+other then consumes that generation or refuses the live marker. Each operation
 freezes its schedule and keeps one atomically published account directory. A small
 canonical manifest authenticates one independently seekable raw output per command with
 whole and fixed-chunk hashes. Metadata reads touch no raw output, and bounded output reads

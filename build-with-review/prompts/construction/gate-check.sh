@@ -177,7 +177,7 @@ open_check() {
     [[ $scope =~ ^(task|baseline|review)$ ]] || die "gate-check open scope must be task, review or baseline"
     [[ $owner =~ ^[A-Za-z0-9._:/-]+$ ]] || die "the gate-check owner has invalid characters"
     validate_gate
-    local head base tree op round execution_json execution_token execution_hash
+    local head base tree op round marker_draft
     head=$(git rev-parse HEAD)
     base=$(git rev-parse --verify "$base_arg^{commit}") \
         || die "$base_arg is not a commit"
@@ -220,18 +220,9 @@ open_check() {
 Finish or abandon that exact check before opening another."
         validate_frozen_state
     else
-        execution_json=$(python3 "$GATE_EXECUTION" token) \
-            || die "the gate execution schedule is absent or invalid"
-        read -r execution_token execution_hash < <(python3 - "$execution_json" <<'PY'
-import json, sys
-value = json.loads(sys.argv[1])
-if set(value) != {"execution", "sha256", "token"}:
-    raise SystemExit("invalid gate execution token result")
-print(value["token"], value["sha256"])
-PY
-        ) || die "the gate execution helper returned an invalid frozen schedule"
         op=$(printf '%s\0' "$scope" "$owner" "$head" "$base" "$tree" "$GATE_SHA" "$code" \
-            "$execution_hash" "$(date +%s%N)" "$$" "$RANDOM" | sha256sum | cut -d' ' -f1)
+            "$(date +%s%N)" "$$" "$RANDOM" | sha256sum | cut -d' ' -f1)
+        marker_draft=$(mktemp "$WORKSPACE/.gate-check-in-progress.XXXXXX")
         {
             printf 'op %s\n' "$op"
             printf 'scope %s\n' "$scope"
@@ -244,9 +235,10 @@ PY
             printf 'tree %s\n' "$tree"
             printf 'gate %s\n' "$GATE_SHA"
             printf 'code %s\n' "$code"
-            printf 'execution %s\n' "$execution_token"
-        } > "$MARKER.tmp"
-        mv "$MARKER.tmp" "$MARKER"
+        } > "$marker_draft"
+        python3 "$GATE_EXECUTION" open-marker "$marker_draft" \
+            || { rm -f "$marker_draft"; die "the logical gate could not freeze its exact policy and schedule"; }
+        rm -f "$marker_draft"
         read_marker
     fi
     "$PROGRESS" subagent-started gate-runner --data "$(event_data)"

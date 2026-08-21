@@ -113,6 +113,37 @@ else:
     def progress(self):
         return self.workspace / "prompts" / "common" / "progress.py"
 
+    def publish_gate_schedule(self, maximum, groups):
+        helper = self.workspace / "prompts" / "construction" / "gate_execution.py"
+        policy = self.temp / "gate-policy-draft.json"
+        policy.write_text(json.dumps({
+            "schema": 1, "max_parallel": maximum, "rulings": [],
+        }), encoding="utf-8")
+        self.run(sys.executable, helper, "policy-publish", policy, ok=True)
+        compatibility = []
+        offset = 0
+        for group in groups:
+            positions = list(range(offset + 1, offset + len(group) + 1))
+            compatibility.extend({
+                "commands": [positions[left], positions[right]],
+                "decision": "compatible",
+                "basis": {
+                    "kind": "analysis", "probability": "RARE",
+                    "reason": "The focused fixture gives each command an isolated effect.",
+                },
+                "triggers": [],
+            } for left in range(len(positions)) for right in range(left + 1, len(positions)))
+            offset += len(group)
+        gate = self.repo / ".superpowers" / "bwr" / "gate.md"
+        draft = self.temp / "gate-execution-draft.json"
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": self.git("hash-object", str(gate)).stdout.strip(),
+            "compatible_groups": groups,
+            "compatibility": compatibility,
+        }), encoding="utf-8")
+        self.run(sys.executable, helper, "publish", draft, ok=True)
+
     def progress_call(self, *args, ok=True):
         return self.run(sys.executable, self.progress, *args, ok=ok)
 
@@ -465,7 +496,7 @@ def logical_gate_freezes_candidate_and_reuses_one_operation():
 
 
 @test
-def logical_gate_freezes_and_consumes_the_approved_parallel_schedule():
+def logical_gate_freezes_and_consumes_the_semantic_parallel_schedule():
     fixture = Fixture()
     try:
         first_ready = fixture.temp / "first-ready"
@@ -495,20 +526,7 @@ def logical_gate_freezes_and_consumes_the_approved_parallel_schedule():
         commands = [f"{sys.executable} {first_script}", f"{sys.executable} {second_script}"]
         gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
         gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
-        gate_sha = fixture.git("hash-object", str(gate)).stdout.strip()
-        helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
-        evidence = json.loads(
-            fixture.run(sys.executable, helper, "evidence", ".", ok=True).stdout
-        )
-        draft = fixture.temp / "gate-execution.json"
-        draft.write_text(json.dumps({
-            "schema": 1,
-            "gate": gate_sha,
-            "max_parallel": 2,
-            "compatibility_evidence": evidence,
-            "compatible_groups": [commands],
-        }), encoding="utf-8")
-        fixture.run(sys.executable, helper, "publish", draft, ok=True)
+        fixture.publish_gate_schedule(2, [commands])
 
         head = fixture.git("rev-parse", "HEAD").stdout.strip()
         opened = fixture.run(
@@ -537,18 +555,7 @@ def changed_gate_cannot_open_until_execution_schedule_is_settled():
         original = ["git diff --check", "git status --short"]
         gate.write_text("\n".join(original) + "\n", encoding="utf-8")
         helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
-        evidence = json.loads(
-            fixture.run(sys.executable, helper, "evidence", ".", ok=True).stdout
-        )
-        draft = fixture.temp / "drift-execution.json"
-        draft.write_text(json.dumps({
-            "schema": 1,
-            "gate": fixture.git("hash-object", str(gate)).stdout.strip(),
-            "max_parallel": 2,
-            "compatibility_evidence": evidence,
-            "compatible_groups": [original],
-        }), encoding="utf-8")
-        fixture.run(sys.executable, helper, "publish", draft, ok=True)
+        fixture.publish_gate_schedule(2, [original])
 
         gate.write_text("git diff --check\n", encoding="utf-8")
         head = fixture.git("rev-parse", "HEAD").stdout.strip()
@@ -586,17 +593,8 @@ def logical_gate_cannot_be_abandoned_while_its_executor_owner_is_live():
         command = f"{sys.executable} {script}"
         gate = fixture.repo / ".superpowers" / "bwr" / "gate.md"
         gate.write_text(f"{command}\n", encoding="utf-8")
-        gate_sha = fixture.git("hash-object", str(gate)).stdout.strip()
-        draft = fixture.temp / "abandon-execution.json"
-        draft.write_text(json.dumps({
-            "schema": 1,
-            "gate": gate_sha,
-            "max_parallel": 1,
-            "compatibility_evidence": [],
-            "compatible_groups": [[command]],
-        }), encoding="utf-8")
         helper = fixture.workspace / "prompts" / "construction" / "gate_execution.py"
-        fixture.run(sys.executable, helper, "publish", draft, ok=True)
+        fixture.publish_gate_schedule(1, [[command]])
         head = fixture.git("rev-parse", "HEAD").stdout.strip()
         opened = fixture.run(
             "bash", fixture.gate_check, "open", "baseline", f"c0/{head}",
@@ -1616,7 +1614,7 @@ def gate_runner_contract_covers_real_gate_and_semantic_surface_drift():
         "definition-change candidate",
         "uncovered-target candidate",
         "gate_execution.py run <op>",
-        "human-approved compatible group",
+        "semantically admitted compatible group",
         "continues after a RED",
         "canonical report",
         "command_account_sha256",

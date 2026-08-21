@@ -430,19 +430,26 @@ bash <workspace>/prompts/construction/gate-check.sh close <op>
 
 The helper runs every executable command in the real `gate.md`, unchanged, from the
 repository root. It uses the exact gate-execution schedule frozen by `gate-check.sh`.
-Commands run concurrently only inside one human-approved compatible group and never
-beyond its frozen maximum. Do not improvise another grouping. A full-line `#` comment is
-frozen with the gate but is never executed, reported or counted. The helper freezes the
+Commands run concurrently only inside one semantically admitted compatible group and
+never beyond its frozen workspace maximum. Do not improvise another grouping. A full-line
+`#` comment is frozen with the gate but is never executed, reported or counted. The helper freezes the
 exact staged candidate before the first active group. A lost result reuses the same
 operation and complete command account only while that candidate remains unchanged.
 The repeated helper call joins the op's one executor owner. It cannot overlap a live or
 orphaned command from the earlier physical call.
 
-If `gate-check.sh open` refuses because compatibility evidence changed, no gate command
-has run. Report **Gate execution drift** and the helper's exact changed paths to your
-parent. Do not publish or remove the config yourself. Wait until the parent confirms a
-human-approved replacement schedule or the explicit sequential default, then open a fresh
-logical gate on the unchanged candidate. This route applies to ordinary and final gates.
+Fresh opening publishes the complete marker through `gate_execution.py open-marker`.
+That operation freezes the exact current policy and schedule under the same workspace
+authority lock used by policy and schedule mutations. Never write or replace the marker
+directly.
+
+If `gate-check.sh open` refuses because the policy or one exact compatibility trigger
+changed, no gate command has run. Report **Gate execution drift** and the helper's exact
+reason to your parent. Do not publish or remove either artifact yourself. Wait until the
+parent confirms a reanalysed schedule or singleton groups, then open a fresh logical gate
+on the unchanged candidate. The parent asks the human only for one unresolved concrete
+interference concern. It never asks you or the human for the maximum again. This route
+applies to ordinary and final gates.
 
 If one active group changes the candidate or repository state, the helper waits for that
 whole group and then refuses. The operation receives no terminal. Record the exact paths,
@@ -682,8 +689,9 @@ bash <workspace>/prompts/construction/gate-check.sh open task \
   refs/bwr/<run>/<lot>/attempt-base
 ```
 
-The same pre-command **Gate execution drift** route applies if this opening refuses on
-changed compatibility evidence. Do not spawn the gate runner until the parent settles it.
+The same pre-command **Gate execution drift** route applies if this opening refuses on a
+changed policy or exact compatibility trigger. Do not spawn the gate runner until the
+parent settles it.
 
 The helper consumes this attempt's latest durable final code-review proof. That proof
 is either the clean checker verdict or the complete round-10 resolution. It freezes
@@ -769,9 +777,10 @@ the event only finishes marker removal; it never writes a second result.
   with the runner's exact old/new commands and sources. Do not commit, fix, fail the
   attempt or edit `gate.md`. Wait. Your parent takes the existing gate decision to the
   human and writes the complete validated list. It must also settle the replacement
-  schedule or the explicit sequential default. When your parent confirms that both the
-  gate list and execution choice are ready, open and run a fresh logical gate check
-  against that new real gate file. Never infer how a replacement list can run.
+  derived schedule, or remove it for singleton groups. It keeps the workspace policy and
+  maximum. When your parent confirms that both the gate list and schedule are ready, open
+  and run a fresh logical gate check against that new real gate file. Never infer how a
+  replacement list can run.
 - **No surface drift, but any command or repository-cleanliness result is RED:** go to
   *When it fails*. Never clean a path written by a green command.
 - **Every command green, repository state unchanged, gate surface unchanged:** continue

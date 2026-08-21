@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Focused tests for frozen gate-command parallel execution."""
 import base64
+import fcntl
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -66,16 +68,32 @@ class Fixture:
     def tree(self):
         return self.run("git", "write-tree").stdout.strip()
 
-    def publish(self, maximum, groups, evidence_paths=(".",)):
+    def publish(self, maximum, groups, trigger_paths=()):
         draft = self.temp / "execution-draft.json"
-        evidence = json.loads(self.helper("evidence", *evidence_paths).stdout) \
-            if any(len(group) > 1 for group in groups) else []
+        policy_draft = self.temp / "policy-draft.json"
+        policy_draft.write_text(json.dumps({
+            "schema": 1, "max_parallel": maximum, "rulings": [],
+        }), encoding="utf-8")
+        self.helper("policy-publish", policy_draft)
+        triggers = []
+        for path in trigger_paths:
+            trigger = json.loads(self.helper("trigger", path).stdout)
+            trigger["reason"] = "This exact test fixture file controls command compatibility."
+            triggers.append(trigger)
+        compatibility = []
+        offset = 0
+        for group in groups:
+            positions = list(range(offset + 1, offset + len(group) + 1))
+            compatibility.extend(
+                analysis_admission(positions[left], positions[right], triggers=triggers)
+                for left in range(len(positions)) for right in range(left + 1, len(positions))
+            )
+            offset += len(group)
         draft.write_text(json.dumps({
-            "schema": 1,
+            "schema": 2,
             "gate": self.gate_hash(),
-            "max_parallel": maximum,
-            "compatibility_evidence": evidence,
             "compatible_groups": groups,
+            "compatibility": compatibility,
         }), encoding="utf-8")
         self.helper("publish", draft)
 
@@ -102,6 +120,37 @@ class Fixture:
     def account(self, op):
         path = self.workspace / "reports" / "gate" / f"{op}.commands" / "account.json"
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def marker_draft(self, op):
+        values = {
+            "op": op,
+            "scope": "baseline",
+            "owner": "parallel-test",
+            "lot": "-",
+            "task": "0",
+            "attempt": "0",
+            "head": self.run("git", "rev-parse", "HEAD").stdout.strip(),
+            "base": self.run("git", "rev-parse", "HEAD").stdout.strip(),
+            "tree": self.tree(),
+            "gate": self.gate_hash(),
+            "code": "-",
+        }
+        path = self.workspace / f".{op}.marker-draft"
+        path.write_text("".join(f"{key} {value}\n" for key, value in values.items()),
+                        encoding="utf-8")
+        return path
+
+    def start_helper(self, *args):
+        return subprocess.Popen(
+            [sys.executable, self.prompts / "gate_execution.py", *map(str, args)],
+            cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+    def lock_authority(self):
+        path = self.workspace / "gate-authority.lock"
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return descriptor
 
 
 def py_command(path, body):
@@ -430,13 +479,22 @@ raise SystemExit(0 if other.exists() else 9)
         fixture.publish(2, [[first, second]])
         frozen = fixture.open_marker("c" * 64)
         replacement = fixture.temp / "replacement.json"
+        replacement_execution = dict(frozen["execution"])
+        replacement_execution["compatible_groups"] = [[first], [second]]
+        replacement_execution["compatibility"] = []
         replacement.write_text(json.dumps({
-            "schema": 1, "gate": fixture.gate_hash(), "max_parallel": 1,
-            "compatible_groups": [[first], [second]],
+            "schema": 2, "gate": fixture.gate_hash(),
+            "compatible_groups": [[first], [second]], "compatibility": [],
         }), encoding="utf-8")
         fixture.helper("publish", replacement, ok=False)
+        policy_replacement = fixture.temp / "policy-replacement.json"
+        policy_replacement.write_text(json.dumps({
+            "schema": 1, "max_parallel": 1, "rulings": [],
+        }), encoding="utf-8")
+        fixture.helper("policy-publish", policy_replacement, ok=False)
         (fixture.workspace / "gate-execution.json").write_text(
-            replacement.read_text(encoding="utf-8"), encoding="utf-8",
+            json.dumps(replacement_execution, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
         )
         fixture.helper("run", "c" * 64)
         account = fixture.account("c" * 64)
@@ -454,18 +512,347 @@ def publication_rejects_stale_or_incomplete_command_partitions():
         fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
         stale = fixture.temp / "stale.json"
         stale.write_text(json.dumps({
-            "schema": 1, "gate": "0" * 40, "max_parallel": 2,
+            "schema": 2, "gate": "0" * 40,
             "compatible_groups": [commands],
+            "compatibility": [analysis_admission(1, 2)],
         }), encoding="utf-8")
         fixture.helper("publish", stale, ok=False)
         incomplete = fixture.temp / "incomplete.json"
         incomplete.write_text(json.dumps({
-            "schema": 1, "gate": fixture.gate_hash(), "max_parallel": 2,
+            "schema": 2, "gate": fixture.gate_hash(),
             "compatible_groups": [[commands[0]]],
+            "compatibility": [],
         }), encoding="utf-8")
         fixture.helper("publish", incomplete, ok=False)
         check(not (fixture.workspace / "gate-execution.json").exists(),
               "an invalid schedule became workspace authority")
+    finally:
+        fixture.close()
+
+
+@test
+def workspace_policy_is_independent_from_the_derived_schedule():
+    fixture = Fixture()
+    try:
+        commands = ["true", "printf checked"]
+        fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+
+        policy_draft = fixture.temp / "policy-draft.json"
+        policy = {"schema": 1, "max_parallel": 2, "rulings": []}
+        policy_draft.write_text(json.dumps(policy), encoding="utf-8")
+        fixture.helper("policy-publish", policy_draft)
+        shown_policy = json.loads(fixture.helper("policy-show").stdout)
+        check(shown_policy == policy, shown_policy)
+
+        schedule_draft = fixture.temp / "schedule-draft.json"
+        schedule_draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [[commands[0]], [commands[1]]],
+            "compatibility": [],
+        }), encoding="utf-8")
+        fixture.helper("publish", schedule_draft)
+        schedule = json.loads(fixture.helper("show").stdout)
+        check(schedule["max_parallel"] == 2, schedule)
+        check(schedule["policy"]["value"] == policy, schedule)
+
+        replacement = {"schema": 1, "max_parallel": 3, "rulings": []}
+        policy_draft.write_text(json.dumps(replacement), encoding="utf-8")
+        fixture.helper("policy-publish", policy_draft)
+        stale = fixture.helper("token", ok=False)
+        check("another workspace policy generation" in stale.stderr, stale.stderr)
+
+        fixture.helper("remove")
+        check(json.loads(fixture.helper("policy-show").stdout) == replacement,
+              "schedule removal changed workspace policy")
+        sequential = json.loads(fixture.helper("show").stdout)
+        check(sequential["max_parallel"] == 3, sequential)
+        check(sequential["compatible_groups"] == [[command] for command in commands], sequential)
+    finally:
+        fixture.close()
+
+
+@test
+def logical_open_cannot_freeze_a_policy_generation_crossed_while_it_waits():
+    fixture = Fixture()
+    opener = None
+    descriptor = None
+    try:
+        commands = ["printf first", "printf second"]
+        fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+        fixture.publish(2, [commands])
+        draft = fixture.marker_draft("d" * 64)
+
+        descriptor = fixture.lock_authority()
+        opener = fixture.start_helper("open-marker", draft)
+        time.sleep(0.1)
+        check(opener.poll() is None, "logical opening did not wait for gate authority")
+
+        replacement = {"schema": 1, "max_parallel": 1, "rulings": []}
+        (fixture.workspace / "gate-policy.json").write_text(
+            json.dumps(replacement, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        os.close(descriptor)
+        descriptor = None
+        output = opener.communicate(timeout=10)
+        check(opener.returncode != 0, output)
+        check("another workspace policy generation" in output[1], output)
+        check(not (fixture.workspace / "gate-check-in-progress").exists(),
+              "an old-policy logical marker crossed the changed policy")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if opener is not None and opener.poll() is None:
+            opener.kill()
+            opener.wait()
+        fixture.close()
+
+
+@test
+def policy_schedule_mutations_recheck_a_marker_after_waiting_for_authority():
+    fixture = Fixture()
+    process = None
+    descriptor = None
+    try:
+        commands = ["printf first", "printf second"]
+        fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+        fixture.publish(2, [commands])
+        policy = fixture.temp / "replacement-policy.json"
+        policy.write_text(json.dumps({
+            "schema": 1, "max_parallel": 1, "rulings": [],
+        }), encoding="utf-8")
+        execution = json.loads((fixture.workspace / "gate-execution.json").read_text(
+            encoding="utf-8"
+        ))
+        schedule = fixture.temp / "replacement-schedule.json"
+        schedule.write_text(json.dumps({
+            "schema": 2,
+            "gate": execution["gate"],
+            "compatible_groups": execution["compatible_groups"],
+            "compatibility": execution["compatibility"],
+        }), encoding="utf-8")
+        mutations = (
+            ("policy-publish", policy, fixture.workspace / "gate-policy.json"),
+            ("publish", schedule, fixture.workspace / "gate-execution.json"),
+            ("remove", None, fixture.workspace / "gate-execution.json"),
+        )
+
+        for number, (command, argument, target) in enumerate(mutations, 1):
+            before = target.read_bytes()
+            descriptor = fixture.lock_authority()
+            arguments = (command,) if argument is None else (command, argument)
+            process = fixture.start_helper(*arguments)
+            time.sleep(0.1)
+            check(process.poll() is None, f"{command} did not wait for gate authority")
+            fixture.open_marker(f"{number}" * 64)
+            os.close(descriptor)
+            descriptor = None
+            output = process.communicate(timeout=10)
+            check(process.returncode != 0, (command, output))
+            check("live gate operation" in output[1], (command, output))
+            check(target.read_bytes() == before, f"{command} crossed the live marker")
+            (fixture.workspace / "gate-check-in-progress").unlink()
+            process = None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        fixture.close()
+
+
+def analysis_admission(first, second, probability="RARE", triggers=None):
+    return {
+        "commands": [first, second],
+        "decision": "compatible",
+        "basis": {
+            "kind": "analysis",
+            "probability": probability,
+            "reason": "No concrete shared writable resource was found.",
+        },
+        "triggers": triggers or [],
+    }
+
+
+@test
+def every_pair_in_a_parallel_group_requires_one_exact_admission():
+    fixture = Fixture()
+    try:
+        commands = ["printf first", "printf second", "printf third"]
+        fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+        policy = fixture.temp / "pair-policy.json"
+        policy.write_text(json.dumps({"schema": 1, "max_parallel": 3, "rulings": []}),
+                          encoding="utf-8")
+        fixture.helper("policy-publish", policy)
+        draft = fixture.temp / "pair-schedule.json"
+
+        compatibility = [analysis_admission(1, 2), analysis_admission(1, 3)]
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [commands],
+            "compatibility": compatibility,
+        }), encoding="utf-8")
+        missing = fixture.helper("publish", draft, ok=False)
+        check("commands 2 and 3" in missing.stderr, missing.stderr)
+
+        compatibility.append(analysis_admission(2, 3))
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [commands],
+            "compatibility": compatibility,
+        }), encoding="utf-8")
+        fixture.helper("publish", draft)
+        execution = json.loads(fixture.helper("show").stdout)
+        check(execution["compatible_groups"] == [commands], execution)
+
+        compatibility[2] = analysis_admission(2, 3, "PLAUSIBLE")
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [commands],
+            "compatibility": compatibility,
+        }), encoding="utf-8")
+        plausible = fixture.helper("publish", draft, ok=False)
+        check("RARE or EXCEPTIONAL" in plausible.stderr, plausible.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def exact_human_rulings_and_narrow_triggers_control_reanalysis():
+    fixture = Fixture()
+    try:
+        commands = ["printf backend", "printf frontend", "printf build"]
+        fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+        concern = "frontend tests may write backend cache data"
+        incompatible_concern = "frontend tests and build may share one output directory"
+        policy_value = {
+            "schema": 1,
+            "max_parallel": 2,
+            "rulings": [
+                {
+                    "id": "R1",
+                    "commands": sorted(commands[:2]),
+                    "concern": concern,
+                    "decision": "compatible",
+                    "reason": "The human rejected this exact cache collision.",
+                },
+                {
+                    "id": "R2",
+                    "commands": sorted(commands[1:]),
+                    "concern": incompatible_concern,
+                    "decision": "incompatible",
+                    "reason": "The human confirmed the shared output collision.",
+                },
+            ],
+        }
+        policy = fixture.temp / "ruling-policy.json"
+        policy.write_text(json.dumps(policy_value), encoding="utf-8")
+        fixture.helper("policy-publish", policy)
+
+        definition = fixture.repo / "frontend-runner.txt"
+        definition.write_text("isolated outputs\n", encoding="utf-8")
+        unrelated = fixture.repo / "ordinary-source.txt"
+        unrelated.write_text("first\n", encoding="utf-8")
+        fixture.run("git", "add", "frontend-runner.txt", "ordinary-source.txt")
+        directory = fixture.repo / "trigger-directory"
+        directory.mkdir()
+        (directory / "definition.txt").write_text("definition\n", encoding="utf-8")
+        fixture.run("git", "add", "trigger-directory/definition.txt")
+        broad = fixture.helper("trigger", "trigger-directory", ok=False)
+        check("one exact staged file" in broad.stderr, broad.stderr)
+        trigger = json.loads(fixture.helper("trigger", "frontend-runner.txt").stdout)
+        trigger["reason"] = "This exact file declares the frontend test output."
+
+        compatible = {
+            "commands": [1, 2],
+            "decision": "compatible",
+            "basis": {"kind": "human-ruling", "ruling": "R1", "concern": concern},
+            "triggers": [trigger],
+        }
+        draft = fixture.temp / "ruling-schedule.json"
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [commands[:2], [commands[2]]],
+            "compatibility": [compatible],
+        }), encoding="utf-8")
+        fixture.helper("publish", draft)
+
+        unrelated.write_text("second\n", encoding="utf-8")
+        fixture.run("git", "add", "ordinary-source.txt")
+        fixture.helper("token")
+
+        definition.write_text("shared outputs\n", encoding="utf-8")
+        fixture.run("git", "add", "frontend-runner.txt")
+        changed = fixture.helper("token", ok=False)
+        check("compatibility trigger changed: frontend-runner.txt" in changed.stderr,
+              changed.stderr)
+
+        trigger = json.loads(fixture.helper("trigger", "frontend-runner.txt").stdout)
+        trigger["reason"] = "This exact file declares the frontend test output."
+        compatible["triggers"] = [trigger]
+        compatible["basis"]["concern"] = "a different concern"
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [commands[:2], [commands[2]]],
+            "compatibility": [compatible],
+        }), encoding="utf-8")
+        wrong_concern = fixture.helper("publish", draft, ok=False)
+        check("does not match its human ruling" in wrong_concern.stderr, wrong_concern.stderr)
+
+        incompatible = {
+            "commands": [2, 3],
+            "decision": "compatible",
+            "basis": {
+                "kind": "human-ruling", "ruling": "R2", "concern": incompatible_concern,
+            },
+            "triggers": [],
+        }
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [[commands[0]], commands[1:]],
+            "compatibility": [incompatible],
+        }), encoding="utf-8")
+        forbidden = fixture.helper("publish", draft, ok=False)
+        check("forbids concurrent execution" in forbidden.stderr, forbidden.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def an_absent_exact_trigger_detects_later_creation_without_watching_a_directory():
+    fixture = Fixture()
+    try:
+        commands = ["printf first", "printf second"]
+        fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
+        policy = fixture.temp / "absence-policy.json"
+        policy.write_text(json.dumps({"schema": 1, "max_parallel": 2, "rulings": []}),
+                          encoding="utf-8")
+        fixture.helper("policy-publish", policy)
+        trigger = json.loads(fixture.helper("trigger", "generated/shared-cache").stdout)
+        check(trigger["identity"] == "ABSENT", trigger)
+        trigger["reason"] = "This exact shared-cache path must remain absent."
+        draft = fixture.temp / "absence-schedule.json"
+        draft.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [commands],
+            "compatibility": [analysis_admission(1, 2, triggers=[trigger])],
+        }), encoding="utf-8")
+        fixture.helper("publish", draft)
+        (fixture.repo / "generated").mkdir()
+        (fixture.repo / "generated" / "shared-cache").write_text("created\n", encoding="utf-8")
+        fixture.run("git", "add", "generated/shared-cache")
+        changed = fixture.helper("token", ok=False)
+        check("compatibility trigger changed: generated/shared-cache" in changed.stderr,
+              changed.stderr)
     finally:
         fixture.close()
 
@@ -483,15 +870,15 @@ def changed_gate_requires_a_replacement_schedule_or_explicit_sequential_default(
         fixture.helper("token", ok=False)
         fixture.helper("remove")
         settled = json.loads(fixture.helper("token").stdout)["execution"]
-        check(settled["max_parallel"] == 1, settled)
+        check(settled["max_parallel"] == 2, settled)
         check(settled["compatible_groups"] == [[command] for command in replacement], settled)
-        check(settled["compatibility_evidence"] == [], settled)
+        check(settled["compatibility"] == [], settled)
     finally:
         fixture.close()
 
 
 @test
-def changed_compatibility_evidence_refuses_before_any_gate_command():
+def changed_compatibility_trigger_refuses_before_any_gate_command():
     fixture = Fixture()
     try:
         definition = fixture.repo / "gate-definition.txt"
@@ -504,20 +891,30 @@ def changed_compatibility_evidence_refuses_before_any_gate_command():
             f"printf second >> {started}",
         ]
         fixture.gate.write_text("\n".join(commands) + "\n", encoding="utf-8")
-        fixture.publish(2, [commands], evidence_paths=("gate-definition.txt",))
+        fixture.publish(2, [commands], trigger_paths=("gate-definition.txt",))
 
         definition.write_text("shared cache\n", encoding="utf-8")
         fixture.run("git", "add", "gate-definition.txt")
         refusal = fixture.helper("token", ok=False)
-        check("project evidence for parallel gate compatibility changed: gate-definition.txt"
+        check("compatibility trigger changed: gate-definition.txt"
               in refusal.stderr,
               refusal.stderr)
         check(not started.exists(), "a stale parallel schedule ran before revalidation")
 
-        fixture.helper("remove")
+        replacement_trigger = json.loads(fixture.helper("trigger", "gate-definition.txt").stdout)
+        replacement_trigger["reason"] = "This exact file declares separate gate resources."
+        replacement = fixture.temp / "reanalyzed-schedule.json"
+        replacement.write_text(json.dumps({
+            "schema": 2,
+            "gate": fixture.gate_hash(),
+            "compatible_groups": [commands],
+            "compatibility": [analysis_admission(1, 2, triggers=[replacement_trigger])],
+        }), encoding="utf-8")
+        fixture.helper("publish", replacement)
         settled = json.loads(fixture.helper("token").stdout)["execution"]
-        check(settled["max_parallel"] == 1
-              and settled["compatible_groups"] == [[command] for command in commands], settled)
+        check(settled["max_parallel"] == 2
+              and settled["compatible_groups"] == [commands], settled)
+        check(settled["policy"]["value"]["rulings"] == [], settled)
     finally:
         fixture.close()
 
@@ -686,12 +1083,18 @@ def controller_and_runner_contracts_share_one_bounded_schedule():
     for required in (
         "Maximum parallel gate commands?",
         "2 (recommended)",
-        "proven-absent config means strict sequential execution",
-        "project evidence establishes",
-        "gate_execution.py evidence",
+        "Never repeat the question",
+        "FREQUENT or PLAUSIBLE",
+        "RARE or EXCEPTIONAL",
+        "Every pair inside one shared group requires one exact",
+        "gate_execution.py trigger",
+        "Confirm interference",
+        "Reject interference",
+        "normal product edit outside exact triggers leaves the schedule valid",
+        "workspace authority lock",
         "Gate execution drift",
         "Before you release the implementer",
-        "remove the stale config",
+        "Never ask for the maximum again",
         "An existing run whose C0 already finished adopts this feature between logical gate",
     ):
         check(required in mode, f"construction mode lost gate scheduling rule: {required}")
@@ -700,7 +1103,7 @@ def controller_and_runner_contracts_share_one_bounded_schedule():
         "Never accept a copied command list or improvise an execution schedule",
         "continues after a RED command",
         "Before it starts any gate command",
-        "compatibility evidence against the exact candidate tree",
+        "frozen policy and narrow compatibility triggers",
         "One op has one executor owner",
         "active commands retain ownership until all of them exit",
         "gate_execution.py inspect <op>",
@@ -714,14 +1117,24 @@ def controller_and_runner_contracts_share_one_bounded_schedule():
         check(required in runner, f"gate runner lost frozen execution rule: {required}")
     check("same executor used by the ordinary gate" in implementer,
           "the final gate no longer shares the ordinary-gate executor")
-    check("replacement schedule or the explicit sequential default" in implementer,
+    check("gate_execution.py open-marker" in implementer
+          and "workspace authority lock" in skill,
+          "fresh gate opening can cross a policy or schedule mutation")
+    check("reanalysed schedule or singleton groups" in implementer,
           "task gate drift can release the implementer with a stale schedule")
     check("no gate command has run" in implementer and "Gate execution drift" in implementer,
           "the implementer can misclassify stale compatibility before execution")
     check("orphaned active command retains that lock" in mode,
           "construction resume can overlap an orphaned active wave")
-    check("human-approved ordered compatibility partition" in skill,
+    check("positive parallel maximum and exact human compatibility rulings" in skill,
           "the root skill lost the workspace gate-execution contract")
+    for stale in (
+        "compatibility_evidence", "gate_execution.py evidence",
+        "human-approved ordered compatibility partition", "explicit sequential default",
+    ):
+        check(stale not in mode and stale not in runner and stale not in skill
+              and stale not in implementer,
+              f"the old broad-evidence contract remains active: {stale}")
 
 
 def main():

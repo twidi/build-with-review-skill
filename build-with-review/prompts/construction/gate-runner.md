@@ -56,13 +56,14 @@ python3 <workspace>/prompts/construction/gate_execution.py run <op>
 ```
 
 The helper runs only commands from the real gate. It starts commands concurrently only
-inside one human-approved compatible group, up to the frozen maximum. It waits for every
-command in an active group, preserves each output separately, and continues after a RED
-command. Before it starts any gate command, it authenticates the frozen compatibility
-evidence against the exact candidate tree. It also checks the frozen repository state
-before and after every active group. If it refuses, stop. The logical candidate or its
-approved compatibility basis changed, and a regenerated call must not adopt those bytes.
-Run the verify command once more after the helper returns.
+inside one semantically admitted compatible group, up to the frozen workspace maximum.
+It waits for every command in an active group, preserves each output separately, and
+continues after a RED command. Before it starts any gate command, it authenticates the
+frozen policy and narrow compatibility triggers against the exact candidate tree. It also
+checks the frozen repository state before and after every active group. If it refuses,
+stop. The logical candidate or exact scheduling input changed. Report the exact refusal;
+never improvise another schedule. Run the verify command once more after the helper
+returns.
 
 Then inspect the exact frozen execution and durable command-account identities through:
 
@@ -151,8 +152,8 @@ Find every command this project uses to verify itself: the complete test suites,
 and front, the complete lint, type checks, build steps — anything the project runs to
 say that it is sound.
 
-First discovery has no human-approved compatibility schedule. Run its candidates
-strictly sequentially in documented order.
+First discovery has no validated gate list or derived compatibility schedule. Run its
+candidates strictly sequentially in documented order.
 
 Scan the repository's **actual instruction documents, task/build manifests and CI
 configurations**. Follow their project-local references when they point to another
@@ -205,13 +206,26 @@ The JSON has this exact shape:
   "gate": "<expected gate blob>",
   "tree": "<candidate tree>",
   "execution": {
-    "schema": 1,
+    "schema": 2,
     "gate": "<expected gate blob>",
+    "policy": {
+      "sha256": "<canonical policy SHA-256>",
+      "value": {"schema": 1, "max_parallel": 2, "rulings": []}
+    },
     "max_parallel": 2,
-    "compatibility_evidence": [
-      {"path": "<repository-relative path>", "identity": "<SHA-256>"}
-    ],
-    "compatible_groups": [["<command 1>", "<command 2>"], ["<command 3>"]]
+    "compatible_groups": [["<command 1>", "<command 2>"], ["<command 3>"]],
+    "compatibility": [
+      {
+        "commands": [1, 2],
+        "decision": "compatible",
+        "basis": {
+          "kind": "analysis",
+          "probability": "EXCEPTIONAL",
+          "reason": "<concrete compatibility reason>"
+        },
+        "triggers": []
+      }
+    ]
   },
   "command_account_sha256": "<exact account SHA-256>",
   "commands": [

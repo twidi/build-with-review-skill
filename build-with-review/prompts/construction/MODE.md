@@ -116,29 +116,85 @@ discovery — C0.4 and C0.5 apply.
 
 ### C0.2a · Validate gate execution
 
-`gate.md` owns the exact command list. The optional controller-owned
-`<workspace>/gate-execution.json` owns only how that list can execute. It has this exact
-shape:
+`gate.md` owns the exact command list. Two optional controller-owned workspace files keep
+resource policy separate from the derived schedule.
+
+`<workspace>/gate-policy.json` has this exact shape:
 
 ```json
 {
   "schema": 1,
-  "gate": "<current gate.md Git blob>",
   "max_parallel": 2,
-  "compatibility_evidence": [
-    {"path": "<repository-relative definition or resource path>", "identity": "<SHA-256>"}
-  ],
+  "rulings": []
+}
+```
+
+It lives for the complete workspace. `max_parallel` is machine capacity, not command
+compatibility. Ask **Maximum parallel gate commands?** once after the fresh workspace's
+first exact gate list exists. Offer `2 (recommended)`, `1`, `3`, and `4`; free-form accepts
+another positive integer. Publish that complete policy. Never repeat the question after a
+task, attempt, lot, gate change, schedule change or trigger change. Proven policy absence
+means maximum 1 and no rulings. Resume does not reconstruct or repeat a missing setup
+answer. The human may explicitly replace the maximum later.
+
+One human ruling has this exact shape inside `rulings`:
+
+```json
+{
+  "id": "R1",
+  "commands": ["<lexically first exact command>", "<lexically second exact command>"],
+  "concern": "<one exact interference scenario>",
+  "decision": "compatible",
+  "reason": "<the exact human conclusion>"
+}
+```
+
+`decision` is `compatible` or `incompatible`. A ruling decides only its named concern. It
+is not a blanket assertion about the pair.
+
+Read the effective policy through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py policy-show
+```
+
+Publish one complete policy draft only through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py policy-publish \
+  <absolute-policy-draft-path>
+```
+
+`<workspace>/gate-execution.json` owns only the current derived schedule. Its controller
+draft has this exact shape:
+
+```json
+{
+  "schema": 2,
+  "gate": "<current gate.md Git blob>",
   "compatible_groups": [
     ["<command 1>", "<command 2>"],
     ["<command 3>"]
+  ],
+  "compatibility": [
+    {
+      "commands": [1, 2],
+      "decision": "compatible",
+      "basis": {
+        "kind": "analysis",
+        "probability": "EXCEPTIONAL",
+        "reason": "<concrete compatibility reason>"
+      },
+      "triggers": []
+    }
   ]
 }
 ```
 
-The groups form one exact ordered partition of every executable gate line. A group means
-that every command in it is mutually compatible. Groups execute in order. The maximum
-limits one active wave inside a group. Full-line comments remain in `gate.md`, but do not
-enter this partition.
+The helper freezes the complete current policy and its SHA-256 into the published
+schedule. The groups form one exact ordered partition of every executable gate line.
+Groups execute in order. The policy maximum limits one active wave. Full-line comments
+remain in `gate.md`, but do not enter this partition.
 
 Validate the effective schedule at any entry through:
 
@@ -146,70 +202,85 @@ Validate the effective schedule at any entry through:
 python3 <workspace>/prompts/construction/gate_execution.py show
 ```
 
-It refuses a malformed, foreign-generation or incomplete config. With a proven-absent
-config, it prints the derived sequential schedule.
+It refuses a malformed, foreign-generation or incomplete schedule. With proven schedule
+absence, it prints singleton groups under the effective policy.
 
-After the human has validated the exact gate commands, propose a schedule. **Do not infer
-compatibility from different command names.** Put a command in a shared group only when
-project evidence establishes that concurrent runs cannot collide through repository
-files, generated outputs, caches, databases, ports, services, processes, CPU or memory.
-Account for internal parallelism in pytest, compilers and build tools. Uncertainty means
-one singleton group.
+Derive the schedule after the human validates the exact gate commands. **Do not infer
+compatibility from command names.** Inspect concrete repository writes, outputs, caches,
+databases, ports, services, processes, external state, CPU, memory and internal tool
+parallelism. For each credible interference scenario classify probability:
 
-Present the exact proposed groups and their evidence. Then ask one question:
+- FREQUENT or PLAUSIBLE — keep the pair in separate groups;
+- RARE or EXCEPTIONAL — the pair may share one group.
 
-> **Maximum parallel gate commands?**
+This is an execution probability, not a review finding. It has no impact class. Every pair
+inside one shared group requires one exact `compatibility` admission. A three-command group
+therefore requires three pair admissions. A pair without admission stays sequential.
 
-Offer `2 (recommended)`, `1`, `3`, and `4`. A free-form answer may supply another positive
-integer. The human validates both the grouping and the maximum. A missing answer or a
-proven-absent config means strict sequential execution: maximum 1 and one singleton group
-per command.
+An analysis admission uses `kind: "analysis"`, RARE or EXCEPTIONAL, and one concrete
+reason. A human admission uses this basis:
 
-For every shared group, name the complete sorted set of project-local definitions,
-targets and resource declarations that establish compatibility. A directory path covers
-its complete tracked subtree. Use `.` when the whole candidate tree is the smallest proof
-you can defend. If the complete compatibility basis cannot be named, use singleton groups.
-Generate the exact identities for those approved paths from the current staged tree:
-
-```sh
-python3 <workspace>/prompts/construction/gate_execution.py evidence \
-  <sorted-repository-relative-path>...
+```json
+{"kind": "human-ruling", "ruling": "R1", "concern": "<exact ruling concern>"}
 ```
 
-Copy that complete JSON list into `compatibility_evidence`. A parallel group requires a
-non-empty list. The helper authenticates every identity before it publishes a config and
-again before a logical gate can open. A changed definition, target or resource declaration
-therefore refuses before any gate command. Return to the human for a replacement schedule,
-or remove the stale config and use the sequential default. The later full surface scan
-still reports every other gate drift candidate.
+The helper matches the ruling, pair, concern and decision against the frozen policy. One
+applicable incompatible ruling forbids a shared group.
 
-Write the complete approved JSON to one real draft file. Publish it only through:
+A trigger is a narrow signal for reanalysis, not proof of compatibility. Add one only
+when an exact mutable file or exact absence directly supports the conclusion. Generate
+its staged identity through:
+
+```sh
+python3 <workspace>/prompts/construction/gate_execution.py trigger \
+  <exact-repository-relative-file-path>
+```
+
+Add one non-empty `reason` to that returned object, then put it in the admission's sorted
+`triggers` list. Never use `.`, a directory, a source root, a test root, the complete
+candidate tree, or ordinary code under test as a generic trigger. A normal product edit
+outside exact triggers leaves the schedule valid.
+
+If a concrete concern remains unresolved after you inspect it, ask the human only about
+that concern. Give the two commands, possible shared resource, evidence read and exact
+uncertainty. Offer **Confirm interference** and **Reject interference**. Record the answer
+as one complete ruling. Do not ask for the maximum or complete schedule. Reuse that ruling
+until a changed command, materially changed concern, new concern or explicit human
+revocation reasonably reopens it.
+
+Write the complete derived schedule draft to one real file. Publish it only through:
 
 ```sh
 python3 <workspace>/prompts/construction/gate_execution.py publish \
   <absolute-draft-path>
 ```
 
-The helper authenticates the current gate blob, exact command partition and compatibility
-evidence against the staged tree. It then replaces the workspace config atomically. Delete
-only the draft you created after publication.
-To return future gates to the absence default, use:
+The helper authenticates the gate blob, current policy, exact partition, every shared pair,
+ruling and narrow trigger. It freezes the policy snapshot and replaces only the schedule
+atomically. Delete only the draft you created after publication. To return future gates to
+singleton groups while preserving policy and rulings, use:
 
 ```sh
 python3 <workspace>/prompts/construction/gate_execution.py remove
 ```
 
-Both mutations refuse while `gate-check-in-progress` exists. A gate change makes the old
-config stale. Reconcile the list with the human, then validate and publish a complete new
-schedule. Do not patch the old schedule.
+Fresh logical-gate marker publication and every policy or schedule mutation share one
+workspace authority lock. The marker freezes the exact current policy and schedule before
+the lock is released. A mutation completes before that read, or waits and then refuses the
+live marker. No generation can cross a logical opening. Every policy or schedule mutation
+refuses while `gate-check-in-progress` exists. A gate change makes only the schedule stale.
+After the human validates the new command list, derive and publish a complete new schedule.
+Keep the policy and maximum. Do not patch the old schedule.
 
-The setting belongs to this workspace, not to every machine. After a known machine or
-resource change, ask the human to revalidate the maximum before the next gate. Until that
-answer is published, remove the old config and use the sequential default.
+The setting belongs to this workspace. A machine change does not itself repeat the
+question. The human can explicitly request another maximum when workspace resources
+change.
 
 An existing run whose C0 already finished adopts this feature between logical gate
-operations. Ask at the next controller checkpoint. Do not restart C0, rewrite the journal,
-or alter a live marker. Until one approved config exists, every new gate stays sequential.
+operations. Preserve an exact already-human-approved maximum in the new policy. If no
+answer exists, ask once at the next controller checkpoint; proven absence remains safely
+sequential. Replace any old schedule with a freshly derived schema-2 schedule. Do not
+restart C0, rewrite the journal, add permanent legacy parsing, or alter a live marker.
 
 ### C0.3 · Spawn the gate runner
 
@@ -359,8 +430,7 @@ implementer inherits a baseline nobody measured, and is blamed for a failure tha
 predates its task.
 
 Complete C0.2a after the list is written and before this fresh logical check. The fresh
-check then freezes the approved schedule, or the safe sequential default if no config
-exists.
+check then freezes the derived schedule, or singleton groups if no schedule exists.
 
 ### C0.6 · The verdict
 
@@ -929,14 +999,15 @@ someone else's work.
 ### What comes back
 
 **Gate execution drift.** An ordinary or final gate opening refused before running any
-command because one or more approved compatibility-evidence paths changed. Keep the
-attempt and implementer live. Report the exact paths and current schedule to the human.
-Revalidate the complete groups and maximum against the changed definitions and resources.
-Publish the approved replacement config, or remove the stale config and select the
-sequential default. Before you release the implementer, verify `gate_execution.py show`
-accepts that settled choice against the current staged candidate. Then tell the same
-implementer to open a fresh logical gate. Do not classify this pre-execution refusal as a
-RED command, Gate drift report, attempt failure or code defect.
+command because the policy or one exact compatibility trigger changed. Keep the attempt
+and implementer live. Reanalyse only the affected pair or policy change. If the conclusion
+is clear, publish the new compatible or separated schedule without human input. If one
+concrete doubt remains, ask the exact two-choice question from C0.2a, publish the human
+ruling, then derive the schedule. Never ask for the maximum again. Before you release the
+implementer, verify `gate_execution.py show` accepts the settled schedule against the
+current candidate. Then tell the same implementer to open a fresh logical gate. Do not
+classify this pre-execution refusal as a RED command, Gate drift report, attempt failure or
+code defect.
 
 **Gate drift.** The final task-boundary runner found one or more documented additions,
 removals or renames. This is not `Failed`, `Blocked`, or a C3.9 classification. Keep the
@@ -945,10 +1016,10 @@ to the human. The implementer never edits `gate.md`.
 
 The human validates the complete resulting list. Publish it through C0.5's
 `gate-write.sh replace` call. That publication makes the old execution config stale.
-**Before you release the implementer**, repeat C0.2a for the replacement list. Either
-publish the complete human-approved replacement schedule and compatibility evidence, or
-remove the stale config through `gate_execution.py remove` and explicitly select the
-sequential default. Only then message this same implementer to reread `gate.md` and rerun
+**Before you release the implementer**, derive a replacement schedule under the unchanged
+workspace policy. Publish it, or remove the stale schedule for singleton groups. Do not
+ask for the maximum. Ask the human only if the new commands create one concrete unresolved
+interference concern. Only then message this same implementer to reread `gate.md` and rerun
 the fresh final gate runner. No next task starts. If the reconciled list is green, clean
 and unchanged, the same attempt commits and reports `Done`. If it is red without further
 surface drift, use the final-gate failure route. A newly retired or renamed command reaches
