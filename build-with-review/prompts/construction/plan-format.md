@@ -7,10 +7,15 @@ copy; `docs/plans/` is an output.
 
 Two writers, never overlapping:
 
-- **the controller** writes everything down to `To verify`, at C1, before any code
-  exists;
-- **each task's implementer** writes that task's `### Design`, at C3.1, with the real
-  tree in front of it.
+- **the controller** writes the contract down to `To verify`, then the exact `### Design`
+  placeholder, at C1, before any code exists;
+- **each task's implementer** replaces that task's placeholder with the `### Design`
+  contents, at C3.1, with the real tree in front of it.
+
+Every task has exactly one structural `### Design` heading outside fenced examples from
+its first plan commit. The heading is the physical ownership boundary between the
+controller contract and implementer-owned Design. `plan-commit.sh` refuses the complete
+plan if any task omits or duplicates it.
 
 **Everything below is one worked example, on an invented Django feature.** Read the
 shape, never the content: the sections, their order, and what each holds. Another
@@ -71,6 +76,9 @@ Achieves:
   - two concurrent revocations produce one effect
 Files: services/peer_lifecycle.py
 To verify: two simultaneous revocations, only one takes effect
+
+### Design
+[written at C3.1 - see below]
 ```
 
 **`Covers:`** is what this lot owes, one line each. **It is the reference every reviewer

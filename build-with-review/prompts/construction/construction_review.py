@@ -16,6 +16,7 @@ REPO = WORKSPACE.parent.parent.parent.resolve()
 LOT_RE = re.compile(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?")
 TASK_RE = re.compile(r"[1-9][0-9]*")
 TASK_HEADING_RE = re.compile(r"^## Task ([1-9][0-9]*) - .+$")
+FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 MAX_READ_BYTES = 65_536
 IMPACTS = ("CRITICAL", "IMPORTANT", "MINOR")
 IMPACT_RANK = {impact: rank for rank, impact in enumerate(reversed(IMPACTS), 1)}
@@ -62,9 +63,37 @@ def real_workspace_file(relative, subject):
     return current
 
 
+def structural_markdown_lines(lines):
+    structural = set()
+    fence_character = None
+    fence_length = 0
+    for index, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        if fence_character is not None:
+            if re.fullmatch(
+                rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                line,
+            ):
+                fence_character = None
+                fence_length = 0
+            continue
+        match = FENCE_OPEN_RE.fullmatch(line)
+        if match:
+            marker, info = match.groups()
+            if marker[0] != "`" or "`" not in info:
+                fence_character = marker[0]
+                fence_length = len(marker)
+                continue
+        structural.add(index)
+    return structural
+
+
 def task_slice(lines, task):
+    structural = structural_markdown_lines(lines)
     starts = []
     for index, line in enumerate(lines):
+        if index not in structural:
+            continue
         match = TASK_HEADING_RE.fullmatch(line.rstrip("\r\n"))
         if match:
             starts.append((index, int(match.group(1))))
@@ -80,14 +109,21 @@ def task_slice(lines, task):
 
 
 def named_section(lines, start, end, heading):
-    positions = [index for index in range(start + 1, end) if lines[index].rstrip("\r\n") == heading]
+    structural = structural_markdown_lines(lines)
+    positions = [
+        index for index in range(start + 1, end)
+        if index in structural and lines[index].rstrip("\r\n") == heading
+    ]
     if len(positions) > 1:
         refuse(f"Task has more than one {heading} section")
     if not positions:
         return None, b""
     section_start = positions[0]
     section_end = next(
-        (index for index in range(section_start + 1, end) if lines[index].startswith("### ")),
+        (
+            index for index in range(section_start + 1, end)
+            if index in structural and lines[index].startswith("### ")
+        ),
         end,
     )
     content_end = section_end
@@ -106,6 +142,8 @@ def plan_state_bytes(raw, lot, task, relative):
     lines = text.splitlines(keepends=True)
     start, end = task_slice(lines, task)
     design_range, design = named_section(lines, start, end, "### Design")
+    if design_range is None:
+        refuse(f"Task {task} must contain exactly one ### Design section")
     disagreement_range, disagreement = named_section(lines, start, end, "### Disagreement")
     mutable_starts = [item[0] for item in (design_range, disagreement_range) if item]
     contract_end = min(mutable_starts, default=end)

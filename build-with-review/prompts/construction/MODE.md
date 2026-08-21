@@ -608,6 +608,18 @@ Five blocks, in `<workspace>/prompts/construction/plan-format.md`'s shape.
   here is covered by a behaviour the implementer declared**, so a line you leave out is
   a thing nobody will ever prove.
 
+After these five controller-owned blocks, write this exact implementer-owned boundary in
+**every** task:
+
+```markdown
+### Design
+[written at C3.1 - see below]
+```
+
+Do not write the Design itself. The implementer replaces the placeholder at C3.1.
+`plan-commit.sh` validates every task and refuses before copy, staging, commit or journal
+mutation when one `### Design` boundary is missing or duplicated.
+
 ### C1.4 · What the plan must never contain
 
 **No function bodies. No commands. No signatures. No line numbers.**

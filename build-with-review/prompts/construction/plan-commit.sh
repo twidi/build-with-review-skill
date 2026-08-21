@@ -17,6 +17,7 @@ LOT=$1 SUBJECT=$2
 [[ $LOT =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "the lot must read lot-<N> or lot-<N>.<M> — positive integers, no leading zeros — got \`$LOT\`"
 [ -n "$SUBJECT" ] || die "the commit subject is empty"
 DOCUMENT_COPY="$WORKSPACE/prompts/common/document-copy.sh"
+CONSTRUCTION_REVIEW="$WORKSPACE/prompts/construction/construction_review.py"
 SOURCE_REL="plans/$LOT-plan.md"
 # Authenticate every source component before the first grep or sed reads it.
 SOURCE=$("$DOCUMENT_COPY" source "$SOURCE_REL")
@@ -44,6 +45,10 @@ for id in ${IDS[@]+"${IDS[@]}"}; do
     n=$((n + 1))
     [ "$id" = "$n" ] \
         || die "task headings must read 1..$TASKS in order, exactly once each — heading $n says '## Task $id'"
+done
+for id in ${IDS[@]+"${IDS[@]}"}; do
+    python3 "$CONSTRUCTION_REVIEW" plan-state "$LOT" "$id" >/dev/null \
+        || die "$SOURCE Task $id has no valid controller/implementer ownership boundary. Nothing was copied, staged, committed or marked."
 done
 
 cd "$REPO"

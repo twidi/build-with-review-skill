@@ -128,6 +128,108 @@ def plan_state_freezes_controller_contract_and_accepted_design_separately():
 
 
 @test
+def plan_state_refuses_a_task_without_a_design_boundary():
+    fixture = Fixture()
+    try:
+        fixture.plan.write_text(
+            "# Plan\n\n## Task 1 - Change value\n"
+            "Achieves: Keep the value correct.\n"
+            "To verify: The value is two.\n",
+            encoding="utf-8",
+        )
+        result = fixture.helper("plan-state", "lot-1", "1", ok=False)
+        check("exactly one ### Design section" in result.stderr, result.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def plan_state_ignores_design_headings_inside_markdown_fences():
+    fixture = Fixture()
+    try:
+        for opening, closing in (("```markdown", "```"), ("   ~~~~markdown", "   ~~~~")):
+            fixture.plan.write_text(
+                "# Plan\n\n## Task 1 - Change value\n"
+                "Achieves: Keep the value correct.\n"
+                "To verify: The value is two.\n\n"
+                f"{opening}\n"
+                "### Design\n"
+                "This is illustrative data.\n"
+                f"{closing}\n",
+                encoding="utf-8",
+            )
+            result = fixture.helper("plan-state", "lot-1", "1", ok=False)
+            check("exactly one ### Design section" in result.stderr, result.stderr)
+
+            fixture.plan.write_text(
+                fixture.plan.read_text(encoding="utf-8")
+                + "\n### Design\n[written at C3.1 - see below]\n",
+                encoding="utf-8",
+            )
+            state = fixture.plan_state()
+            check(state["design_sha256"] == hashlib.sha256(
+                b"### Design\n[written at C3.1 - see below]\n"
+            ).hexdigest(), "a fenced Design heading replaced the structural boundary")
+    finally:
+        fixture.close()
+
+
+@test
+def plan_state_still_refuses_two_structural_design_boundaries():
+    fixture = Fixture()
+    try:
+        fixture.plan.write_text(
+            fixture.plan.read_text(encoding="utf-8")
+            + "\n### Design\nA second real Design.\n",
+            encoding="utf-8",
+        )
+        result = fixture.helper("plan-state", "lot-1", "1", ok=False)
+        check("more than one ### Design section" in result.stderr, result.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def plan_state_ignores_fenced_disagreement_and_keeps_the_real_optional_section():
+    fixture = Fixture()
+    try:
+        fixture.set_plan(design=(
+            "Use the accepted implementation.\n\n"
+            "```markdown\n"
+            "### Disagreement\n"
+            "This heading is illustrative data.\n"
+            "```\n"
+            "Keep this sentence inside the Design."
+        ))
+        without_real = fixture.plan_state()
+        check(without_real["disagreement_sha256"] is None,
+              "a fenced Disagreement became a structural section")
+
+        fixture.plan.write_text(
+            fixture.plan.read_text(encoding="utf-8")
+            + "\n### Disagreement\nKeep the accepted alternative.\n",
+            encoding="utf-8",
+        )
+        with_real = fixture.plan_state()
+        expected_design = (
+            "### Design\n"
+            "Use the accepted implementation.\n\n"
+            "```markdown\n"
+            "### Disagreement\n"
+            "This heading is illustrative data.\n"
+            "```\n"
+            "Keep this sentence inside the Design.\n"
+        ).encode("utf-8")
+        check(with_real["design_sha256"] == hashlib.sha256(expected_design).hexdigest(),
+              "a fenced sibling heading truncated the Design generation")
+        check(with_real["disagreement_sha256"] == hashlib.sha256(
+            b"### Disagreement\nKeep the accepted alternative.\n"
+        ).hexdigest(), "the real optional Disagreement was not preserved")
+    finally:
+        fixture.close()
+
+
+@test
 def manifest_is_finite_and_supports_byte_bounded_direct_reads():
     fixture = Fixture()
     try:

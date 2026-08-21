@@ -54,7 +54,9 @@ class Fixture:
         self.plan_copy.write_text(
             "# Plan\n\n## Task 1 - One\n"
             "Achieves: Change the application value.\n"
-            "To verify: The changed value is covered.\n",
+            "To verify: The changed value is covered.\n\n"
+            "### Design\n"
+            "[written at C3.1 - see below]\n",
             encoding="utf-8",
         )
         self.plan = self.workspace / "plans" / "lot-1-plan.md"
@@ -202,9 +204,19 @@ else:
                and entry.get("kind") == "verdict.consumed"
                and entry.get("attempt") == self.current_attempt for entry in self.journal()):
             return
-        if "### Design" not in self.plan.read_text(encoding="utf-8"):
+        plan = self.plan.read_text(encoding="utf-8")
+        if "[written at C3.1 - see below]" in plan:
             self.plan.write_text(
-                self.plan.read_text(encoding="utf-8").rstrip()
+                plan.replace(
+                    "[written at C3.1 - see below]",
+                    "Change app.txt and verify its observable result.",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+        elif "### Design" not in plan:
+            self.plan.write_text(
+                plan.rstrip()
                 + "\n\n### Design\nChange app.txt and verify its observable result.\n",
                 encoding="utf-8",
             )
@@ -385,9 +397,13 @@ else:
 
     def prepare_task_candidate(self):
         self.start_attempt_state()
+        plan = self.plan.read_text(encoding="utf-8")
         self.plan.write_text(
-            self.plan.read_text(encoding="utf-8").rstrip()
-            + "\n\n### Design\nChange app.txt and verify its observable result.\n",
+            plan.replace(
+                "[written at C3.1 - see below]",
+                "Change app.txt and verify its observable result.",
+                1,
+            ),
             encoding="utf-8",
         )
         (self.repo / "app.txt").write_text("task candidate\n", encoding="utf-8")
@@ -1232,9 +1248,13 @@ def plan_publication_refuses_a_change_to_another_task_section():
             "# Plan\n\n## Task 1 - One\n"
             "Achieves: Change the application value.\n"
             "To verify: The changed value is covered.\n\n"
+            "### Design\n"
+            "[written at C3.1 - see below]\n\n"
             "## Task 2 - Two\n"
             "Achieves: Preserve the second contract.\n"
-            "To verify: The second contract remains visible.\n"
+            "To verify: The second contract remains visible.\n\n"
+            "### Design\n"
+            "[written at C3.1 - see below]\n"
         )
         fixture.plan.write_text(plan, encoding="utf-8")
         fixture.plan_copy.write_text(plan, encoding="utf-8")
@@ -1579,6 +1599,77 @@ def current_baseline_starts_work_but_cannot_stand_in_for_a_built_task_pass():
 
 
 @test
+def plan_commit_refuses_when_any_task_lacks_a_design_boundary():
+    fixture = Fixture()
+    try:
+        fixture.plan.write_text(
+            "# Plan\n\n"
+            "## Task 1 - One\n"
+            "Achieves: Change the application value.\n"
+            "To verify: The changed value is covered.\n\n"
+            "### Design\n"
+            "[written at C3.1 - see below]\n\n"
+            "## Task 2 - Two\n"
+            "Achieves: Preserve the application value.\n"
+            "To verify: The preserved value is covered.\n\n"
+            "```markdown\n"
+            "### Design\n"
+            "This is illustrative data, not the ownership boundary.\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        original_head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        original_copy = fixture.plan_copy.read_bytes()
+        plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
+
+        result = fixture.run("bash", plan_commit, "lot-1", "invalid plan", ok=False)
+
+        check("Task 2" in result.stderr and "### Design" in result.stderr, result.stderr)
+        check(fixture.git("rev-parse", "HEAD").stdout.strip() == original_head,
+              "a plan without every Design boundary created a commit")
+        check(fixture.plan_copy.read_bytes() == original_copy,
+              "a refused plan changed the repository copy")
+        check(not (fixture.workspace / "plan-commit-in-progress").exists(),
+              "a refused plan created a commit marker")
+        check(not (fixture.workspace / "progress.jsonl").exists(),
+              "a refused plan wrote the journal")
+    finally:
+        fixture.close()
+
+
+@test
+def attempt_start_refuses_a_committed_task_without_a_design_boundary():
+    fixture = Fixture()
+    try:
+        missing = (
+            "# Plan\n\n## Task 1 - One\n"
+            "Achieves: Change the application value.\n"
+            "To verify: The changed value is covered.\n"
+        )
+        fixture.plan.write_text(missing, encoding="utf-8")
+        fixture.plan_copy.write_text(missing, encoding="utf-8")
+        fixture.git("add", str(fixture.plan_copy.relative_to(fixture.repo)))
+        fixture.git("commit", "-q", "-m", "legacy plan without Design boundary")
+        fixture.base = fixture.git("rev-parse", "HEAD").stdout.strip()
+        fixture.git("update-ref", "refs/bwr/2026-08-19-demo/lot-1/task-0", fixture.base)
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"plan/lot-1/{fixture.base}",
+            "-", "0", "0", fixture.base, ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        fixture.close_gate(op)
+        started = fixture.workspace / "prompts" / "construction" / "attempt-started.sh"
+
+        result = fixture.run("bash", started, "lot-1", "1", "1", ok=False)
+
+        check("### Design" in result.stderr, result.stderr)
+        check(not (fixture.workspace / "attempt-in-flight").exists(),
+              "a task without a Design boundary created an attempt identity")
+    finally:
+        fixture.close()
+
+
+@test
 def controller_document_commits_bypass_mutating_project_hooks():
     fixture = Fixture()
     try:
@@ -1586,7 +1677,11 @@ def controller_document_commits_bypass_mutating_project_hooks():
         hook.write_text("#!/bin/sh\nprintf hook-ran >> hook.log\nexit 77\n", encoding="utf-8")
         hook.chmod(0o755)
 
-        fixture.plan.write_text("# Plan\n\n## Task 1 - One\n\ncontroller\n", encoding="utf-8")
+        fixture.plan.write_text(
+            "# Plan\n\n## Task 1 - One\n\ncontroller\n\n"
+            "### Design\n[written at C3.1 - see below]\n",
+            encoding="utf-8",
+        )
         plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
         fixture.run("bash", plan_commit, "lot-1", "plan update", ok=True)
 
