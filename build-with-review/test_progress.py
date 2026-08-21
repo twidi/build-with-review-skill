@@ -1620,8 +1620,13 @@ def subagent_unknown_kind_is_refused():
 def subagent_ended_carries_data():
     started = run_progress("subagent-started", "completeness")
     check(started.returncode == 0, started.stdout + started.stderr)
-    line = the_line(run_progress("subagent-ended", "completeness",
-                                 "--data", '{"decisions":"12/12","tasks":"7/8"}'))
+    ended = run_progress("subagent-ended", "completeness",
+                         "--data", '{"decisions":"12/12","tasks":"7/8"}')
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    lines = journal_lines()
+    check(len(lines) == 2, f"one physical bracket must contain one opening and one terminal: {lines}")
+    line = lines[-1]
+    check(line["event"] == "subagent-ended", line)
     check(line["kind"] == "completeness", line)
     check(line["data"] == {"decisions": "12/12", "tasks": "7/8"}, line)
 
@@ -5815,9 +5820,12 @@ def code_checker_probability_admission_is_private_and_attempt_scoped():
           "the shared risk contract must include the severity-bearing code checker")
     check("design checker" in risk and "diagnostics" in risk,
           "non-severity construction roles must remain outside risk admission")
-    for contract in (checker, implementer, mode, skill):
+    for contract in (checker, implementer, mode):
         check("task-<N>-attempt-<K>-code-risk-filtered.md" in contract,
               "every code-checker consumer must use one attempt-scoped private history")
+    check("task-<N>-attempt-<K>-design-risk-filtered.md" in skill
+          and "matching `-code-risk-filtered.md` path" in skill,
+          "the root contract must name both attempt-scoped checker histories")
     check("Code checker round <R>" in checker and "same private history" in checker,
           "all rounds and physical regenerations must share one attempt history")
     check("A new attempt uses a new path" in implementer,
@@ -5850,8 +5858,8 @@ def code_checker_admission_keeps_one_strict_output_route():
     with open(os.path.join(PRODUCT_PROMPTS, "lens-common.md"), encoding="utf-8") as f:
         product = " ".join(f.read().split())
 
-    check("The CONSTRUCTION code checker does not own a `DECISION` output route" in risk,
-          "the shared DECISION route must exclude the strict code-checker result")
+    check("The CONSTRUCTION design and code checkers do not own a `DECISION` output route" in risk,
+          "the shared DECISION route must exclude both strict checker results")
     check("Return every admitted observation only through the strict JSON result" in checker,
           "the code checker must have one result channel")
     check("Do not emit `DECISION`, message the implementer separately, or stop outside that JSON" in checker,

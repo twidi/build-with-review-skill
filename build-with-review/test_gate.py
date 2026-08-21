@@ -540,7 +540,9 @@ def logical_gate_freezes_candidate_and_reuses_one_operation():
         fixture.run("bash", fixture.gate_check, "verify", op, ok=False)
         fixture.run("git", "checkout", "--", "app.txt", ok=True)
         # checkout restores the staged candidate into the worktree. The same
-        # logical opening regenerates a physical call under the same op.
+        # logical opening regenerates a physical call under the same op after
+        # the unavailable physical call receives its exact lost terminal.
+        fixture.run("bash", fixture.gate_check, "lost", op, ok=True)
         check(fixture.open_task_gate() == op, "a lost physical call allocated a new logical op")
         fixture.close_gate(op)
         retry = fixture.close_gate(op)
