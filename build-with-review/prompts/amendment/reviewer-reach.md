@@ -27,7 +27,9 @@ at the end of your report and move on — it is not a finding here.
 **You do not run the four reading modes of `reviewer-common.md`.** Your sweep is one of
 them — *by meaning, not by string* — applied to the amendment's complete change set.
 Everything else in that file holds: severity, DECISION, the relevance gate, the Git
-boundary, the report format, the ping.
+boundary and the ping. Its SPEC verdict line and SPEC review-pool handoff do not hold.
+Do not write `READY` or `NOT READY`. Do not include the SPEC review-pool handoff. This
+role's exact report shape below is complete.
 
 ---
 
@@ -130,10 +132,9 @@ durable inputs is not closed.
 
 ## Your report
 
-The format is in `reviewer-common.md`: completion block first, then the findings. Write it
-to the path your parent gives you.
-
-**Between the two, put one `## Reach account`.** Use this exact machine-audited shape:
+Write the completion block first to the path your parent gives you. Immediately after its
+last item and ordinary blank spacing, write one `## Reach account`. Put no verdict, handoff
+or free prose between them. Use this exact machine-audited shape:
 
 ```
 ## Reach account
@@ -146,7 +147,8 @@ Hop 3: 0 new — closed
 The hop numbers start at 1 and stay contiguous. Only the last hop can say `— closed`, and
 it says `0 new`. The sum of the hop counts is the number of place entries.
 
-Then write one contiguous entry per place. Use this exact shape:
+Then write one contiguous entry per place. Put no free prose between the hop account and
+P1, or between place entries. Evidence belongs inside its exact P block. Use this shape:
 
 ```text
 ## P1 · <short title>

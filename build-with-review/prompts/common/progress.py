@@ -130,6 +130,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 JOURNAL = os.path.join(WORKSPACE, "progress.jsonl")
 JOURNAL_LOCK = f"{JOURNAL}.lock"
+AMENDMENT_SWEEP_PREFLIGHT = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
 DASHBOARD_DIR = os.path.join(WORKSPACE, "dashboard")
 DASHBOARD_COPY = os.path.join(DASHBOARD_DIR, "data", "progress.jsonl")
 GATE_CHECK = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
@@ -1862,7 +1863,31 @@ def audit_reach_report(payload, subject, expected_sources):
     }
 
 
+def validate_reach_replacement_order(entries, opening_index, before, sweep, subject):
+    sessions = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:before], opening_index + 1
+    ) if entry.get("event") == "session-started"
+        and entry.get("mode") == "amendment" and entry.get("mandate") == "reach"
+        and entry.get("round") == sweep]
+    for position in range(1, len(sessions)):
+        prior_index, prior = sessions[position - 1]
+        replacement_index, _ = sessions[position]
+        retirements = [entry for entry in entries[prior_index + 1:replacement_index]
+                       if entry.get("event") == "session-retired"
+                       and entry.get("session") == prior.get("session")
+                       and entry.get("mode") == "amendment"
+                       and entry.get("mandate") == "reach"
+                       and entry.get("round") == sweep]
+        if len(retirements) != 1:
+            fail(f"{subject} has a Reach replacement before its prior owner retired",
+                 prior.get("session"))
+        if retirements[0].get("status") not in {"failed", "cancelled", "superseded"}:
+            fail(f"{subject} has a Reach replacement after a successful owner",
+                 prior.get("session"))
+
+
 def exact_reach_session(entries, opening_index, before, sweep, subject):
+    validate_reach_replacement_order(entries, opening_index, before, sweep, subject)
     sessions = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
         entries[opening_index + 1:before], opening_index + 1
     ) if candidate.get("event") == "session-started"
@@ -1888,7 +1913,228 @@ def exact_reach_session(entries, opening_index, before, sweep, subject):
     return completed[0]
 
 
-def validate_sweep_entry(entries, index, entry):
+def exact_live_reach_session(entries, opening_index, before, sweep, subject):
+    validate_reach_replacement_order(entries, opening_index, before, sweep, subject)
+    sessions = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
+        entries[opening_index + 1:before], opening_index + 1
+    ) if candidate.get("event") == "session-started"
+        and candidate.get("mode") == "amendment" and candidate.get("mandate") == "reach"
+        and candidate.get("round") == sweep]
+    live = []
+    for started_index, started in sessions:
+        retirements = [candidate for candidate in entries[started_index + 1:before]
+                       if candidate.get("event") == "session-retired"
+                       and candidate.get("session") == started.get("session")
+                       and candidate.get("mode") == "amendment"
+                       and candidate.get("mandate") == "reach"
+                       and candidate.get("round") == sweep]
+        if len(retirements) > 1:
+            fail(f"{subject} has a multiply retired reach session", started.get("session"))
+        if not retirements:
+            live.append(started)
+            continue
+        if retirements[0].get("status") == "done":
+            fail(f"{subject} follows an already successful reach retirement",
+                 started.get("session"))
+        if retirements[0].get("status") not in {"failed", "cancelled", "superseded"}:
+            fail(f"{subject} has a non-terminal reach session result")
+    if len(live) != 1:
+        fail(f"{subject} has no one exact live reach session")
+    return live[0]
+
+
+def validate_reach_sweep_owed(entries, opening_index, before, sweep, subject):
+    if any(entry.get("kind") == "amendment.committed"
+           for entry in entries[opening_index + 1:before]):
+        fail(f"{subject} follows a closed amendment generation")
+    prior = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:before], opening_index + 1
+    ) if entry.get("kind") == "sweep.reported"]
+    if sweep != len(prior) + 1:
+        fail(f"{subject} has the wrong sweep ordinal",
+             {"expected": len(prior) + 1, "actual": sweep})
+    for position, (prior_index, prior_entry) in enumerate(prior):
+        validate_sweep_entry(entries, prior_index, prior_entry, validate_owed=False)
+        data = note_data(prior_entry)
+        next_index = prior[position + 1][0] if position + 1 < len(prior) else before
+        if data.get("done") is True and data.get("closed") is True \
+                and data.get("places") == 0:
+            fail(f"{subject} follows a clean Reach close")
+        if isinstance(data.get("places"), int) and data["places"] > 0 \
+                and not any(entry.get("kind") == "fixer.returned"
+                            and entry.get("mode") == "amendment"
+                            for entry in entries[prior_index + 1:next_index]):
+            fail(f"{subject} precedes the prior actionable sweep's fixer return")
+    return prior
+
+
+def amendment_sweep_generation(entries, sweep, subject, *, live):
+    openings = amendment_openings(entries)
+    if not openings:
+        fail(f"{subject} has no current amendment")
+    opening_index, opening = openings[-1]
+    number = note_data(opening)["amendment"]
+    _, amendment_written, _ = amendment_written_entry(
+        entries, opening_index, len(entries), subject,
+    )
+    validate_reach_sweep_owed(entries, opening_index, len(entries), sweep, subject)
+    relative = f"reports/amendment/{number}/sweep-{sweep}.md"
+    report = exact_real_file(WORKSPACE, relative, "the reach report")
+    with open(report, "rb") as source:
+        payload = source.read()
+    account = audit_reach_report(
+        payload, "the reach report", amendment_reach_sources(opening),
+    )
+    amendment_path = exact_real_file(WORKSPACE, f"amendments/{number}.md",
+                                     "the amendment under reach review")
+    with open(amendment_path, "rb") as source:
+        amendment_sha = sha256_bytes(source.read())
+    if sweep == 1 and amendment_sha != note_data(amendment_written)["document_sha256"]:
+        fail("the first reach preflight does not consume the complete authored amendment")
+    accepted = exact_live_reach_session(entries, opening_index, len(entries), sweep, subject) \
+        if live else exact_reach_session(entries, opening_index, len(entries), sweep, subject)
+    return {
+        "amendment": number, "sweep": sweep, "session": accepted["session"],
+        "opening_sha256": note_data(opening)["opening_sha256"],
+        "report_sha256": sha256_bytes(payload), "amendment_sha256": amendment_sha,
+        **account,
+    }
+
+
+def amendment_sweep_preflight(entries, sweep, subject):
+    return amendment_sweep_generation(entries, sweep, subject, live=True)
+
+
+def validate_amendment_sweep_preflight(proof, subject):
+    exact = {
+        "amendment", "sweep", "session", "opening_sha256", "report_sha256",
+        "amendment_sha256", "hop", "places", "closed", "done",
+    }
+    if not isinstance(proof, dict) or set(proof) != exact \
+            or not all(isinstance(proof[key], int) and not isinstance(proof[key], bool)
+                       and proof[key] > 0 for key in ("amendment", "sweep", "hop")) \
+            or not isinstance(proof["places"], int) or isinstance(proof["places"], bool) \
+            or proof["places"] < 0 \
+            or not isinstance(proof["session"], str) or not proof["session"] \
+            or any(not isinstance(proof[key], str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", proof[key])
+                   for key in ("opening_sha256", "report_sha256", "amendment_sha256")) \
+            or not isinstance(proof["closed"], bool) or proof["done"] is not True:
+        fail(f"{subject} has a malformed amendment-sweep preflight proof", proof)
+    return proof
+
+
+def amendment_sweep_preflight_payload(proof):
+    return (json.dumps(
+        proof, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ) + "\n").encode("utf-8")
+
+
+def read_amendment_sweep_preflight(subject, *, required=True):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(AMENDMENT_SWEEP_PREFLIGHT, flags)
+    except FileNotFoundError:
+        if required:
+            fail(f"{subject} has no consumable amendment-sweep preflight")
+        return None
+    except OSError as exc:
+        fail(f"{subject}'s amendment-sweep preflight is not one readable real file", exc)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            fail(f"{subject}'s amendment-sweep preflight is not one real regular file")
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None
+            try:
+                payload = source.read()
+                proof = json.loads(payload.decode("utf-8"))
+            except (UnicodeError, ValueError) as exc:
+                fail(f"{subject}'s amendment-sweep preflight is malformed", exc)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    proof = validate_amendment_sweep_preflight(proof, subject)
+    if payload != amendment_sweep_preflight_payload(proof):
+        fail(f"{subject}'s amendment-sweep preflight has non-canonical bytes")
+    return proof
+
+
+def remove_amendment_sweep_preflight(expected, subject, *, journaled=False):
+    current = read_amendment_sweep_preflight(subject)
+    if current != expected:
+        fail(f"{subject}'s amendment-sweep preflight changed before consumption",
+             journaled=journaled)
+    try:
+        os.unlink(AMENDMENT_SWEEP_PREFLIGHT)
+    except OSError as exc:
+        fail(f"{subject} could not consume its amendment-sweep preflight", exc,
+             journaled=journaled)
+
+
+def amendment_sweep_receipt_for_proof(entries, proof):
+    return [(index, entry) for index, entry in enumerate(entries)
+            if entry.get("kind") == "sweep.reported" and note_data(entry) == proof]
+
+
+def preflight_session_retirement(entries, proof):
+    starts = [(index, entry) for index, entry in enumerate(entries)
+              if entry.get("event") == "session-started"
+              and entry.get("session") == proof["session"]
+              and entry.get("mode") == "amendment" and entry.get("mandate") == "reach"
+              and entry.get("round") == proof["sweep"]]
+    if len(starts) != 1:
+        return None
+    index, _ = starts[0]
+    retirements = [entry for entry in entries[index + 1:]
+                   if entry.get("event") == "session-retired"
+                   and entry.get("session") == proof["session"]
+                   and entry.get("mode") == "amendment"
+                   and entry.get("mandate") == "reach"
+                   and entry.get("round") == proof["sweep"]]
+    if len(retirements) != 1:
+        return None
+    return retirements[0].get("status")
+
+
+def publish_amendment_sweep_preflight(entries, proof, subject):
+    current = read_amendment_sweep_preflight(subject, required=False)
+    if current == proof:
+        return
+    if current is not None:
+        receipts = amendment_sweep_receipt_for_proof(entries, current)
+        replaceable = current.get("amendment") == proof["amendment"] \
+            and current.get("sweep") == proof["sweep"] \
+            and current.get("opening_sha256") == proof["opening_sha256"] \
+            and (current.get("session") == proof["session"]
+                 or preflight_session_retirement(entries, current)
+                 in {"failed", "cancelled", "superseded"})
+        if len(receipts) > 1:
+            fail(f"{subject} follows duplicate receipts for one preflight generation")
+        if len(receipts) == 1:
+            remove_amendment_sweep_preflight(current, subject)
+        elif not replaceable:
+            fail(f"{subject} cannot replace an unsettled amendment-sweep preflight")
+    payload = amendment_sweep_preflight_payload(proof)
+    descriptor, temporary = tempfile.mkstemp(prefix=".amendment-sweep-preflight.", dir=WORKSPACE)
+    try:
+        with os.fdopen(descriptor, "wb") as target:
+            descriptor = None
+            target.write(payload)
+            target.flush()
+            os.fsync(target.fileno())
+        if os.path.lexists(AMENDMENT_SWEEP_PREFLIGHT) \
+                and (os.path.islink(AMENDMENT_SWEEP_PREFLIGHT)
+                     or not os.path.isfile(AMENDMENT_SWEEP_PREFLIGHT)):
+            fail(f"{subject}'s amendment-sweep preflight path has a foreign occupant")
+        os.replace(temporary, AMENDMENT_SWEEP_PREFLIGHT)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def validate_sweep_entry(entries, index, entry, *, validate_owed=True):
     data = note_data(entry)
     number, sweep = data.get("amendment"), data.get("sweep")
     openings = [(candidate_index, candidate) for candidate_index, candidate in amendment_openings(entries, index)
@@ -1897,11 +2143,16 @@ def validate_sweep_entry(entries, index, entry):
         fail("a reach receipt has no exact amendment and sweep identity")
     opening_index, opening = openings[0]
     amendment_written_entry(entries, opening_index, index, "a reach receipt")
-    prior = [candidate for candidate in entries[opening_index + 1:index]
-             if candidate.get("kind") == "sweep.reported"]
-    if sweep != len(prior) + 1:
-        fail("a reach receipt has the wrong sweep ordinal",
-             {"expected": len(prior) + 1, "actual": sweep})
+    if validate_owed:
+        validate_reach_sweep_owed(
+            entries, opening_index, index, sweep, "a reach receipt",
+        )
+    else:
+        prior = [candidate for candidate in entries[opening_index + 1:index]
+                 if candidate.get("kind") == "sweep.reported"]
+        if sweep != len(prior) + 1:
+            fail("a reach receipt has the wrong sweep ordinal",
+                 {"expected": len(prior) + 1, "actual": sweep})
     accepted = exact_reach_session(entries, opening_index, index, sweep, "a reach receipt")
     if data.get("session") != accepted.get("session"):
         fail("a reach receipt has no one exact completed sweep session")
@@ -1936,37 +2187,36 @@ def normalize_sweep_report(entries, data, round_number):
         fail("sweep.reported requires exactly hop, places and closed", data)
     if not isinstance(round_number, int):
         fail("sweep.reported requires its exact --round")
-    openings = amendment_openings(entries)
-    if not openings:
-        fail("sweep.reported has no current amendment")
-    opening_index, opening = openings[-1]
-    number = note_data(opening)["amendment"]
-    relative = f"reports/amendment/{number}/sweep-{round_number}.md"
-    report = exact_real_file(WORKSPACE, relative, "the reach report")
-    with open(report, "rb") as source:
-        payload = source.read()
-    amendment_path = exact_real_file(WORKSPACE, f"amendments/{number}.md",
-                                     "the amendment under reach review")
-    with open(amendment_path, "rb") as source:
-        amendment_sha = sha256_bytes(source.read())
-    account = audit_reach_report(
-        payload, "the reach report", amendment_reach_sources(opening),
+    candidate_data = amendment_sweep_generation(
+        entries, round_number, "sweep.reported", live=False,
     )
-    if any(data.get(key) != account[key] for key in ("hop", "places", "closed")):
-        fail("sweep.reported counts do not match the exact reach report", account)
-    accepted = exact_reach_session(
-        entries, opening_index, len(entries), round_number, "sweep.reported",
-    )
-    candidate_data = {
-        "amendment": number, "sweep": round_number,
-        "opening_sha256": note_data(opening)["opening_sha256"],
-        "report_sha256": sha256_bytes(payload), "session": accepted["session"],
-        "amendment_sha256": amendment_sha,
-        **account,
-    }
+    if any(data.get(key) != candidate_data[key] for key in ("hop", "places", "closed")):
+        fail("sweep.reported counts do not match the exact reach report", candidate_data)
+    preflight = read_amendment_sweep_preflight("sweep.reported")
+    if preflight != candidate_data:
+        fail("sweep.reported does not consume its exact amendment-sweep preflight",
+             {"preflight": preflight, "current": candidate_data})
     candidate = {"event": "note", "kind": "sweep.reported", "data": candidate_data}
     validate_sweep_entry(entries + [candidate], len(entries), candidate)
     return candidate_data
+
+
+def finish_interrupted_sweep_receipt(entries, data, round_number):
+    preflight = read_amendment_sweep_preflight(
+        "the interrupted sweep receipt", required=False,
+    )
+    if preflight is None:
+        return False
+    receipts = amendment_sweep_receipt_for_proof(entries, preflight)
+    if not receipts:
+        return False
+    if len(receipts) != 1 or round_number != preflight["sweep"] \
+            or not isinstance(data, dict) or set(data) != {"hop", "places", "closed"} \
+            or any(data[key] != preflight[key] for key in data):
+        fail("the interrupted sweep receipt does not match its exact accepted generation")
+    validate_sweep_entry(entries, receipts[0][0], receipts[0][1])
+    remove_amendment_sweep_preflight(preflight, "the interrupted sweep receipt")
+    return True
 
 
 def current_amendment_review(entries, before, subject):
@@ -1983,19 +2233,8 @@ def current_amendment_review(entries, before, subject):
     ) if entry.get("kind") == "sweep.reported"]
     if not sweeps:
         fail(f"{subject} has no accepted reach sweep")
-    for position, (sweep_index, sweep) in enumerate(sweeps):
+    for sweep_index, sweep in sweeps:
         validate_sweep_entry(entries, sweep_index, sweep)
-        next_index = sweeps[position + 1][0] if position + 1 < len(sweeps) else before
-        sweep_data = note_data(sweep)
-        if position + 1 < len(sweeps):
-            if sweep_data.get("done") is True and sweep_data.get("closed") is True \
-                    and sweep_data.get("places") == 0:
-                fail(f"{subject} has a later sweep after a clean reach close")
-            if sweep_data.get("done") is True and not any(
-                entry.get("kind") == "fixer.returned"
-                for entry in entries[sweep_index + 1:next_index]
-            ):
-                fail(f"{subject} has a later sweep before the prior fixer's return")
     final_sweep_index, final_sweep = sweeps[-1]
     final_data = note_data(final_sweep)
     if final_data.get("done") is not True or final_data.get("closed") is not True \
@@ -6696,6 +6935,20 @@ def cmd_session_retired(args):
              + ". For a non-terminal change, use session-status.")
     me = whoami()
     target = run(["session", args.session_id])
+    target_context = context_of(target)
+    reach_preflight = None
+    if target_context.get("mode") == "amendment" \
+            and target_context.get("mandate") == "reach" and args.status == "done":
+        sweep = target_context.get("round")
+        if not isinstance(sweep, int) or isinstance(sweep, bool) or sweep < 1:
+            fail("the Reach reviewer retirement has no exact sweep identity")
+        entries = journal_entries()
+        reach_preflight = amendment_sweep_preflight(
+            entries, sweep, "the Reach reviewer retirement",
+        )
+        frozen = read_amendment_sweep_preflight("the Reach reviewer retirement")
+        if frozen != reach_preflight or frozen["session"] != args.session_id:
+            fail("the Reach reviewer retirement does not consume its exact preflight")
 
     ok, detail = attempt(["update-session", args.session_id, "annotations",
                           f"set:bwr.status={args.status}"])
@@ -6723,7 +6976,14 @@ def cmd_session_retired(args):
     append_event(me["session_id"], "session-retired",
                  session=args.session_id, status=args.status,
                  archived=outcome.get("archived"), hidden=outcome.get("hidden"),
-                 **context_of(target))
+                 **target_context)
+    if target_context.get("mode") == "amendment" \
+            and target_context.get("mandate") == "reach" and args.status != "done":
+        frozen = read_amendment_sweep_preflight(
+            "the non-successful Reach retirement", required=False,
+        )
+        if frozen is not None and frozen.get("session") == args.session_id:
+            remove_amendment_sweep_preflight(frozen, "the non-successful Reach retirement")
     if failed_step:
         refresh_dashboard()  # the line above must reach the dashboard before we exit
         step, detail = failed_step
@@ -6920,6 +7180,10 @@ def cmd_note(args):
     data = parse_data(args.data)
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
+    if args.kind == "sweep.reported" and finish_interrupted_sweep_receipt(
+        journal_entries(), data, context.get("round"),
+    ):
+        return
     data = validate_note_data(
         args.kind, data, text, round_number=context.get("round"),
         mandate=context.get("mandate"), context=context,
@@ -6936,6 +7200,8 @@ def cmd_note(args):
     append_event(me["session_id"], "note", kind=args.kind,
                  text=text if text is not None else None, data=data,
                  **context)
+    if args.kind == "sweep.reported":
+        remove_amendment_sweep_preflight(data, "sweep.reported", journaled=True)
 
 
 def cmd_spec_close_check(args):
@@ -7114,6 +7380,13 @@ def cmd_construction_failure_handoff(args):
     print("```")
 
 
+def cmd_amendment_sweep_check(args):
+    entries = journal_entries()
+    proof = amendment_sweep_preflight(entries, args.round, "the amendment sweep preflight")
+    publish_amendment_sweep_preflight(entries, proof, "the amendment sweep preflight")
+    print(json.dumps(proof, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 def cmd_construction_failure_check(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
@@ -7275,6 +7548,10 @@ def build_parser():
 
     sp = sub.add_parser("amendment-state-check", help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_amendment_state_check)
+
+    sp = sub.add_parser("amendment-sweep-check", help=argparse.SUPPRESS)
+    sp.add_argument("round", type=positive_int)
+    sp.set_defaults(func=cmd_amendment_sweep_check)
 
     sp = sub.add_parser("construction-verdict-check", help=argparse.SUPPRESS)
     sp.add_argument("check", choices=("history", "design", "code"))

@@ -133,6 +133,14 @@ tool on Claude Code, its equivalent on Codex.
   absent. Always call both helpers. Empty stdout is valid absence and never a blocker.
   Non-empty stdout is human instructions. Only a helper refusal blocks. Never test either
   file directly.
+- **Correct one local helper invocation before you classify its result.** Compare the
+  command you issued with the exact documented command and its supplied runtime values.
+  If they differ, correct only the local invocation once in the same live actor. This does
+  not consume a provider replacement, report repair, logical round or workflow retry. Do
+  not import an executable helper as a Python module when the prompt gives a CLI command.
+  Do not change or infer an authoritative input. If the exact corrected invocation reaches
+  the helper and refuses, that refusal is authoritative. Follow its documented blocker or
+  correction route; never repeat the same exact failed call.
 - **Use the model and effort your prompt names.** The levels are in
   `<workspace>/prompts/common/vocabulary.md`.
 

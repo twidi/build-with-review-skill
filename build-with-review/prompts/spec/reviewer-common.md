@@ -113,7 +113,7 @@ Never ask questions in that message. State assumptions instead.
 
 **The block goes in the message, not only in the file** — it is what lets the controller check your coverage without opening anything.
 
-End the same message with this controller handoff:
+Only when your assignment mode is SPEC, end the same message with this controller handoff:
 
 ```text
 CONTROLLER HANDOFF — REVIEW POOL
@@ -123,8 +123,10 @@ Then return to this exact report and finish its receipt and retirement.
 Run the helper again after retirement, refill again, then resume the interrupted round work.
 ```
 
-This handoff is part of every result. Another reviewer message can arrive while the
-controller handles yours. It must not erase the refill or this report's settlement.
+This handoff is part of every SPEC result. A non-SPEC role that reads this shared file
+does not include it and follows its later role prompt. Another reviewer message can arrive
+while the controller handles a SPEC result. It must not erase the refill or this report's
+settlement.
 
 ## Re-review rounds
 

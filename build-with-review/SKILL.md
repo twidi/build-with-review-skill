@@ -884,8 +884,10 @@ neither is offered**: you receive it, and it interrupts whatever you were doing.
 6. **Every stopped child: the terminal status follows its ASSIGNMENT's durable
    boundary, never the accident that its session was still open one more gesture.**
    The boundary is each role's own "accepted", as its mode file defines it — a task
-   ref posted; a spec reviewer's `report.received` or a sweep's `sweep.reported`,
-   whose receipt IS the whole assignment; **a product-review lens's report settled
+   ref posted; a spec reviewer's `report.received`; a sweep's complete official preflight,
+   frozen in `amendment-sweep-preflight.json`, after which its successful retirement and
+   the marker-consuming `sweep.reported` are immediately owed; **a
+   product-review lens's report settled
    WHOLE — every finding verified, reprises included — never its first receipt**,
    which accepts the write while the assignment is still being adjudicated: a lens
    retired `done` on a mere receipt loses its one restatement and its one
@@ -1054,6 +1056,14 @@ reaches it through an implementer.
 
 ### What you always do
 
+- **Correct one local helper invocation before you classify its result.** Compare the
+  command you issued with the exact documented command and its supplied runtime values.
+  If they differ, correct only the local invocation once in the same live actor. This does
+  not consume a provider replacement, report repair, logical round or workflow retry. Do
+  not import an executable helper as a Python module when the skill gives a CLI command.
+  Do not change or infer an authoritative input. If the exact corrected invocation reaches
+  the helper and refuses, that refusal is authoritative. Follow its documented blocker or
+  correction route; never repeat the same exact failed call.
 - **Audit what comes back.** A report without its completion block goes back; a block
   with an unticked item and no stated reason goes back — **once, and journaled as it
   goes**: `progress.py note bound.spent --mandate <slug, when the role has one> --text

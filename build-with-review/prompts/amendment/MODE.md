@@ -501,11 +501,51 @@ again, and the amendment has changed since.
 
 ```
 progress.py session-started <id>
+progress.py amendment-sweep-check <K>
 progress.py session-retired <id> done --archive --hide
 progress.py note sweep.reported --round <K> --data '{"hop":<N>,"places":<N>,"closed":<true|false>}'
 ```
 
-The third line goes in when the sweep's block checks out — **acceptance, never mere
+The second command is the official journal-free preflight. Run it while the Reach reviewer
+is still live. It audits the complete completion block, Reach account, current amendment,
+current sweep ordinal and one exact live reviewer. Its stdout gives the canonical hop,
+place, frontier, report, amendment and session identities. It atomically freezes that
+same proof in `<workspace>/amendment-sweep-preflight.json`. It changes no session and
+writes no journal line. Do not import `progress.py` or call an internal Python function.
+
+If your issued preflight command differs from that exact CLI command, correct only the
+local invocation once in the same live actor. This does not consume a report repair,
+replacement or sweep. Never change an authoritative argument. An exact corrected
+invocation that reaches the helper and refuses is the report audit result. Keep the
+reviewer live and follow the ordinary one-repair or replacement route from that exact
+refusal. After any report repair, rerun the preflight while that reviewer remains live.
+The new valid generation replaces only that reviewer's earlier preflight proof.
+
+Only a green preflight permits the last two commands. Run them immediately, with no report
+edit or other work between them. Copy `hop`, `places` and `closed` from the preflight
+stdout. The retirement reauthenticates the exact marker and current report before it can
+write `done`. The receipt reauthenticates and consumes that same marker. Without the marker,
+neither transition is valid. If either command refuses, keep the marker and follow its
+exact state. Never reopen or replace a successful retirement from memory.
+
+An interruption keeps one deterministic continuation:
+
+- marker plus live reviewer: rerun the same preflight, retire, then receive;
+- marker plus successful retirement and no receipt: run the exact receipt;
+- marker plus its matching receipt: rerun the receipt once to finish marker cleanup;
+- marker plus a non-successfully retired reviewer: launch the documented replacement; its
+  green preflight replaces the old generation.
+
+Never recreate these identities from memory. A changed or malformed report refuses before
+successful retirement. A preflight marker moves with the workspace and disappears only
+when its matching receipt consumes it or the workspace is trashed.
+
+**A Reach replacement never overlaps its prior owner.** Stop the old session, record its
+exact `failed`, `cancelled` or `superseded` retirement, and move its fixed report aside.
+Only then record the replacement `session-started`. A replacement before that retirement,
+or after a `done` retirement, refuses. The same order applies with or without a marker.
+
+The fourth line goes in when the sweep's complete preflight checks out — **acceptance, never mere
 arrival**: a block still being repaired leaves the report the sweep's, and a resume
 that finds no `sweep.reported` treats it as absent, which it is. **On a genuine open
 frontier:** copy the report's exact `NOT CLOSED` line to a file, then run
@@ -522,10 +562,10 @@ with the concrete fixed completion block. Fenced examples cannot supply account 
 It freezes the report SHA-256, opening generation and one exact retired successful session
 in the same event. A second live reach session for that logical sweep blocks acceptance.
 
-**Retire each sweep the moment its report arrives and its block checks out, before its
-receipt** — never
-wait for the loop to end. A sweep is fresh every round, so an accepted one has nothing
-left to answer, and left open it holds a concurrency slot beside the fixer's: two open
+**Retire each sweep immediately after its complete official preflight passes, before its
+receipt** — never retire on arrival or on a manual completion-block inspection. Never
+wait for the loop to end. A sweep is fresh every round, so a preflight-green one has
+nothing left to answer. Left open, it holds a concurrency slot beside the fixer: two open
 sweeps and the fixer fill the recommended cap, and the sweep that would close the loop
 can no longer be launched.
 
@@ -533,6 +573,11 @@ can no longer be launched.
 
 **After every fixer return, a new sweep, a fresh session.** A correction has a reach of its
 own: *"the mail now goes out at revocation"* opens a frontier nobody has looked at.
+
+The official preflight proves that this sweep is currently owed. It reauthenticates every
+prior receipt. An actionable prior sweep requires its accepted `fixer.returned`. A clean
+close permits A4, never another sweep. `amendment.committed` closes the generation and
+permits no later sweep.
 
 **The fixer's lifecycle is yours to drive, exactly as in a spec review.** `working` just
 before you send it a round's findings; on its return, audit the completion block — the
@@ -1089,9 +1134,12 @@ breach lifecycle events remain able to complete their own state.
   With the dispatch present and no current-generation `ruling.applied`, the ordinary
   fixer/sweep rows own it. With the terminal present, never dispatch or terminalize it
   again.
-- **The amendment is written and a sweep was walking or had not started** — no accepted
-  `sweep.reported` exists in the slice: move a partial report aside when one exists, then
-  launch a fresh sweep at the next number — sweep 1 when none has run.
+- **The amendment is written and a sweep was walking or had not started** — first inspect
+  `<workspace>/amendment-sweep-preflight.json`. Follow its exact interruption continuation
+  above when it exists. With no marker and no accepted `sweep.reported`, resume the exact
+  live owner when one exists. If it cannot continue, stop it, record its non-successful
+  retirement, move its partial report aside, and only then launch the replacement. With no
+  prior owner, launch a fresh sweep at the next number — sweep 1 when none has run.
 - **A sweep is accepted, with places to handle, and no `fixer.returned` since**: the
   recreated fixer goes `working` and receives that sweep's findings — read from its
   report file, never from memory.

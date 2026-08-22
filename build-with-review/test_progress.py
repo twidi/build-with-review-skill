@@ -130,6 +130,7 @@ def reset():
     shutil.rmtree(os.path.join(WORKSPACE, "amendments"), ignore_errors=True)
     for marker in (
         "amendment-commit-in-progress", "document-copy-in-progress", "attempt-in-flight",
+        "amendment-sweep-preflight.json",
     ):
         path = os.path.join(WORKSPACE, marker)
         if os.path.lexists(path):
@@ -1050,6 +1051,66 @@ def append_live_reach_session(sweep, session):
         }, separators=(",", ":")) + "\n")
 
 
+def append_reach_retirement(sweep, session, status):
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "a", encoding="utf-8") as target:
+        target.write(json.dumps({
+            "ts": "t", "by": "fixture", "event": "session-retired",
+            "session": session, "mode": "amendment", "mandate": "reach",
+            "round": sweep, "status": status,
+        }, separators=(",", ":")) + "\n")
+
+
+def configure_reach_session(session, sweep):
+    cfg = default_config()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "amendment",
+        "feature": "demo-feature", "lot": "lot-1", "status": "working",
+    }
+    cfg["whoami"] = {"session_id": CALLER,
+                     "session": {"id": CALLER, "annotations": {"bwr": controller}}}
+    cfg["sessions"][CALLER] = {"id": CALLER, "annotations": {"bwr": controller}}
+    cfg["sessions"][session] = {
+        "id": session,
+        "annotations": {"bwr": {
+            "schema": 1, "job": "reviewer", "mode": "amendment",
+            "feature": "demo-feature", "lot": "lot-1", "mandate": "reach",
+            "round": sweep, "status": "working",
+        }},
+    }
+    set_config(cfg)
+
+
+def accept_reach_sweep(sweep, report, session):
+    write_report(f"reports/amendment/1/sweep-{sweep}.md", report)
+    configure_reach_session(session, sweep)
+    append_live_reach_session(sweep, session)
+    preflight = run_progress("amendment-sweep-check", str(sweep))
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    retirement = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retirement.returncode == 0, retirement.stdout + retirement.stderr)
+    proof = json.loads(preflight.stdout)
+    receipt = run_progress(
+        "note", "sweep.reported", "--round", str(sweep),
+        "--data", json.dumps({key: proof[key] for key in ("hop", "places", "closed")}),
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    return proof
+
+
+def append_raw_reach_receipt(sweep, session, *, hop, places, closed):
+    opening = next(entry for entry in reversed(journal_lines())
+                   if entry.get("kind") == "amendment.opened")
+    number = opening["data"]["amendment"]
+    append_note("sweep.reported", {
+        "amendment": number, "sweep": sweep,
+        "opening_sha256": opening["data"]["opening_sha256"],
+        "report_sha256": file_sha256(f"reports/amendment/{number}/sweep-{sweep}.md"),
+        "session": session,
+        "amendment_sha256": file_sha256(f"amendments/{number}.md"),
+        "hop": hop, "places": places, "closed": closed, "done": True,
+    }, mode="amendment", lot="lot-1", round=sweep)
+
+
 def seed_written_amendment_for_reach(order="apply the reach order; return to product review"):
     seed_amendment_context()
     opened = run_progress(
@@ -1097,7 +1158,13 @@ def seed_clean_amendment_landing(opening_data, order="apply amendment; return to
     sources = tuple(members) if members else (f"A{number}/order",)
     report = reach_report(sources=sources)
     write_report(f"reports/amendment/{number}/sweep-1.md", report)
-    session = append_reach_session(1)
+    session = f"clean-amendment-{number}-reach"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    retired = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
     sweep = run_progress(
         "note", "sweep.reported", "--round", "1",
         "--data", '{"hop":1,"places":0,"closed":true}',
@@ -4594,7 +4661,13 @@ def sweep_receipt_consumes_its_exact_retired_session_report_and_counts():
         "--data", '{"hop":2,"places":2,"closed":true}',
     )
     check(no_session.returncode != 0, "a sweep without a retired session received a receipt")
-    append_reach_session(1)
+    session = "reach-receipt"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    retirement = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retirement.returncode == 0, retirement.stdout + retirement.stderr)
     wrong = run_progress(
         "note", "sweep.reported", "--round", "1",
         "--data", '{"hop":2,"places":1,"closed":true}',
@@ -4607,6 +4680,292 @@ def sweep_receipt_consumes_its_exact_retired_session_report_and_counts():
     check(valid.returncode == 0, valid.stdout + valid.stderr)
     data = journal_lines()[-1]["data"]
     check(data["sweep"] == 1 and data["report_sha256"] and data["session"], data)
+
+
+@test
+def amendment_sweep_preflight_audits_the_complete_live_report_journal_free():
+    seed_written_amendment_for_reach()
+    session = "live-reach-preflight"
+    append_live_reach_session(1, session)
+    valid = reach_report((2, 0), ("kept", "removed"))
+    malformed_reports = (
+        valid.replace("\n## Reach account\n", "\nREADY\n\n## Reach account\n", 1),
+        valid.replace("Hop 2: 0 new — closed\n", (
+            "Hop 2: 0 new — closed\n\n"
+            "The semantic sweep covered one extra free-form account.\n"
+        ), 1),
+    )
+    before = list(journal_lines())
+    for malformed in malformed_reports:
+        write_report("reports/amendment/1/sweep-1.md", malformed)
+        result = run_progress("amendment-sweep-check", "1")
+        check(result.returncode != 0, "the preflight accepted a malformed complete report")
+        check(journal_lines() == before, "a refused preflight changed the journal")
+        check(mutations() == [], "a refused preflight changed the reviewer session")
+
+    write_report("reports/amendment/1/sweep-1.md", valid)
+    result = run_progress("amendment-sweep-check", "1")
+    check(result.returncode == 0, result.stdout + result.stderr)
+    proof = json.loads(result.stdout)
+    check(proof["amendment"] == 1 and proof["sweep"] == 1, proof)
+    check(proof["session"] == session and proof["hop"] == 2 and proof["places"] == 2, proof)
+    check(proof["closed"] is True and proof["report_sha256"], proof)
+    check(journal_lines() == before, "a successful preflight changed the journal")
+    check(mutations() == [], "a successful preflight retired the reviewer")
+    marker = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
+    with open(marker, encoding="utf-8") as source:
+        frozen = json.load(source)
+    check(frozen == proof, "the journal-free preflight did not freeze its consumable proof")
+
+
+@test
+def amendment_sweep_preflight_requires_one_live_reviewer_generation():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+
+    absent = run_progress("amendment-sweep-check", "1")
+    check(absent.returncode != 0, "the preflight accepted no live reach reviewer")
+
+    append_reach_session(1, "already-retired-reach")
+    retired = run_progress("amendment-sweep-check", "1")
+    check(retired.returncode != 0, "the preflight accepted an already retired reviewer")
+
+
+@test
+def amendment_sweep_preflight_is_required_and_blocks_generation_drift_before_retirement():
+    seed_written_amendment_for_reach()
+    session = "reach-preflight-drift"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    report_a = reach_report((2, 0), ("kept", "removed"))
+    report_b = report_a.replace("Exact place evidence.", "Different valid evidence.", 1)
+    report_path = "reports/amendment/1/sweep-1.md"
+    write_report(report_path, report_a)
+
+    skipped = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(skipped.returncode != 0, "a Reach reviewer retired done without preflight")
+    check(not any(entry.get("event") == "session-retired" for entry in journal_lines()),
+          "a skipped preflight wrote a successful retirement")
+
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    write_report(report_path, report_b)
+    drifted = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(drifted.returncode != 0, "same-count report drift crossed terminal retirement")
+    check(not any(entry.get("event") == "session-retired" for entry in journal_lines()),
+          "drifted bytes produced a durable successful retirement")
+
+    write_report(report_path, report_a.replace(
+        "\n## Reach account\n", "\nREADY\n\n## Reach account\n", 1,
+    ))
+    malformed = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(malformed.returncode != 0, "malformed report drift crossed terminal retirement")
+
+    write_report(report_path, report_a)
+    retired = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    received = run_progress(
+        "note", "sweep.reported", "--round", "1",
+        "--data", '{"hop":2,"places":2,"closed":true}',
+    )
+    check(received.returncode == 0, received.stdout + received.stderr)
+    check(journal_lines()[-1]["data"]["report_sha256"] == json.loads(
+        preflight.stdout,
+    )["report_sha256"], "the receipt did not consume the preflight generation")
+
+
+@test
+def amendment_sweep_preflight_recovers_after_each_durable_boundary():
+    seed_written_amendment_for_reach()
+    session = "reach-preflight-recovery"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    marker = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
+
+    first = run_progress("amendment-sweep-check", "1")
+    second = run_progress("amendment-sweep-check", "1")
+    check(first.returncode == 0 and second.returncode == 0 and first.stdout == second.stdout,
+          "an interruption after preflight could not reuse the exact proof")
+
+    retired = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    received = run_progress(
+        "note", "sweep.reported", "--round", "1",
+        "--data", '{"hop":1,"places":0,"closed":true}',
+    )
+    check(received.returncode == 0, received.stdout + received.stderr)
+    receipt = journal_lines()[-1]["data"]
+    check(not os.path.lexists(marker), "a completed receipt left its preflight marker")
+
+    with open(marker, "w", encoding="utf-8") as target:
+        json.dump(receipt, target, sort_keys=True, separators=(",", ":"))
+        target.write("\n")
+    recovered = run_progress(
+        "note", "sweep.reported", "--round", "1",
+        "--data", '{"hop":1,"places":0,"closed":true}',
+    )
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    check(not os.path.lexists(marker), "receipt interruption recovery did not clear its marker")
+    check(sum(entry.get("kind") == "sweep.reported" for entry in journal_lines()) == 1,
+          "receipt interruption recovery appended a duplicate receipt")
+
+
+@test
+def amendment_sweep_receipt_refuses_a_skipped_preflight():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_reach_session(1)
+    before = len(journal_lines())
+    receipt = run_progress(
+        "note", "sweep.reported", "--round", "1",
+        "--data", '{"hop":1,"places":0,"closed":true}',
+    )
+    check(receipt.returncode != 0 and len(journal_lines()) == before,
+          "a done Reach session received without a consumable preflight")
+
+
+@test
+def amendment_sweep_preflight_requires_the_exact_owed_next_sweep():
+    seed_written_amendment_for_reach()
+    accept_reach_sweep(1, reach_report((1,), ("kept",)), "owed-sweep-1")
+    write_report("reports/amendment/1/sweep-2.md", reach_report())
+    append_live_reach_session(2, "premature-sweep-2")
+    missing_fixer = run_progress("amendment-sweep-check", "2")
+    check(missing_fixer.returncode != 0,
+          "a new sweep started before the actionable prior sweep's fixer return")
+    returned = run_progress("note", "fixer.returned", "--data", '{"applied":1,"declined":0}')
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    owed = run_progress("amendment-sweep-check", "2")
+    check(owed.returncode == 0, owed.stdout + owed.stderr)
+
+    reset()
+    seed_written_amendment_for_reach()
+    accept_reach_sweep(1, reach_report(), "clean-close-sweep-1")
+    write_report("reports/amendment/1/sweep-2.md", reach_report())
+    append_live_reach_session(2, "after-clean-sweep-2")
+    after_clean = run_progress("amendment-sweep-check", "2")
+    check(after_clean.returncode != 0, "a later sweep followed a clean Reach close")
+
+    reset()
+    seed_written_amendment_for_reach()
+    append_note("amendment.committed", {"amendment": 1})
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "after-commit-sweep-1")
+    after_commit = run_progress("amendment-sweep-check", "1")
+    check(after_commit.returncode != 0, "a closed amendment generation admitted a sweep")
+
+
+@test
+def amendment_sweep_preflight_reauthenticates_every_prior_receipt():
+    seed_written_amendment_for_reach()
+    accept_reach_sweep(1, reach_report((1,), ("kept",)), "prior-proof-sweep-1")
+    returned = run_progress("note", "fixer.returned", "--data", '{"applied":1,"declined":0}')
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    write_report("reports/amendment/1/sweep-1.md", reach_report((1,), ("removed",)))
+    write_report("reports/amendment/1/sweep-2.md", reach_report())
+    append_live_reach_session(2, "changed-prior-sweep-2")
+    preflight = run_progress("amendment-sweep-check", "2")
+    check(preflight.returncode != 0, "a changed prior receipt authorized the next sweep")
+
+
+@test
+def amendment_reach_replacement_must_follow_the_prior_owner_retirement():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "overlap-old")
+    append_live_reach_session(1, "overlap-new")
+    append_reach_retirement(1, "overlap-old", "failed")
+    overlap = run_progress("amendment-sweep-check", "1")
+    check(overlap.returncode != 0,
+          "a Reach replacement that overlapped its prior owner became authoritative")
+
+    reset()
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "ordered-old")
+    append_reach_retirement(1, "ordered-old", "failed")
+    append_live_reach_session(1, "ordered-new")
+    ordered = run_progress("amendment-sweep-check", "1")
+    check(ordered.returncode == 0, ordered.stdout + ordered.stderr)
+
+    reset()
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_reach_session(1, "done-old")
+    append_live_reach_session(1, "after-done-new")
+    after_done = run_progress("amendment-sweep-check", "1")
+    check(after_done.returncode != 0, "a Reach replacement followed a successful owner")
+
+
+@test
+def amendment_sweep_history_rejects_unowed_and_overlapping_receipts():
+    seed_written_amendment_for_reach()
+    accept_reach_sweep(1, reach_report((1,), ("kept",)), "history-sweep-1")
+    write_report("reports/amendment/1/sweep-2.md", reach_report())
+    append_reach_session(2, "history-sweep-2")
+    append_raw_reach_receipt(2, "history-sweep-2", hop=1, places=0, closed=True)
+    unowed = run_progress("amendment-state-check")
+    check(unowed.returncode != 0,
+          "historical consumption accepted a sweep before its owed fixer return")
+
+    reset()
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "history-overlap-old")
+    append_live_reach_session(1, "history-overlap-new")
+    append_reach_retirement(1, "history-overlap-old", "failed")
+    append_reach_retirement(1, "history-overlap-new", "done")
+    append_raw_reach_receipt(1, "history-overlap-new", hop=1, places=0, closed=True)
+    overlap = run_progress("amendment-state-check")
+    check(overlap.returncode != 0,
+          "historical consumption accepted overlapping Reach owners")
+
+
+@test
+def amendment_reach_contract_preflights_before_retirement_and_owns_its_handoff():
+    mode = open(os.path.join(AMENDMENT_PROMPTS, "MODE.md"), encoding="utf-8").read()
+    reviewer = open(
+        os.path.join(AMENDMENT_PROMPTS, "reviewer-reach.md"), encoding="utf-8",
+    ).read()
+    common = open(
+        os.path.join(SPEC_PROMPTS, "reviewer-common.md"), encoding="utf-8",
+    ).read()
+    worker = open(os.path.join(COMMON_PROMPTS, "worker.md"), encoding="utf-8").read()
+    skill = open(os.path.join(HERE, "SKILL.md"), encoding="utf-8").read()
+    normalized_mode = " ".join(mode.split())
+
+    check("progress.py amendment-sweep-check <K>" in mode,
+          "AMENDMENT has no official complete-report preflight")
+    check(mode.index("progress.py amendment-sweep-check <K>")
+          < mode.index("progress.py session-retired <id> done --archive --hide"),
+          "AMENDMENT retires the reviewer before the complete report preflight")
+    check("Do not include the SPEC review-pool handoff" in reviewer,
+          "the Reach reviewer still emits a SPEC pool handoff")
+    check("only when your assignment mode is spec" in common.lower(),
+          "the shared SPEC handoff is still universal")
+    check("a sweep's complete official preflight" in skill
+          and "the marker-consuming `sweep.reported`" in skill,
+          "the root stop contract still places Reach retirement after its receipt")
+    check("amendment-sweep-preflight.json" in mode
+          and "marker plus live reviewer" in mode
+          and "marker plus successful retirement" in mode
+          and "marker plus its matching receipt" in mode,
+          "AMENDMENT does not preserve every preflight interruption boundary")
+    check("A Reach replacement never overlaps its prior owner" in normalized_mode
+          and "An actionable prior sweep requires its accepted `fixer.returned`" in normalized_mode
+          and "A clean close permits A4, never another sweep" in normalized_mode,
+          "AMENDMENT does not state the exact current-sweep admission boundary")
+
+    for subject, contract in (("shared worker", worker), ("root skill", skill),
+                              ("AMENDMENT", mode)):
+        normalized = " ".join(contract.split())
+        check("correct only the local invocation once" in normalized,
+              f"{subject} has no bounded helper-invocation correction")
+        check("same live actor" in normalized and "does not consume" in normalized,
+              f"{subject} turns a local invocation correction into replacement work")
+        check("do not import" in normalized.lower() and "exact corrected invocation" in normalized,
+              f"{subject} does not distinguish an unsupported import from a helper refusal")
 
 
 @test
@@ -4648,7 +5007,9 @@ def sweep_receipt_rejects_template_completion_and_out_of_block_structure():
     for old, new in replacements:
         template = template.replace(old, new)
     write_report("reports/amendment/1/sweep-1.md", template)
-    append_reach_session(1)
+    session = "reach-structure"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
     before = len(journal_lines())
     placeholder = run_progress(
         "note", "sweep.reported", "--round", "1",
@@ -4668,6 +5029,10 @@ def sweep_receipt_rejects_template_completion_and_out_of_block_structure():
         "\n```text\n## P99 · example\nDisposition: removed\n```\n"
     )
     write_report("reports/amendment/1/sweep-1.md", fenced)
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    retirement = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retirement.returncode == 0, retirement.stdout + retirement.stderr)
     fenced_result = run_progress(
         "note", "sweep.reported", "--round", "1",
         "--data", '{"hop":1,"places":0,"closed":true}',
