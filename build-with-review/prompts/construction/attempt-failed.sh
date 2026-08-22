@@ -72,14 +72,15 @@ read -r F_LOT F_N F_K < "$INFLIGHT" || true
 attempt $F_K — this call says $LOT task $N attempt $K. The preserve takes the attempt's
 own identity. Nothing was moved, and nothing was staged."
 
-# A final design- or code-review findings batch owns failure admission before this closer
-# binds or stages anything. The shared validator refuses an unsettled batch. It requires
-# one exact immutable failure handoff for accepted items, or one exact derived blocker
-# terminal for a controller-owned frozen-task-contract defect.
+# A checker findings batch owns failure admission before this closer binds or stages
+# anything. The shared validator refuses an unsettled batch. It requires
+# one exact immutable failure handoff for accepted items, or one exact blocker terminal
+# for a controller-owned Design or code-review contract defect.
 FAILURE_DATA=$("$WORKSPACE/prompts/common/progress.py" construction-failure-check \
     "$LOT" "$N" "$K" "$CLASS") \
-    || die "the failure is not admitted by the exact final checker state.
-Settle design or code round 10, or record its exact controller-owned Design blocker.
+    || die "the failure is not admitted by the exact checker state.
+Settle design or code round 10, or record the exact controller-owned Design or code
+blocker before the plan changes.
 When it accepts an implementer-owned defect, complete its authenticated failure report
 first. Nothing was moved, staged, recorded or bound."
 

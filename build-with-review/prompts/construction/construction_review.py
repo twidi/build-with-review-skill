@@ -516,6 +516,30 @@ def validate_previous_account(account, round_number):
     if round_number == 1:
         if account is None:
             return None
+        if isinstance(account, dict) and account.get("source") == "retry-set":
+            required = {"source", "failure", "members", "findings", "resolution"}
+            members = account.get("members")
+            if set(account) != required or not re.fullmatch(
+                r"[0-9]+:[0-9a-f]{64}", account.get("failure", ""),
+            ) or not isinstance(members, list) or len(members) < 2:
+                refuse("the first code-review round has a malformed retry set")
+            for member in members:
+                validate_previous_account(member, 1)
+            member_lines = [int(member["failure"].split(":", 1)[0]) for member in members]
+            if member_lines != sorted(set(member_lines)):
+                refuse("the code-review retry set has unordered or duplicate members")
+            findings = []
+            resolution = []
+            for member in members:
+                for finding, disposition in zip(
+                    member["findings"], member["resolution"], strict=True,
+                ):
+                    identity = len(findings) + 1
+                    findings.append({**finding, "id": identity})
+                    resolution.append({**disposition, "id": identity})
+            if account["findings"] != findings or account["resolution"] != resolution:
+                refuse("the code-review retry set changes its ordered member batches")
+            return account
         required = {
             "source", "failure", "result", "result_sha256", "findings",
             "resolution", "resolution_proof",
@@ -552,7 +576,8 @@ def validate_previous_account(account, round_number):
     if not isinstance(resolution, list) or len(resolution) != len(findings) or any(
         not isinstance(item, dict) or set(item) != {"id", "status", "evidence"}
         or item.get("status") not in (
-            {"accepted"} if account.get("source") == "retry" else {"corrected", "unchanged"}
+            {"accepted", "contract-blocked", "carried"}
+            if account.get("source") == "retry" else {"corrected", "unchanged"}
         )
         or not isinstance(item.get("evidence"), str) or not item["evidence"].strip()
         for item in resolution
@@ -564,6 +589,31 @@ def validate_previous_account(account, round_number):
 def validate_design_previous_account(account, round_number):
     if round_number == 1 and account is None:
         return None
+    if round_number == 1 and isinstance(account, dict) \
+            and account.get("source") == "retry-set":
+        required = {"source", "failure", "members", "findings", "resolution"}
+        members = account.get("members")
+        if set(account) != required or not re.fullmatch(
+            r"[0-9]+:[0-9a-f]{64}", account.get("failure", ""),
+        ) or not isinstance(members, list) or len(members) < 2:
+            refuse("the first design-review round has a malformed retry set")
+        for member in members:
+            validate_design_previous_account(member, 1)
+        member_lines = [int(member["failure"].split(":", 1)[0]) for member in members]
+        if member_lines != sorted(set(member_lines)):
+            refuse("the design-review retry set has unordered or duplicate members")
+        findings = []
+        resolution = []
+        for member in members:
+            for finding, disposition in zip(
+                member["findings"], member["resolution"], strict=True,
+            ):
+                identity = len(findings) + 1
+                findings.append({**finding, "id": identity})
+                resolution.append({**disposition, "id": identity})
+        if account["findings"] != findings or account["resolution"] != resolution:
+            refuse("the design-review retry set changes its ordered member batches")
+        return account
     required = {
         "source", "result", "result_sha256", "findings", "resolution",
         "resolution_proof",

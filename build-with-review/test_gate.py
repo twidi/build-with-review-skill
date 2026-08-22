@@ -1836,6 +1836,119 @@ def final_design_contract_blocker_uses_the_real_plan_fault_closer():
             == ["contract-blocked", "carried"],
             manifest["previous"],
         )
+
+    finally:
+        fixture.close()
+
+
+@test
+def intermediate_code_contract_blocker_reaches_the_corrected_plan_retry():
+    fixture = Fixture()
+    try:
+        fixture.start_attempt_state()
+        fixture.run_code_round(1, 1)
+        fixture.run_code_round(2, 2)
+
+        account = fixture.temp / "code-contract-blocker.md"
+        account.write_text(
+            "## Finding 1 — contract-blocked\n"
+            "The required production test is outside the frozen Files account.\n\n"
+            "## Finding 2 — carried\n"
+            "The replacement attempt must still prove this implementation finding.\n",
+            encoding="utf-8",
+        )
+        fixture.progress_call(
+            "note", "code.review.blocked", "--round", "2",
+            "--data", json.dumps({
+                "check": "code",
+                "items": [
+                    {"id": 1, "status": "contract-blocked"},
+                    {"id": 2, "status": "carried"},
+                ],
+            }),
+            "--text-file", account,
+            ok=True,
+        )
+        fixture.progress_call(
+            "note", "code.review.resolved", "--round", "2",
+            "--data", json.dumps({
+                "check": "code",
+                "items": [
+                    {"id": 1, "status": "unchanged"},
+                    {"id": 2, "status": "corrected"},
+                ],
+            }),
+            "--text-file", account,
+            ok=False,
+        )
+        fixture.progress_call(
+            "construction-failure-check", "lot-1", "1", "1", "C3.9a", ok=False,
+        )
+
+        plan = fixture.plan.read_text(encoding="utf-8")
+        fixture.plan.write_text(
+            plan.replace(
+                "To verify: The changed value is covered.",
+                "Files: app.txt, migration-test.txt\n"
+                "To verify: The changed value and migration path are covered.",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
+        fixture.run("bash", failed, "lot-1", "1", "1", "C3.9b", ok=True)
+        failure_index, failure = next(
+            (index, entry) for index, entry in reversed(list(enumerate(fixture.journal())))
+            if entry.get("kind") == "attempt.failed"
+        )
+        code_review = failure["data"]["code_review"]
+        check("report" not in failure["data"], failure)
+        check(code_review["contract_blocked"] == [1], code_review)
+        check(code_review["required"] == [1, 2], code_review)
+        raw_lines = (fixture.workspace / "progress.jsonl").read_bytes().splitlines()
+        failure_proof = f"{failure_index}:{hashlib.sha256(raw_lines[failure_index]).hexdigest()}"
+
+        plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
+        fixture.run(
+            "bash", plan_commit, "lot-1", "fix: extend the task write set", ok=True,
+        )
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        predecessor = fixture.git("rev-parse", "HEAD^").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"plan/lot-1/{head}",
+            "-", "0", "0", predecessor, ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        fixture.close_gate(op)
+
+        started = fixture.workspace / "prompts" / "construction" / "attempt-started.sh"
+        fixture.run("bash", started, "lot-1", "1", "2", "-", ok=True)
+        identity = (fixture.workspace / "attempt-in-flight").read_text(encoding="utf-8")
+        check(f"retry {failure_proof}" in identity, identity)
+        fixture.set_attempt_context(2)
+        fixture.run_code_round(1, 0)
+        opening = next(
+            entry for entry in reversed(fixture.journal())
+            if entry.get("event") == "subagent-started"
+            and entry.get("kind") == "code-checker" and entry.get("attempt") == 2
+        )
+        manifest = json.loads(
+            (fixture.workspace / opening["data"]["manifest"]).read_text(encoding="utf-8")
+        )
+        check(manifest["previous"]["failure"] == failure_proof, manifest["previous"])
+        check(
+            [item["status"] for item in manifest["previous"]["resolution"]]
+            == ["contract-blocked", "carried"],
+            manifest["previous"],
+        )
+
+        journal = fixture.journal()
+        blocker = next(entry for entry in journal if entry.get("kind") == "code.review.blocked")
+        blocker["data"]["contract_blocked"] = []
+        with (fixture.workspace / "progress.jsonl").open("w", encoding="utf-8") as target:
+            for entry in journal:
+                target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        fixture.progress_call("construction-verdict-check", "history", ok=False)
     finally:
         fixture.close()
 

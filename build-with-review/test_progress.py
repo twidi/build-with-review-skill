@@ -730,6 +730,48 @@ def code_result_source(started, findings=0):
     return path
 
 
+def append_real_code_verdict(*, attempt, findings):
+    if not any(
+        entry.get("kind") == "verdict.consumed"
+        and (entry.get("data") or {}).get("check") == "design"
+        and entry.get("attempt") == attempt
+        for entry in journal_lines()
+    ):
+        append_checker_verdict(
+            "design", lot="lot-1", task=3, attempt=attempt,
+            round_number=1, findings=0,
+        )
+    gate = seed_review_gate(attempt=attempt)
+    opened = run_progress(
+        "subagent-started", "code-checker", "--round", "1",
+        "--data", json.dumps({"gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1", "--text", "code checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    started = [
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "code-checker" and entry.get("attempt") == attempt
+    ][-1]["data"]
+    result = code_result_source(started, findings=findings)
+    ended = run_progress(
+        "subagent-ended", "code-checker", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    verdict = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", json.dumps({
+            "check": "code", "outcome": "clean" if findings == 0 else "findings",
+        }),
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    return started
+
+
 def stage_workspace_plan(lot="lot-1"):
     source = os.path.join(WORKSPACE, "plans", f"{lot}-plan.md")
     relative = f"docs/plans/test-run-{lot}-plan.md"
@@ -2114,6 +2156,299 @@ def design_parity_stop_preserves_a_final_contract_blocker():
     check(review["contract_blocked"] == [1] and review["required"] == [1, 2], review)
     retry = run_progress("construction-retry-check", "lot-1", "3", "-")
     check(retry.returncode == 0 and retry.stdout.strip() != "-", retry.stdout + retry.stderr)
+
+
+def record_code_contract_blocker(round_number=1, findings=2):
+    account = os.path.join(BASE, "code-contract-blocker.md")
+    with open(account, "w", encoding="utf-8") as target:
+        parts = [
+            "## Finding 1 — contract-blocked\n"
+            "The required file is outside the frozen task contract."
+        ]
+        parts.extend(
+            f"## Finding {identity} — carried\n"
+            "The replacement attempt must preserve this finding."
+            for identity in range(2, findings + 1)
+        )
+        target.write("\n\n".join(parts) + "\n")
+    blocked = run_progress(
+        "note", "code.review.blocked", "--round", str(round_number),
+        "--text-file", account,
+        "--data", json.dumps({
+            "check": "code",
+            "items": [
+                {"id": 1, "status": "contract-blocked"},
+                *[
+                    {"id": identity, "status": "carried"}
+                    for identity in range(2, findings + 1)
+                ],
+            ],
+        }),
+    )
+    check(blocked.returncode == 0, blocked.stdout + blocked.stderr)
+
+
+def set_active_attempt_retry(proof, attempt):
+    seed_active_attempt(attempt=attempt)
+    marker = os.path.join(WORKSPACE, "attempt-in-flight")
+    lines = open(marker, encoding="utf-8").read().splitlines()
+    lines[1] = re.sub(r" retry .+$", f" retry {proof}", lines[1])
+    with open(marker, "w", encoding="utf-8") as target:
+        target.write("\n".join(lines) + "\n")
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"]["attempt"] = attempt
+    cfg["sessions"][CALLER]["annotations"]["bwr"]["attempt"] = attempt
+    set_config(cfg)
+
+
+def assert_code_contract_blocker_stop_preserves_retry(mode):
+    seed_active_attempt()
+    append_checker_verdict(
+        "code", lot="lot-1", task=3, attempt=2, round_number=1, findings=2,
+    )
+    record_code_contract_blocker()
+    stop_active_attempt(mode)
+    stopped = journal_lines()[-1]
+    review = stopped["data"]["code_review"]
+    check(review["contract_blocked"] == [1] and review["required"] == [1, 2], review)
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0 and retry.stdout.strip() != "-", retry.stdout + retry.stderr)
+
+
+@test
+def code_contract_blocker_pause_preserves_the_exact_retry_batch():
+    assert_code_contract_blocker_stop_preserves_retry("pause")
+
+
+@test
+def code_contract_blocker_abort_preserves_the_exact_retry_batch():
+    assert_code_contract_blocker_stop_preserves_retry("abort")
+
+
+@test
+def code_contract_blocker_composes_with_an_inherited_design_obligation():
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "accepted"},
+    ])
+    stop_active_attempt("pause")
+    inherited = run_progress("construction-retry-check", "lot-1", "3", "-").stdout.strip()
+    check(inherited != "-", "the accepted Design obligation has no retry proof")
+
+    set_active_attempt_retry(inherited, 3)
+    opening = open_design_round(1)
+    finish_design_round(1, opening, previous=[{
+        "id": 2, "status": "addressed",
+        "evidence": "The retry Design addresses the inherited accepted defect.",
+    }])
+    code_opening = append_real_code_verdict(attempt=3, findings=1)
+    code_manifest = json.load(open(
+        os.path.join(WORKSPACE, code_opening["manifest"]), encoding="utf-8",
+    ))
+    check(code_manifest["previous"] is None,
+          "a Design-only obligation was misrouted into the code checker")
+    record_code_contract_blocker(findings=1)
+
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "3", "3", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    data = json.loads(admitted.stdout)
+    check(data.get("retry") == inherited, data)
+    check(data["code_review"]["contract_blocked"] == [1], data)
+
+
+@test
+def code_contract_blocker_composes_two_code_obligations_for_one_manifest():
+    seed_active_attempt()
+    for round_number in range(1, 11):
+        append_checker_verdict(
+            "code", lot="lot-1", task=3, attempt=2,
+            round_number=round_number, findings=1,
+        )
+    resolution = os.path.join(BASE, "accepted-code-retry.md")
+    with open(resolution, "w", encoding="utf-8") as target:
+        target.write(
+            "## Finding 1 — accepted\n"
+            "The implementation must preserve this accepted code obligation.\n"
+        )
+    resolved = run_progress(
+        "note", "code.review.resolved", "--round", "10",
+        "--text-file", resolution,
+        "--data", '{"check":"code","items":[{"id":1,"status":"accepted"}]}',
+    )
+    check(resolved.returncode == 0, resolved.stdout + resolved.stderr)
+    handoff = run_progress("construction-failure-handoff", "lot-1", "3", "2")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report = os.path.join(WORKSPACE, "reports", "construction", "lot-1-task-3-try-2.md")
+    os.makedirs(os.path.dirname(report), exist_ok=True)
+    with open(report, "w", encoding="utf-8") as target:
+        target.write(
+            "# Failed attempt\n\n"
+            "## What failed\nThe final code checker found one accepted defect.\n\n"
+            "## Classification\nC3.9a — retry the accepted implementation obligation.\n\n"
+            "## Evidence read\nThe immutable final code-checker batch.\n\n"
+            + handoff.stdout
+        )
+    failure = run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9a")
+    check(failure.returncode == 0, failure.stdout + failure.stderr)
+    appended = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", failure.stdout.strip(),
+    )
+    check(appended.returncode == 0, appended.stdout + appended.stderr)
+    retry = run_progress(
+        "construction-retry-check", "lot-1", "3",
+        "reports/construction/lot-1-task-3-try-2.md",
+    )
+    check(retry.returncode == 0, retry.stdout + retry.stderr)
+    inherited = retry.stdout.strip()
+    check(re.fullmatch(r"[0-9]+:[0-9a-f]{64}", inherited),
+          "the accepted code obligation has no retry proof")
+
+    set_active_attempt_retry(inherited, 3)
+    append_real_code_verdict(attempt=3, findings=1)
+    record_code_contract_blocker(findings=1)
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "3", "3", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    data = json.loads(admitted.stdout)
+    check(data.get("retry") == inherited, data)
+    appended = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", admitted.stdout.strip(),
+    )
+    check(appended.returncode == 0, appended.stdout + appended.stderr)
+    composed = run_progress("construction-retry-check", "lot-1", "3", "-").stdout.strip()
+    check(composed not in {"-", inherited}, "the two obligations have no composed proof")
+
+    set_active_attempt_retry(composed, 4)
+    append_real_code_verdict(attempt=4, findings=0)
+    opening = next(
+        entry for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "code-checker" and entry.get("attempt") == 4
+    )
+    manifest = json.load(open(
+        os.path.join(WORKSPACE, opening["data"]["manifest"]), encoding="utf-8",
+    ))
+    previous = manifest["previous"]
+    check(previous["source"] == "retry-set" and previous["failure"] == composed, previous)
+    check(len(previous["members"]) == 2, previous)
+    check([item["id"] for item in previous["findings"]] == [1, 2], previous)
+    failed_again = run_progress(
+        "construction-failure-check", "lot-1", "3", "4", "C3.9a",
+    )
+    check(failed_again.returncode == 0, failed_again.stdout + failed_again.stderr)
+    check(json.loads(failed_again.stdout) == {
+        "attempt": 4, "classification": "C3.9a", "retry": composed,
+    }, failed_again.stdout)
+    appended = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", failed_again.stdout.strip(),
+    )
+    check(appended.returncode == 0, appended.stdout + appended.stderr)
+    propagated = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(propagated.returncode == 0 and propagated.stdout.strip() == composed,
+          propagated.stdout + propagated.stderr)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    original_lines = open(journal_path, encoding="utf-8").read().splitlines()
+    terminal_index = int(composed.split(":", 1)[0])
+    terminal = json.loads(original_lines[terminal_index])
+    terminal["data"].pop("retry")
+    changed_lines = list(original_lines)
+    changed_lines[terminal_index] = json.dumps(terminal, separators=(",", ":"))
+    with open(journal_path, "w", encoding="utf-8") as target:
+        target.write("\n".join(changed_lines) + "\n")
+    damaged = run_progress("construction-verdict-check", "history")
+    check(damaged.returncode != 0, "historical replay accepted an omitted inherited proof")
+    with open(journal_path, "w", encoding="utf-8") as target:
+        target.write("\n".join(original_lines) + "\n")
+
+    manifest_path = os.path.join(WORKSPACE, opening["data"]["manifest"])
+    original_manifest = open(manifest_path, encoding="utf-8").read()
+    damaged_manifest = json.loads(original_manifest)
+    damaged_manifest["previous"]["members"].pop(0)
+    damaged_manifest["previous"]["findings"] = damaged_manifest["previous"]["findings"][1:]
+    damaged_manifest["previous"]["resolution"] = damaged_manifest["previous"]["resolution"][1:]
+    with open(manifest_path, "w", encoding="utf-8") as target:
+        json.dump(damaged_manifest, target, separators=(",", ":"))
+        target.write("\n")
+    damaged = run_progress("construction-verdict-check", "history")
+    check(damaged.returncode != 0, "historical replay accepted an omitted retry-set member")
+    with open(manifest_path, "w", encoding="utf-8") as target:
+        target.write(original_manifest)
+
+
+def assert_composed_code_contract_blocker_stop_reaches_both_checkers(mode):
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "accepted"},
+    ])
+    stop_active_attempt("pause")
+    inherited = run_progress("construction-retry-check", "lot-1", "3", "-").stdout.strip()
+    check(inherited != "-", "the accepted Design obligation has no retry proof")
+
+    set_active_attempt_retry(inherited, 3)
+    design_opening = open_design_round(1)
+    finish_design_round(1, design_opening, previous=[{
+        "id": 2, "status": "addressed",
+        "evidence": "The retry Design addresses the inherited accepted defect.",
+    }])
+    append_real_code_verdict(attempt=3, findings=1)
+    record_code_contract_blocker(findings=1)
+    stop_active_attempt(mode, attempt=3)
+    stopped = journal_lines()[-1]
+    check(stopped["kind"] == {"pause": "paused", "abort": "aborted"}[mode]
+          and stopped["data"]["retry"] == inherited, stopped)
+    check(stopped["data"]["code_review"]["contract_blocked"] == [1], stopped)
+    composed = run_progress("construction-retry-check", "lot-1", "3", "-").stdout.strip()
+    check(composed not in {"-", inherited}, "the stopped attempt lost one obligation")
+
+    set_active_attempt_retry(composed, 4)
+    design_opening = open_design_round(1)
+    design_manifest = json.load(open(
+        os.path.join(WORKSPACE, design_opening["manifest"]), encoding="utf-8",
+    ))
+    check(design_manifest["previous"]["failure"] == composed, design_manifest["previous"])
+    check([item["id"] for item in design_manifest["previous"]["findings"]] == [2],
+          design_manifest["previous"])
+    finish_design_round(1, design_opening, previous=[{
+        "id": 2, "status": "addressed",
+        "evidence": "The next retry Design still addresses the inherited defect.",
+    }])
+    code_opening = append_real_code_verdict(attempt=4, findings=0)
+    code_manifest = json.load(open(
+        os.path.join(WORKSPACE, code_opening["manifest"]), encoding="utf-8",
+    ))
+    check(code_manifest["previous"]["failure"] == composed, code_manifest["previous"])
+    check([item["id"] for item in code_manifest["previous"]["findings"]] == [1],
+          code_manifest["previous"])
+    succeeded = run_progress(
+        "note", "attempt.succeeded", "--task", "3",
+        "--data", json.dumps({
+            "attempt": 4, "lot": "lot-1", "sha": "a" * 40,
+            "gate": "b" * 64, "retry": composed,
+        }),
+    )
+    check(succeeded.returncode == 0, succeeded.stdout + succeeded.stderr)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+
+@test
+def inherited_design_and_code_obligations_survive_a_pause_until_success():
+    assert_composed_code_contract_blocker_stop_reaches_both_checkers("pause")
+
+
+@test
+def inherited_design_and_code_obligations_survive_an_abort_until_success():
+    assert_composed_code_contract_blocker_stop_reaches_both_checkers("abort")
 
 
 def assert_stopped_design_obligation_reaches_retry(mode):
@@ -6482,6 +6817,31 @@ def design_checker_proves_parent_product_closure_without_becoming_lot_review():
         and "attempt-started.sh" in blocked_route,
         "the controller-contract correction must publish and establish a baseline before retry",
     )
+
+
+@test
+def code_contract_blocker_stops_its_current_round_and_uses_the_plan_fault_route():
+    with open(os.path.join(HERE, "prompts", "construction", "implementer.md"), encoding="utf-8") as f:
+        implementer = " ".join(f.read().split())
+    with open(os.path.join(HERE, "prompts", "construction", "MODE.md"), encoding="utf-8") as f:
+        mode = " ".join(f.read().split())
+    with open(os.path.join(HERE, "SKILL.md"), encoding="utf-8") as f:
+        skill = " ".join(f.read().split())
+
+    for contract in (implementer, mode, skill):
+        check("code.review.blocked" in contract, "a direct consumer omits the code blocker terminal")
+        check("contract-blocked" in contract and "carried" in contract,
+              "a direct consumer omits the complete blocker batch")
+        check("composes" in contract and "matching first checker" in contract,
+              "a direct consumer lets the blocker replace an inherited obligation")
+    check("every code round" in implementer and "Do not spend later rounds" in implementer,
+          "the implementer can still wait for round 10")
+    check("not `code.review.resolved`" in implementer,
+          "the blocker can still impersonate an implementer-owned settlement")
+    check("does not wait for round 10" in mode and "Before you edit the plan" in mode,
+          "the controller can change authority before the blocker is frozen")
+    check("reportless" in mode and "matching first checker" in mode,
+          "the controller does not preserve the exact retry obligation")
 
 
 @test

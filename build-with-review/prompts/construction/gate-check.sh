@@ -435,7 +435,9 @@ elif mode == "task":
     later = [json.loads(line) for line in raw_lines[int(code_index)+1:]]
     for item in later:
         item_data = item.get("data") or {}
-        if (item.get("kind") in {"verdict.consumed", "code.review.resolved"}
+        if (item.get("kind") in {
+                "verdict.consumed", "code.review.resolved", "code.review.blocked",
+            }
                 and item.get("lot") == lot
                 and item.get("task") == task and item.get("attempt") == attempt
                 and item_data.get("check") == "code"):

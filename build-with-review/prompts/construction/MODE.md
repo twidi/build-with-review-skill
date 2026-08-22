@@ -1602,6 +1602,17 @@ Read what it is asking, and answer in one of three ways:
 - **The plan is at fault** — it is silent where it should not be, or it contradicts
   itself. Use the following controller sequence before the ordinary routing:
 
+  A plan fault found by a code checker does not wait for round 10. Before you edit the
+  plan, require the live implementer to record the exact current batch through
+  `code.review.blocked`. It marks every finding `contract-blocked` or `carried`, with at
+  least one blocked identity. It is not `code.review.resolved`. The note freezes the
+  result and becomes the reportless retry obligation. If that note already exists, never
+  write it again. If the attempt already carries an accepted Design or code obligation,
+  the blocker composes with it. Neither obligation replaces the other. Every later
+  failure, pause or abort preserves both until a successful replacement attempt gives
+  each one to its matching first checker. If the blocker note is absent, do not edit the
+  plan or close the attempt yet.
+
   1. **Fix the plan yourself**, in the workspace copy. You wrote it: a silence is yours to
      fill, a contradiction yours to resolve. **This gesture exists nowhere else** — a
      failed attempt says nothing about the plan, so no failure route corrects it.
@@ -1616,11 +1627,13 @@ Read what it is asking, and answer in one of three ways:
      <workspace>/prompts/construction/attempt-failed.sh <lot> <N> <K> <C3.9b|C3.9d>
      ```
 
-     A round-10 frozen-task-contract finding already has one exact
-     `design.review.blocked` note from the implementer. The closer authenticates its
-     immutable complete batch. It uses the existing reportless plan-fault route and
-     carries every finding to the next attempt. Do not request a settlement or failure
-     report for this controller-owned blocker.
+     A round-10 frozen-task-contract Design finding already has one exact
+     `design.review.blocked` note from the implementer. A code finding against the
+     controller contract has `code.review.blocked` at the round where it was found. The
+     closer authenticates either immutable complete batch. It uses the reportless
+     plan-fault route and carries every finding to the matching first checker in the next
+     attempt. Do not request a settlement or failure report for either controller-owned
+     blocker.
 
      **A blocked implementer may have written code before it stopped**, and none of it may
      reach the next attempt — that is the whole point of one session per attempt.

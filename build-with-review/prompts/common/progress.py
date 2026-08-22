@@ -74,7 +74,7 @@ NOTE_KINDS = {
     "not-converging", "sublot.oversized", "reach.not-closed", "bound.spent",
     "rewind.done", "fixer.dispatched", "verdict.consumed", "design.review.resolved",
     "design.review.blocked",
-    "code.review.resolved",
+    "code.review.resolved", "code.review.blocked",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -108,6 +108,7 @@ CONSTRUCTION_CLASSIFICATIONS = {"C3.9a", "C3.9b", "C3.9c", "C3.9d"}
 CONSTRUCTION_UNUSABLE_RESULTS = {"error", "empty", "lost", "unusable"}
 CODE_CORRECTION_STATUSES = {"corrected", "unchanged"}
 CODE_FINAL_RESOLUTION_STATUSES = {"accepted", "refuted", "alternative"}
+CODE_BLOCKER_STATUSES = {"contract-blocked", "carried"}
 DESIGN_CORRECTION_STATUSES = {"corrected", "unchanged"}
 DESIGN_FINAL_RESOLUTION_STATUSES = {"accepted", "refuted", "alternative"}
 REPORT_COUNT_KEYS = {"critical", "important", "minor", "decision"}
@@ -2554,8 +2555,7 @@ def previous_code_batch(entries, base, subject):
         retry = base.get("retry")
         if not retry:
             return None, None
-        _, _, report = accepted_retry_from_proof(entries, retry, subject)
-        if "code_review" not in report:
+        if not retry_code_members(entries, retry, subject):
             return None, None
         return retry_code_batch(entries, retry, subject), None
     prior_round = base["round"] - 1
@@ -2713,8 +2713,13 @@ def validate_code_generation_history(entries, before, logical, subject):
     except ValueError:
         frozen_previous = object()
     if frozen_previous != previous:
-        fail(f"{subject}'s manifest does not carry its exact prior findings account",
-             manifest_previous.stderr or manifest_previous.stdout)
+        fail(f"{subject}'s manifest does not carry its exact prior findings account", {
+            "lot": logical["lot"], "task": logical["task"],
+            "attempt": logical["attempt"], "round": logical["round"],
+            "manifest": logical["manifest"],
+            "frozen": manifest_previous.stderr or manifest_previous.stdout,
+            "expected": previous,
+        })
     reused = [entry for entry in entries[:start_index]
               if entry.get("event") == "subagent-started" and entry.get("kind") == "code-checker"
               and note_data(entry).get("gate") == logical["gate"]]
@@ -3294,8 +3299,7 @@ def design_previous_batch(entries, base, subject):
         retry = base.get("retry")
         if not retry:
             return None
-        _, _, report = accepted_retry_from_proof(entries, retry, subject)
-        if "design_review" not in report:
+        if not retry_design_members(entries, retry, subject):
             return None
         return retry_design_batch(entries, retry, subject)
     prior_round = base["round"] - 1
@@ -3355,6 +3359,13 @@ def code_verdicts(entries, before, lot, task, attempt):
 def code_resolutions(entries, before, lot, task, attempt):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "code.review.resolved"
+            and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("attempt") == attempt]
+
+
+def code_blockers(entries, before, lot, task, attempt):
+    return [(index, entry) for index, entry in enumerate(entries[:before])
+            if entry.get("event") == "note" and entry.get("kind") == "code.review.blocked"
             and entry.get("lot") == lot and entry.get("task") == task
             and entry.get("attempt") == attempt]
 
@@ -3454,6 +3465,8 @@ def final_design_failure_handoff(entries, before, lot, task, attempt, subject):
 
 
 def final_code_failure_handoff(entries, before, lot, task, attempt, subject):
+    if code_blockers(entries, before, lot, task, attempt):
+        return None
     verdicts = [(index, entry) for index, entry in code_verdicts(
         entries, before, lot, task, attempt,
     ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["code"]]
@@ -3512,12 +3525,62 @@ def final_code_failure_handoff(entries, before, lot, task, attempt, subject):
     return {"unresolved": False, "handoff": handoff, "accepted": accepted}
 
 
+def code_contract_failure_handoff(entries, before, lot, task, attempt, subject):
+    blockers = code_blockers(entries, before, lot, task, attempt)
+    if not blockers:
+        return None
+    if len(blockers) != 1:
+        fail(f"{subject} has more than one code-review controller-contract blocker")
+    blocker_index, blocker = blockers[0]
+    blocker_data = note_data(blocker)
+    round_number = blocker_data.get("round")
+    matches = [(index, entry) for index, entry in code_verdicts(
+        entries, blocker_index, lot, task, attempt,
+    ) if note_data(entry).get("round") == round_number]
+    if len(matches) != 1:
+        fail(f"{subject}'s code-review blocker has no exact checker verdict")
+    verdict_index, verdict = matches[0]
+    verdict_data = note_data(verdict)
+    result, findings = immutable_code_result(verdict_data, subject)
+    items = blocker_data.get("items")
+    expected = canonical_code_blocker(
+        construction_frozen_logical(
+            entries, blocker_index,
+            {key: blocker_data[key] for key in ("check", "lot", "task", "attempt", "round")},
+            subject,
+        ),
+        verdict_index, verdict, items,
+    )
+    if blocker_data != expected:
+        fail(f"{subject}'s code-review blocker changed", expected)
+    obligation = {
+        "schema": 1,
+        "verdict": journal_line_proof(verdict_index),
+        "blocked": journal_line_proof(blocker_index),
+        "result": verdict_data["report"],
+        "result_sha256": verdict_data["report_sha256"],
+        "checker_result": result,
+        "items": items,
+        "required": [item["id"] for item in findings],
+        "contract_blocked": blocker_data["contract_blocked"],
+    }
+    return {
+        "unresolved": False,
+        "blocked": True,
+        "obligation": obligation,
+        "required": obligation["required"],
+        "contract_blocked": obligation["contract_blocked"],
+    }
+
+
 def failure_report_state(entries, before, lot, task, attempt, classification, subject):
     design_state = final_design_failure_handoff(entries, before, lot, task, attempt, subject)
     code_state = final_code_failure_handoff(entries, before, lot, task, attempt, subject)
-    if design_state is not None and code_state is not None:
-        fail(f"{subject} has both final design and code-review failure obligations")
-    state = design_state if design_state is not None else code_state
+    code_blocked = code_contract_failure_handoff(entries, before, lot, task, attempt, subject)
+    states = [state for state in (design_state, code_state, code_blocked) if state is not None]
+    if len(states) > 1:
+        fail(f"{subject} has conflicting checker failure obligations")
+    state = states[0] if states else None
     if state is None:
         return None
     if state.get("unresolved"):
@@ -3527,6 +3590,10 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
         if classification not in {"C3.9b", "C3.9d"}:
             fail(f"{subject} must classify a final task-contract blocker as C3.9b or C3.9d")
         return {"design_review": compact_design_review_obligation(state)}
+    if code_blocked is not None and state.get("blocked"):
+        if classification not in {"C3.9b", "C3.9d"}:
+            fail(f"{subject} must classify a code-review contract blocker as C3.9b or C3.9d")
+        return {"code_review": compact_code_review_obligation(state)}
     if review == "design" and classification == "C3.9a":
         fail(f"{subject} cannot classify an accepted pre-implementation Design defect as C3.9a")
     relative = f"reports/construction/{lot}-task-{task}-try-{attempt}.md"
@@ -3573,12 +3640,8 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
 def accepted_failure_from_proof(entries, proof, subject):
     index, entry = journal_entry_from_proof(entries, proof, subject)
     if entry.get("event") != "note" or entry.get("kind") != "attempt.failed":
-        fail(f"{subject} does not identify a final checker-obligation failure")
+        fail(f"{subject} does not identify a checker-obligation failure")
     data = note_data(entry)
-    reviews = [name for name in ("design_review", "code_review")
-               if isinstance(data.get(name), dict)]
-    if len(reviews) != 1:
-        fail(f"{subject} does not identify one final checker correction obligation")
     expected_report = failure_report_state(
         entries, index, entry.get("lot"), entry.get("task"), data.get("attempt"),
         data.get("classification"), subject,
@@ -3587,9 +3650,21 @@ def accepted_failure_from_proof(entries, proof, subject):
         "attempt": data.get("attempt"), "classification": data.get("classification"),
         **(expected_report or {}),
     }
+    inherited = data.get("retry")
+    if inherited is not None:
+        accepted_retry_from_proof(entries, inherited, f"{subject}'s inherited retry obligation")
+        expected["retry"] = inherited
+    reviews = [name for name in ("design_review", "code_review")
+               if isinstance(expected.get(name), dict)]
+    if len(reviews) != 1 and not (not reviews and inherited is not None):
+        fail(f"{subject} does not identify one checker correction obligation")
     if data != expected:
-        fail(f"{subject}'s final checker-obligation failure proof changed", expected)
-    return index, entry, expected_report
+        fail(f"{subject}'s checker-obligation failure proof changed", expected)
+    return index, entry, {
+        key: expected[key] for key in (
+            "report", "report_sha256", "design_review", "code_review", "retry",
+        ) if key in expected
+    }
 
 
 def compact_design_review_obligation(state):
@@ -3611,6 +3686,17 @@ def compact_design_review_obligation(state):
     }
 
 
+def compact_code_review_obligation(state):
+    obligation = state["obligation"]
+    return {
+        "verdict": obligation["verdict"],
+        "blocked": obligation["blocked"],
+        "result_sha256": obligation["result_sha256"],
+        "required": state["required"],
+        "contract_blocked": state["contract_blocked"],
+    }
+
+
 def attempt_stop_design_state(entries, before, lot, task, attempt, subject):
     state = final_design_failure_handoff(
         entries, before, lot, task, attempt, subject,
@@ -3620,6 +3706,10 @@ def attempt_stop_design_state(entries, before, lot, task, attempt, subject):
     if not state.get("blocked") and not state.get("accepted"):
         return None
     return state
+
+
+def attempt_stop_code_state(entries, before, lot, task, attempt, subject):
+    return code_contract_failure_handoff(entries, before, lot, task, attempt, subject)
 
 
 def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=None):
@@ -3632,28 +3722,42 @@ def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=
             or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", entry["lot"]) \
             or not construction_positive_integer(entry.get("task")):
         fail(f"{subject} has malformed construction identity")
-    state = attempt_stop_design_state(
+    design_state = attempt_stop_design_state(
         entries, before, entry["lot"], entry["task"], attempt_number, subject,
     )
-    if state is not None:
-        return {**base, "design_review": compact_design_review_obligation(state)}
+    code_state = attempt_stop_code_state(
+        entries, before, entry["lot"], entry["task"], attempt_number, subject,
+    )
+    if design_state is not None and code_state is not None:
+        fail(f"{subject} has conflicting checker obligations")
+    expected = dict(base)
+    if design_state is not None:
+        expected["design_review"] = compact_design_review_obligation(design_state)
+    if code_state is not None:
+        expected["code_review"] = compact_code_review_obligation(code_state)
     retry = inherited_retry
     if retry is None:
         retry = outstanding_retry_proof(entries[:before], entry["lot"])
     if retry is not None:
         accepted_retry_from_proof(entries, retry, f"{subject}'s inherited retry obligation")
-        return {**base, "retry": retry}
-    return base
+        expected["retry"] = retry
+    return expected
 
 
 def accepted_stop_from_proof(entries, proof, subject):
     index, entry = journal_entry_from_proof(entries, proof, subject)
     if entry.get("event") != "note" or entry.get("kind") not in {"paused", "aborted"}:
-        fail(f"{subject} does not identify a stopped final Design obligation")
+        fail(f"{subject} does not identify a stopped checker obligation")
     expected = expected_attempt_stop_data(entries, index, entry, subject)
-    if note_data(entry) != expected or not isinstance(expected.get("design_review"), dict):
-        fail(f"{subject} does not identify one final Design correction obligation")
-    return index, entry, {"design_review": expected["design_review"]}
+    reviews = [name for name in ("design_review", "code_review")
+               if isinstance(expected.get(name), dict)]
+    if note_data(entry) != expected \
+            or len(reviews) != 1 and not (not reviews and expected.get("retry") is not None):
+        fail(f"{subject} does not identify one checker correction obligation")
+    return index, entry, {
+        key: expected[key] for key in ("design_review", "code_review", "retry")
+        if key in expected
+    }
 
 
 def accepted_retry_from_proof(entries, proof, subject):
@@ -3662,7 +3766,7 @@ def accepted_retry_from_proof(entries, proof, subject):
         return accepted_failure_from_proof(entries, proof, subject)
     if entry.get("event") == "note" and entry.get("kind") in {"paused", "aborted"}:
         return accepted_stop_from_proof(entries, proof, subject)
-    fail(f"{subject} does not identify a final checker correction obligation")
+    fail(f"{subject} does not identify a checker correction obligation")
 
 
 def outstanding_retry_proof(entries, lot):
@@ -3694,10 +3798,40 @@ def outstanding_retry_proof(entries, lot):
     return None
 
 
-def retry_code_batch(entries, proof, subject):
-    _, _, report = accepted_retry_from_proof(entries, proof, subject)
-    if "code_review" not in report or "report" not in report:
-        fail(f"{subject} does not carry an accepted code obligation")
+def retry_obligation_chain(entries, proof, subject):
+    proof_index, proof_entry, report = accepted_retry_from_proof(entries, proof, subject)
+    inherited = report.get("retry")
+    chain = retry_obligation_chain(
+        entries, inherited, f"{subject}'s inherited obligation",
+    ) if inherited is not None else []
+    chain.append((proof, proof_index, proof_entry, report))
+    return chain
+
+
+def retry_code_member(entries, proof, proof_index, proof_entry, report, subject):
+    compact = report["code_review"]
+    if "blocked" in compact:
+        state = code_contract_failure_handoff(
+            entries, proof_index, proof_entry.get("lot"), proof_entry.get("task"),
+            note_data(proof_entry).get("attempt"), subject,
+        )
+        if state is None or not state.get("blocked"):
+            fail(f"{subject}'s retry proof has no code-review controller-contract blocker")
+        obligation = state["obligation"]
+        findings = [
+            {key: item[key] for key in ("id", "where", "what", "why", "impact")}
+            for item in obligation["checker_result"]["findings"]
+        ]
+        return {
+            "source": "retry", "failure": proof,
+            "result": obligation["result"],
+            "result_sha256": obligation["result_sha256"],
+            "findings": findings,
+            "resolution": obligation["items"],
+            "resolution_proof": obligation["blocked"],
+        }
+    if "report" not in report:
+        fail(f"{subject} has no final code-review failure report")
     handoff_path = exact_real_file(WORKSPACE, report["report"], f"{subject}'s failure report")
     text = Path(handoff_path).read_text(encoding="utf-8")
     match = re.search(r"(?ms)^## Final code-review handoff\n```json\n([^\n]+)\n```\s*$", text)
@@ -3716,10 +3850,39 @@ def retry_code_batch(entries, proof, subject):
     }
 
 
-def retry_design_batch(entries, proof, subject):
-    proof_index, proof_entry, report = accepted_retry_from_proof(entries, proof, subject)
-    if "design_review" not in report:
-        fail(f"{subject} does not carry a final Design correction obligation")
+def materialize_retry_batch(members, proof):
+    if len(members) == 1:
+        return {**members[0], "failure": proof}
+    findings = []
+    resolutions = []
+    for member in members:
+        for finding, resolution in zip(member["findings"], member["resolution"], strict=True):
+            identity = len(findings) + 1
+            findings.append({**finding, "id": identity})
+            resolutions.append({**resolution, "id": identity})
+    return {
+        "source": "retry-set", "failure": proof,
+        "members": members, "findings": findings, "resolution": resolutions,
+    }
+
+
+def retry_code_members(entries, proof, subject):
+    return [
+        retry_code_member(entries, member_proof, proof_index, proof_entry, report, subject)
+        for member_proof, proof_index, proof_entry, report in retry_obligation_chain(
+            entries, proof, subject,
+        ) if "code_review" in report
+    ]
+
+
+def retry_code_batch(entries, proof, subject):
+    members = retry_code_members(entries, proof, subject)
+    if not members:
+        fail(f"{subject} does not carry an accepted code obligation")
+    return materialize_retry_batch(members, proof)
+
+
+def retry_design_member(entries, proof, proof_index, proof_entry, report, subject):
     compact = report["design_review"]
     if "blocked" in compact:
         state = final_design_failure_handoff(
@@ -3781,6 +3944,22 @@ def retry_design_batch(entries, proof, subject):
     }
 
 
+def retry_design_members(entries, proof, subject):
+    return [
+        retry_design_member(entries, member_proof, proof_index, proof_entry, report, subject)
+        for member_proof, proof_index, proof_entry, report in retry_obligation_chain(
+            entries, proof, subject,
+        ) if "design_review" in report
+    ]
+
+
+def retry_design_batch(entries, proof, subject):
+    members = retry_design_members(entries, proof, subject)
+    if not members:
+        fail(f"{subject} does not carry a final Design correction obligation")
+    return materialize_retry_batch(members, proof)
+
+
 def canonical_code_resolution(logical, verdict_index, verdict, items, disagreement_sha256=None):
     statuses = [item["status"] for item in items]
     result = {
@@ -3801,6 +3980,44 @@ def canonical_code_resolution(logical, verdict_index, verdict, items, disagreeme
         "refuted": statuses.count("refuted"),
         "alternative": statuses.count("alternative"),
         "disagreement_sha256": disagreement_sha256,
+    }
+
+
+def immutable_code_result(verdict_data, subject):
+    result_relative = verdict_data.get("report")
+    result_path = exact_real_file(WORKSPACE, result_relative, f"{subject}'s code-checker result")
+    try:
+        payload = Path(result_path).read_bytes()
+        result = json.loads(payload)
+    except (OSError, UnicodeError, ValueError) as exc:
+        fail(f"{subject}'s code-checker result is malformed", exc)
+    if sha256_bytes(payload) != verdict_data.get("report_sha256"):
+        fail(f"{subject}'s code-checker result changed")
+    findings = result.get("findings") if isinstance(result, dict) else None
+    expected_ids = list(range(1, verdict_data.get("findings", 0) + 1))
+    if not isinstance(findings, list) or [
+        item.get("id") for item in findings if isinstance(item, dict)
+    ] != expected_ids or len(findings) != len(expected_ids):
+        fail(f"{subject}'s code-checker result has no exact findings batch")
+    return result, findings
+
+
+def canonical_code_blocker(logical, verdict_index, verdict, items):
+    verdict_data = note_data(verdict)
+    statuses = [item["status"] for item in items]
+    return {
+        **logical,
+        "verdict": journal_line_proof(verdict_index),
+        "findings": verdict_data["findings"],
+        "items": items,
+        "result": verdict_data["report"],
+        "result_sha256": verdict_data["report_sha256"],
+        "required": [item["id"] for item in items],
+        "contract_blocked": [
+            item["id"] for item in items if item["status"] == "contract-blocked"
+        ],
+        "carried": [item["id"] for item in items if item["status"] == "carried"],
+        "blocked": statuses.count("contract-blocked"),
     }
 
 
@@ -4104,6 +4321,10 @@ def normalize_code_resolution(entries, data, text, context, round_number):
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
     )):
         fail("this code-review round already has a resolution")
+    if any(note_data(entry).get("round") == logical["round"] for _, entry in code_blockers(
+        entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+    )):
+        fail("this code-review round already has a controller-contract blocker")
     verdicts = code_verdicts(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
     )
@@ -4175,6 +4396,10 @@ def validate_code_resolution_entry(entries, index, entry):
     )
     if any(note_data(candidate).get("round") == logical["round"] for _, candidate in prior):
         fail("a code-review round has more than one durable resolution")
+    if any(note_data(candidate).get("round") == logical["round"] for _, candidate in code_blockers(
+        entries, index, logical["lot"], logical["task"], logical["attempt"],
+    )):
+        fail("a code-review settlement follows a controller-contract blocker")
     verdicts = code_verdicts(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
     )
@@ -4218,6 +4443,100 @@ def validate_code_resolution_entry(entries, index, entry):
         fail("a durable final code-review resolution changes its checker proof or counts", expected)
 
 
+def normalize_code_blocker(entries, data, text, context, round_number):
+    if not isinstance(data, dict) or set(data) != {"check", "items"} \
+            or data.get("check") != "code":
+        fail("a code-review controller-contract blocker has malformed structured data", data)
+    validate_construction_verdict_history(entries)
+    base = construction_logical_identity(
+        entries, context, "code", round_number, "a code-review controller-contract blocker",
+    )
+    logical = construction_frozen_logical(
+        entries, len(entries), base, "a code-review controller-contract blocker",
+    )
+    if code_blockers(entries, len(entries), logical["lot"], logical["task"], logical["attempt"]):
+        fail("this attempt already has a code-review controller-contract blocker")
+    if any(note_data(entry).get("round") == logical["round"] for _, entry in code_resolutions(
+        entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+    )):
+        fail("this code-review batch already has a settlement")
+    matches = [(index, entry) for index, entry in code_verdicts(
+        entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+    ) if note_data(entry).get("round") == logical["round"]]
+    if len(matches) != 1:
+        fail("a code-review controller-contract blocker has no exact findings verdict")
+    verdict_index, verdict = matches[0]
+    verdict_data = note_data(verdict)
+    if verdict_data.get("outcome") != "findings" \
+            or not construction_positive_integer(verdict_data.get("findings")):
+        fail("a code-review controller-contract blocker requires its exact findings verdict")
+    supplied = data.get("items")
+    expected_ids = list(range(1, verdict_data["findings"] + 1))
+    if not isinstance(supplied, list) or len(supplied) != len(expected_ids) \
+            or any(not isinstance(item, dict) or set(item) != {"id", "status"}
+                   or item.get("status") not in CODE_BLOCKER_STATUSES for item in supplied) \
+            or [item.get("id") for item in supplied] != expected_ids \
+            or not any(item["status"] == "contract-blocked" for item in supplied):
+        fail("a code-review blocker has no exact contract-blocked and carried account")
+    detailed = code_resolution_text_items(
+        text, "the code-review controller-contract blocker", CODE_BLOCKER_STATUSES,
+    )
+    if [{key: item[key] for key in ("id", "status")} for item in detailed] != supplied:
+        fail("the code-review blocker text contradicts its structured items")
+    current = construction_plan_generation(base, "the code-review controller-contract blocker")
+    for key in (
+        "contract_sha256", "plan_ownership_sha256", "design_sha256",
+        "plan_projection_sha256", "disagreement_sha256",
+    ):
+        if current.get(key) != logical.get(key):
+            fail("a code-review blocker follows a changed plan generation")
+    immutable_code_result(verdict_data, "the code-review controller-contract blocker")
+    return canonical_code_blocker(logical, verdict_index, verdict, detailed)
+
+
+def validate_code_blocker_entry(entries, index, entry):
+    data = note_data(entry)
+    base = {key: data.get(key) for key in ("check", "lot", "task", "attempt", "round")}
+    if base["check"] != "code" or not isinstance(base["lot"], str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", base["lot"]) \
+            or not construction_positive_integer(base["task"]) \
+            or not construction_positive_integer(base["attempt"]) \
+            or not construction_positive_integer(base["round"]) \
+            or base["round"] > CONSTRUCTION_CHECKER_ROUNDS["code"] \
+            or any(entry.get(key) != base[key] for key in ("lot", "task", "attempt", "round")):
+        fail("a durable code-review controller-contract blocker has malformed identity")
+    logical = construction_frozen_logical(
+        entries, index, base, "a durable code-review controller-contract blocker",
+    )
+    if code_blockers(entries, index, logical["lot"], logical["task"], logical["attempt"]):
+        fail("an attempt has more than one durable code-review controller-contract blocker")
+    if any(note_data(candidate).get("round") == logical["round"] for _, candidate in code_resolutions(
+        entries, index, logical["lot"], logical["task"], logical["attempt"],
+    )):
+        fail("a code-review blocker follows a settlement for the same batch")
+    matches = [(position, candidate) for position, candidate in code_verdicts(
+        entries, index, logical["lot"], logical["task"], logical["attempt"],
+    ) if note_data(candidate).get("round") == logical["round"]]
+    if len(matches) != 1:
+        fail("a durable code-review blocker has no exact findings verdict")
+    verdict_index, verdict = matches[0]
+    verdict_data = note_data(verdict)
+    if verdict_data.get("outcome") != "findings" \
+            or not construction_positive_integer(verdict_data.get("findings")):
+        fail("a durable code-review blocker does not follow exact findings")
+    items = data.get("items")
+    if not isinstance(items, list) or len(items) != verdict_data["findings"] \
+            or code_resolution_text_items(
+                entry.get("text"), "the durable code-review controller-contract blocker",
+                CODE_BLOCKER_STATUSES,
+            ) != items or not any(item["status"] == "contract-blocked" for item in items):
+        fail("a durable code-review blocker has no complete matching item account")
+    immutable_code_result(verdict_data, "the durable code-review controller-contract blocker")
+    expected = canonical_code_blocker(logical, verdict_index, verdict, items)
+    if data != expected:
+        fail("a durable code-review blocker changes its immutable batch", expected)
+
+
 def normalize_attempt_failed(entries, data, context):
     if not isinstance(data, dict):
         fail("attempt.failed requires structured failure data")
@@ -4232,15 +4551,12 @@ def normalize_attempt_failed(entries, data, context):
         entries, len(entries), identity["lot"], identity["task"], identity["attempt"],
         base["classification"], "the attempt failure",
     )
-    if report is not None:
-        expected = {**base, **report}
-    elif identity.get("retry"):
+    expected = {**base, **(report or {})}
+    if identity.get("retry"):
         accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
-        expected = {**base, "retry": identity["retry"]}
-    else:
-        expected = base
+        expected["retry"] = identity["retry"]
     if data != expected:
-        fail("attempt.failed does not carry its exact final checker obligation", expected)
+        fail("attempt.failed does not carry its exact checker obligation", expected)
     return expected
 
 
@@ -4281,23 +4597,10 @@ def normalize_attempt_stop(entries, kind, data, context):
         "event": "note", "kind": kind, "lot": identity["lot"],
         "task": identity["task"], "data": base,
     }
-    state = attempt_stop_design_state(
-        entries, len(entries), identity["lot"], identity["task"], identity["attempt"],
-        f"the {kind} attempt stop",
-    )
-    if state is not None:
-        return {**base, "design_review": compact_design_review_obligation(state)}
-    if identity.get("retry") is not None:
-        accepted_retry_from_proof(
-            entries, identity["retry"], f"the {kind} attempt stop's inherited retry",
-        )
-        return {**base, "retry": identity["retry"]}
-    expected = expected_attempt_stop_data(
+    return expected_attempt_stop_data(
         entries, len(entries), candidate, f"the {kind} attempt stop",
+        inherited_retry=identity.get("retry"),
     )
-    if expected != base:
-        fail(f"the {kind} attempt identity drops its outstanding retry obligation", expected)
-    return base
 
 
 def validate_attempt_failed_entry(entries, index, entry):
@@ -4314,15 +4617,12 @@ def validate_attempt_failed_entry(entries, index, entry):
         "the durable attempt failure",
     )
     base = {"attempt": attempt_number, "classification": classification}
-    if report is not None:
-        expected = {**base, **report}
-    elif data.get("retry") is not None:
+    expected = {**base, **(report or {})}
+    if data.get("retry") is not None:
         accepted_retry_from_proof(entries, data["retry"], "the durable propagated retry")
-        expected = {**base, "retry": data["retry"]}
-    else:
-        expected = base
+        expected["retry"] = data["retry"]
     if data != expected:
-        fail("a durable attempt.failed changes or drops its final checker obligation", expected)
+        fail("a durable attempt.failed changes or drops its checker obligation", expected)
 
 
 def validate_attempt_succeeded_entry(entries, index, entry):
@@ -4330,19 +4630,25 @@ def validate_attempt_succeeded_entry(entries, index, entry):
     retry = data.get("retry")
     if retry is None:
         return
-    _, _, report = accepted_retry_from_proof(
+    chain = retry_obligation_chain(
         entries, retry, "the successful retry obligation",
     )
-    checker = "design-checker" if "design_review" in report else "code-checker"
-    starts = [candidate for candidate in entries[:index]
-              if candidate.get("event") == "subagent-started"
-              and candidate.get("kind") == checker
-              and candidate.get("lot") == entry.get("lot")
-              and candidate.get("task") == entry.get("task")
-              and candidate.get("attempt") == data.get("attempt")
-              and candidate.get("round") == 1]
-    if not starts or any(note_data(start).get("retry") != retry for start in starts):
-        fail("attempt.succeeded did not give its retry obligation to its checker")
+    checkers = {
+        checker for _, _, _, report in chain
+        for key, checker in (
+            ("design_review", "design-checker"), ("code_review", "code-checker"),
+        ) if key in report
+    }
+    for checker in checkers:
+        starts = [candidate for candidate in entries[:index]
+                  if candidate.get("event") == "subagent-started"
+                  and candidate.get("kind") == checker
+                  and candidate.get("lot") == entry.get("lot")
+                  and candidate.get("task") == entry.get("task")
+                  and candidate.get("attempt") == data.get("attempt")
+                  and candidate.get("round") == 1]
+        if not starts or any(note_data(start).get("retry") != retry for start in starts):
+            fail("attempt.succeeded did not give every retry obligation to its checker")
 
 
 def validate_construction_verdict_history(entries):
@@ -4362,6 +4668,8 @@ def validate_construction_verdict_history(entries):
             validate_design_blocker_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "code.review.resolved":
             validate_code_resolution_entry(entries, index, entry)
+        elif entry.get("event") == "note" and entry.get("kind") == "code.review.blocked":
+            validate_code_blocker_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "attempt.failed":
             validate_attempt_failed_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "attempt.succeeded":
@@ -6571,6 +6879,8 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         data = normalize_design_blocker(notes, data, text, context, round_number)
     elif kind == "code.review.resolved":
         data = normalize_code_resolution(notes, data, text, context, round_number)
+    elif kind == "code.review.blocked":
+        data = normalize_code_blocker(notes, data, text, context, round_number)
 
     try:
         authority_boundary_identity({"kind": kind, "data": data})
@@ -7265,7 +7575,7 @@ def cmd_note(args):
     )
     if args.kind in {
         "bound.spent", "verdict.consumed", "design.review.resolved", "design.review.blocked",
-        "code.review.resolved",
+        "code.review.resolved", "code.review.blocked",
     } \
             and isinstance(data, dict) \
             and data.get("check") in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
@@ -7472,13 +7782,10 @@ def cmd_construction_failure_check(args):
         entries, len(entries), args.lot, args.task, args.attempt,
         args.classification, "the failure closer",
     )
-    if report is not None:
-        expected = {**base, **report}
-    elif identity.get("retry"):
+    expected = {**base, **(report or {})}
+    if identity.get("retry"):
         accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
-        expected = {**base, "retry": identity["retry"]}
-    else:
-        expected = base
+        expected["retry"] = identity["retry"]
     print(json.dumps(expected, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 

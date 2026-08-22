@@ -1791,6 +1791,15 @@ The pair is the resume test:
   carries every prior finding for explicit `addressed` or `still-open` verification.
   Design rounds use `design.review.resolved`; code rounds use `code.review.resolved`.
   Both checkers have ten logical rounds at most.
+  A code finding which proves that valid work is absent from the frozen controller
+  contract stops at its current round. `code.review.blocked` freezes the complete batch
+  as `contract-blocked` and `carried`. It does not spend later rounds and it is not a
+  settlement. The controller uses the reportless C3.9b or C3.9d plan-fault route. The
+  corrected plan crosses its normal commit, C2 and baseline boundary. The replacement
+  attempt gives the same immutable batch to its first code-checker manifest. An existing
+  accepted Design or code obligation composes with this blocker. Failure, pause and abort
+  preserve every member until one successful retry gives each member to its matching
+  first checker.
   Round 10 never allocates round 11. Its implementer-owned settlement statuses are
   `accepted`, `refuted` and `alternative`. A finding with the exact location
   `frozen task contract` instead uses one derived `design.review.blocked` terminal. It

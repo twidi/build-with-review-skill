@@ -154,6 +154,12 @@ carries each identity as `contract-blocked` or `carried`. Verify every identity 
 you continue. The corrected controller-owned plan is the authority for the new Design;
 the carried batch is the exact correction obligation that this retry must consume.
 
+A code-review controller-contract blocker also has no report. Its exact
+`code.review.blocked` note can come from any code round. Redesign against the corrected
+controller contract first. Its first code-checker manifest then carries every identity
+as `contract-blocked` or `carried`. That checker must verify the complete replacement
+candidate before the obligation can end.
+
 **Your parent also gives you a label.** It says which part of the work was wrong, so it
 says where you start:
 
@@ -668,6 +674,34 @@ you to free work. A green one permits the next logical code checker. Its manifes
 the next checker every prior finding and this exact account. The next checker must mark
 each prior identity `addressed` or carry it into one current `still-open` finding.
 
+There is one controller-owned exception at **every code round**. A valid implementation
+or required test can expose that the frozen task contract omits a necessary file, outcome
+or verification obligation. Do not call that finding `corrected` or `unchanged`. Do not
+spend later rounds waiting for round 10. Before the controller changes the plan, freeze
+the complete current batch:
+
+```markdown
+## Finding 1 — contract-blocked
+Why the frozen controller contract cannot contain this required work.
+
+## Finding 2 — carried
+Why this other finding remains required after the replacement attempt starts.
+```
+
+```sh
+progress.py note code.review.blocked --round <K> \
+  --data '{"check":"code","items":[{"id":1,"status":"contract-blocked"},{"id":2,"status":"carried"}]}' \
+  --text-file "$JOURNAL_TEXT_FILE"
+```
+
+The account covers every finding once and needs at least one `contract-blocked` item.
+It is not `code.review.resolved`. Report **Blocked** immediately after it lands. The
+controller uses C3.10 and C3.9b or C3.9d. The failed attempt carries the immutable batch
+without a failure report. The replacement attempt receives it as required input for its
+first code-checker manifest. If the attempt already carries an accepted Design or code
+obligation, this batch composes with it. A failure, pause or abort preserves every batch.
+Only a successful retry after every matching first checker consumes the composed account.
+
 ### At round 10, settle the complete batch
 
 A clean verdict advances. A findings verdict cannot allocate another checker. Do not
@@ -726,9 +760,11 @@ must already be terminal. If its latest call is open and the exact live repair c
 still exists, continue only that bounded exchange. **After compaction**, takeover or
 loss of that context, write `{"unusable":"lost"}` to **close the exact open call before
 regeneration**. Only then open a fresh bracket under the same round and with no new
-domain spend. A consumed findings note with no matching `code.review.resolved` is the
-durable work list. For rounds 1 through 9, finish or verify every correction, record its
-complete account, then follow the ordinary-gate loop before allocating the next round.
+domain spend. A consumed findings note with no matching `code.review.resolved` or
+`code.review.blocked` is the durable work list. For rounds 1 through 9, finish or verify
+every implementer-owned correction, record its complete account, then follow the
+ordinary-gate loop before allocating the next round. A controller-contract mismatch
+records `code.review.blocked` and stops immediately.
 For round 10, a findings verdict without `code.review.resolved` returns to the
 complete-batch settlement above. A resolution with an accepted item returns to the
 failure report. A resolution without one advances to the final gate. A consumed clean
