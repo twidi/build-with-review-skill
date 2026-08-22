@@ -39,6 +39,14 @@ Then read:
 3. the real repository code that the Design names, plus directly relevant code needed
    to verify its assertions.
 
+Establish the task's exact parent product obligation from the same frozen plan
+generation. Read the lot's exact `Covers:` obligation and the task's exact
+`Descends from:` obligation. For a normal lot, read the named spec decision. For a
+sub-lot, read the exact confirmed-finding artifact named by `Covers:` and the finding
+identity named by `Descends from:`. Do not substitute a similarly named report or infer
+the source from the lot number. The frozen task contract is evidence, not authority that
+the parent obligation is complete.
+
 For round 2 or later, the manifest carries every finding from the prior round and the
 implementer's exact correction account. Round 1 can instead carry accepted final Design
 defects from the failed attempt that this attempt replaces. Read the count and each item:
@@ -80,6 +88,34 @@ and maintainability sweep over the Design.
 - A condition that already exists before this task remains in scope when the Design
   relies on it, changes the result produced from it, or leaves the task contract false
   because of it.
+- Prove that the frozen task contract and Design together close the exact parent product
+  obligation. If the frozen task contract cannot close its exact parent obligation,
+  return a finding with exactly `"where":"frozen task contract"`. That exact value
+  identifies the controller-owned blocker. Do not widen the Design or invent behaviour
+  to compensate for a controller-owned omission.
+- For every behaviour the task affects, trace its authoritative inputs and state through
+  every directly relevant propagation step to the externally observable product result
+  and the next supported action. A correct local call, write or return value is not proof
+  of a coherent product result.
+- Inspect success, failure, ambiguous outcome, repetition, retry and recovery when the
+  product supports them for the affected behaviour. Do not invent unsupported modes.
+- Inspect supported orderings and interactions that can change the same state, authority
+  or guarantee. Keep the current task's violated property fixed; do not manufacture
+  arbitrary concurrency.
+- Treat `unchanged`, `preserved` or `outside scope` as assertions to verify whenever the
+  excluded path shares the same state, authority, external result or parent obligation.
+- Inspect a directly coupled task only when the current task's guarantee depends on that
+  composition. Use its accepted contract and real delivered code as evidence. An
+  independent task remains outside this review.
+- Verify that declared behaviours and planned tests observe the external contract
+  through the real integration boundary whenever that boundary can contradict the
+  Design's local abstraction. Pure helper coverage is not sufficient proof in that case.
+  When no supported test can cross that boundary, require the Design to name the exact
+  uncovered behaviour and the repository evidence that makes its implementation
+  checkable; do not invent a new test framework.
+- End with a product-consequence sweep over final state, visible feedback, available
+  actions and recovery for the affected behaviour. This sweep remains bounded by the
+  exact parent obligation and directly coupled evidence.
 
 For every new concrete observation, classify impact and probability through
 `review-risk.md`. Return admitted observations. Record risk-filtered observations only in
@@ -93,7 +129,9 @@ first finding. Return every independent admitted finding in one batch.
 - Do not judge code that does not exist.
 - Do not rewrite the Design.
 - Do not propose another architecture because you prefer it.
-- Do not widen the scope to another task.
+- Do not perform a lot-wide PRODUCT REVIEW. Do not search an independent task for
+  unrelated defects. Evidence from a directly coupled task serves only to judge the
+  current Design or its frozen task contract.
 - Do not run commands that test or mutate the repository. Read only.
 - Do not launch another checker.
 - Do not emit `DECISION`, message the implementer separately, or stop outside the JSON.
@@ -107,7 +145,8 @@ first finding. Return every independent admitted finding in one batch.
 Return one JSON object. Return no prose outside it.
 
 `checks` contains two or three concrete checks. Each item names what you checked and the
-evidence you used.
+evidence you used. At least one check accounts for parent product closure or the
+directly coupled product consequence.
 
 Use this exact clean shape:
 
@@ -116,7 +155,7 @@ Use this exact clean shape:
   "verdict": "clean",
   "manifest": "reports/construction/<lot>/task-<N>-attempt-<K>-design-round-<R>-manifest.json",
   "checks": [
-    {"subject": "task contract", "evidence": "Concrete evidence checked."},
+    {"subject": "parent product closure", "evidence": "Concrete evidence checked."},
     {"subject": "repository fit", "evidence": "Concrete repository evidence checked."}
   ],
   "previous": [],
@@ -129,7 +168,7 @@ For an adverse result, use `"verdict":"findings"` and contiguous Finding 1..N ob
 ```json
 {
   "id": 1,
-  "where": "Design step or block",
+  "where": "Design step, block, or frozen task contract",
   "what": "Checkable fact",
   "why": "Concrete consequence",
   "impact": "CRITICAL|IMPORTANT|MINOR",

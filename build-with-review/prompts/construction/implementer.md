@@ -141,10 +141,17 @@ answer questions about.
 
 A human stop after an accepted round-10 Design settlement is different. It has no
 failure report, but its `paused` or `aborted` note owns the exact immutable verdict,
-settlement, result hash and accepted identities. Your first Design manifest carries
-those identities as required retry input. Verify every identity. Do not treat the absent
-report as permission to discard them. A later stop preserves the same obligation until
-a successful retry consumes it.
+settlement, result hash and accepted identities. The same stop after
+`design.review.blocked` owns its full final batch. Your first Design manifest carries
+the required identities. Verify every identity. Do not treat the absent report as
+permission to discard them. A later stop preserves the same obligation until a
+successful retry consumes it.
+
+A failed round-10 frozen-task-contract blocker also has no report. Its exact
+`design.review.blocked` note owns the immutable full batch. Your first Design manifest
+carries each identity as `contract-blocked` or `carried`. Verify every identity before
+you continue. The corrected controller-owned plan is the authority for the new Design;
+the carried batch is the exact correction obligation that this retry must consume.
 
 **Your parent also gives you a label.** It says which part of the work was wrong, so it
 says where you start:
@@ -290,6 +297,12 @@ It returns every admitted finding, or a clean result. New candidates use
 `review-risk.md`. Filtered observations remain only in the attempt-scoped private
 history. Prior admitted identities bypass fresh probability admission.
 
+The checker also proves the current Design against its exact parent product obligation
+and directly coupled product consequences. A finding against the frozen task contract
+is controller-owned. Do not expand the Design to hide it and do not invent behaviour.
+Stop and report **Blocked** to your parent with the exact finding and source obligation.
+At round 10, first record the derived blocker terminal described below.
+
 ### Rounds 1 through 9
 
 Account for every finding before another logical round. Correct the Design first. Use
@@ -321,21 +334,35 @@ regenerate under the same round, manifest and spend. If a consumed findings note
 matching `design.review.resolved`, settle that exact batch before another round. A clean
 note advances.
 
-### At round 10, settle the complete batch
+### At round 10, close the complete batch
 
-Round 10 never allocates round 11. Do not edit the Design after its result. Account for
-every numbered finding as `accepted`, `refuted`, or `alternative`.
-
-- `accepted` means the checker found a real Design defect.
-- `refuted` requires exact plan, spec or repository evidence.
-- `alternative` means both Designs satisfy the accepted plan.
-
-The implementer alone owns authority classification:
+Round 10 never allocates round 11. Do not edit the Design after its result. First apply
+the implementer's authority classification:
 
 - If the plan is ambiguous or incomplete, stop and report **Blocked**.
 - If the spec does not settle required product behaviour, stop and report a **DECISION**.
 
 Both routes stop before structured settlement.
+
+When the round-10 batch contains `"where":"frozen task contract"`, do not classify
+that batch as an implementer Design settlement. Record its exact controller-owned
+terminal before reporting Blocked:
+
+```sh
+progress.py note design.review.blocked --round 10 --data '{"check":"design"}'
+```
+
+The command derives the immutable verdict, full batch, result identity, every required
+finding, and every exact contract-blocked identity. It accepts no supplied disposition.
+Do not edit the plan before this note succeeds. This terminal authorizes only the
+controller's C3.9b or C3.9d plan-fault route. It never authorizes implementation.
+
+For a batch that remains implementer-owned, account for every numbered finding as
+`accepted`, `refuted`, or `alternative`.
+
+- `accepted` means the checker found a real Design defect.
+- `refuted` requires exact plan, spec or repository evidence.
+- `alternative` means both Designs satisfy the accepted plan.
 
 If no item is accepted, first copy every alternative into `### Disagreement`. Preserve
 existing text. Use one exact heading per alternative:

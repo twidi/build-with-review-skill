@@ -582,7 +582,7 @@ def validate_design_previous_account(account, round_number):
             r"[0-9]+:[0-9a-f]{64}", account.get("failure", ""),
         ):
             refuse("the design retry account has a malformed failure proof")
-        statuses = {"accepted"}
+        statuses = {"accepted", "contract-blocked", "carried"}
         contiguous_identities = False
     else:
         refuse("the prior design-review account has an unknown source")

@@ -1730,13 +1730,17 @@ The pair is the resume test:
   carries every prior finding for explicit `addressed` or `still-open` verification.
   Design rounds use `design.review.resolved`; code rounds use `code.review.resolved`.
   Both checkers have ten logical rounds at most.
-  Round 10 never allocates round 11. Its statuses are `accepted`, `refuted` and
-  `alternative`.
+  Round 10 never allocates round 11. Its implementer-owned settlement statuses are
+  `accepted`, `refuted` and `alternative`. A finding with the exact location
+  `frozen task contract` instead uses one derived `design.review.blocked` terminal. It
+  preserves the complete immutable batch without inventing an implementer disposition.
   An accepted defect fails through C3.9. A complete account
   containing only refuted findings and valid alternatives can reach the final gate; the
-  alternatives remain in the plan's exact `### Disagreement` block. `Blocked` or a
-  `DECISION` stops before that settlement. A lost result regenerates its current logical
-  round, including design- or code-checker round 10.
+  alternatives remain in the plan's exact `### Disagreement` block. A contract-owned
+  `Blocked` uses its distinct terminal before the controller's reportless C3.9b or
+  C3.9d plan-fault route. Other `Blocked` or `DECISION` cases stop before settlement. A
+  lost result regenerates its current logical round, including design- or code-checker
+  round 10.
 
   A final accepted defect cannot use a generic or reportless failure close. The exact
   immutable checker batch and complete disposition account enter the failure report.
@@ -1752,6 +1756,15 @@ The pair is the resume test:
   and accepted identities. The next attempt uses `-` instead of a failure-report path,
   and its first Design manifest receives those identities. A later stop propagates an
   inherited obligation until one successful retry consumes it.
+
+  A final frozen-task-contract blocker uses no failure report and no implementer
+  settlement. Its `design.review.blocked` proof and complete immutable batch enter the
+  C3.9b or C3.9d `attempt.failed` note directly. A C3.9b controller-contract correction
+  then crosses `plan-commit.sh`, the repeated C2 proof, and a fresh green baseline before
+  the next attempt starts. C3.9d keeps its existing re-cut route. The next attempt passes
+  `-`; its first Design manifest carries every final identity as `contract-blocked` or
+  `carried`. That exact obligation also propagates until one successful retry consumes
+  it.
 
 The per-call failure retry remains separate. An errored, empty or unusable physical call
 uses *When a subagent fails*'s own `bound.spent`, named as that call's retry; it never

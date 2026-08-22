@@ -244,6 +244,94 @@ else:
             "--data", '{"check":"design","outcome":"clean"}',
         )
 
+    def append_design_round_ten_contract_blocker(self):
+        plan = self.plan.read_text(encoding="utf-8")
+        self.plan.write_text(
+            plan.replace(
+                "[written at C3.1 - see below]",
+                "Implement the exact frozen task contract.",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        previous = []
+        for round_number in range(1, 11):
+            opened = self.progress_call(
+                "subagent-started", "design-checker", "--round", str(round_number),
+            )
+            manifest = json.loads(opened.stdout)["manifest"]
+            self.progress_call(
+                "note", "bound.spent", "--round", str(round_number),
+                "--text", f"design checker round {round_number} of 10",
+            )
+            findings = [{
+                "id": 1,
+                "where": (
+                    "frozen task contract" if round_number == 10
+                    else f"Design round {round_number}"
+                ),
+                "what": "The task contract omits one required parent outcome.",
+                "why": "The current task cannot guarantee its parent product obligation.",
+                "impact": "IMPORTANT",
+                "previous": [1] if previous else [],
+            }]
+            if round_number == 10:
+                findings.append({
+                    "id": 2, "where": "Design round 10",
+                    "what": "The final Design retains another unresolved defect.",
+                    "why": "The next Design must account for the complete final batch.",
+                    "impact": "IMPORTANT", "previous": [],
+                })
+            report = self.temp / f"design-contract-result-{round_number}.json"
+            report.write_text(json.dumps({
+                "verdict": "findings", "manifest": manifest,
+                "checks": [
+                    {"subject": "task contract",
+                     "evidence": "Every Achieves and To verify obligation was checked."},
+                    {"subject": "repository fit",
+                     "evidence": "The relevant repository constraints were checked."},
+                ],
+                "previous": previous,
+                "findings": findings,
+            }), encoding="utf-8")
+            self.progress_call(
+                "subagent-ended", "design-checker", "--round", str(round_number),
+                "--data", json.dumps({"result": str(report)}),
+            )
+            self.progress_call(
+                "note", "verdict.consumed", "--round", str(round_number),
+                "--data", '{"check":"design","outcome":"findings"}',
+            )
+            if round_number == 10:
+                break
+            self.plan.write_text(
+                re.sub(
+                    r"(?ms)^### Design\n.*?(?=^### |^## Task |\Z)",
+                    f"### Design\nCorrected Design generation {round_number}.\n",
+                    self.plan.read_text(encoding="utf-8"),
+                ),
+                encoding="utf-8",
+            )
+            account = self.temp / f"design-contract-resolution-{round_number}.md"
+            account.write_text(
+                "## Finding 1 — corrected\n"
+                "The corrected Design addresses the exact finding.\n",
+                encoding="utf-8",
+            )
+            self.progress_call(
+                "note", "design.review.resolved", "--round", str(round_number),
+                "--text-file", account,
+                "--data", '{"check":"design","items":[{"id":1,"status":"corrected"}]}',
+            )
+            previous = [{
+                "id": 1, "status": "still-open",
+                "evidence": "The exact admitted defect remains open.",
+            }]
+        self.progress_call(
+            "note", "design.review.blocked", "--round", "10",
+            "--data", '{"check":"design"}',
+        )
+
     def run_code_round(self, round_number, findings):
         self.append_design_clean()
         if round_number > 1:
@@ -1673,6 +1761,81 @@ def failure_closer_refuses_unsettled_round_ten_findings_before_mutation():
         )
         check(not any(entry.get("kind") == "attempt.failed" for entry in fixture.journal()),
               "the unresolved final batch gained a failure terminal")
+    finally:
+        fixture.close()
+
+
+@test
+def final_design_contract_blocker_uses_the_real_plan_fault_closer():
+    fixture = Fixture()
+    try:
+        fixture.start_attempt_state()
+        fixture.append_design_round_ten_contract_blocker()
+        plan = fixture.plan.read_text(encoding="utf-8")
+        fixture.plan.write_text(
+            plan.replace(
+                "Achieves: Change the application value.",
+                "Achieves: Change the application value and preserve the parent outcome.",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
+        fixture.run("bash", failed, "lot-1", "1", "1", "C3.9b", ok=True)
+        terminal = next(
+            entry for entry in reversed(fixture.journal())
+            if entry.get("kind") == "attempt.failed"
+        )
+        review = terminal["data"]["design_review"]
+        check("report" not in terminal["data"], terminal)
+        check(review["contract_blocked"] == [1], review)
+        check(review["required"] == [1, 2], review)
+        retry = fixture.progress_call(
+            "construction-retry-check", "lot-1", "1", "-", ok=True,
+        )
+        proof = retry.stdout.strip()
+        check(proof != "-", "the plan-fault closer lost its Design obligation")
+
+        plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
+        fixture.run(
+            "bash", plan_commit, "lot-1", "fix: correct the task contract", ok=True,
+        )
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        predecessor = fixture.git("rev-parse", "HEAD^").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"plan/lot-1/{head}",
+            "-", "0", "0", predecessor, ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        fixture.close_gate(op)
+
+        started = fixture.workspace / "prompts" / "construction" / "attempt-started.sh"
+        fixture.run("bash", started, "lot-1", "1", "2", "-", ok=True)
+        identity = (fixture.workspace / "attempt-in-flight").read_text(encoding="utf-8")
+        check(f"retry {proof}" in identity, identity)
+        fixture.set_attempt_context(2)
+        fixture.plan.write_text(
+            re.sub(
+                r"(?ms)^### Design\n.*?(?=^### |^## Task |\Z)",
+                "### Design\nDesign against the corrected controller-owned contract.\n",
+                fixture.plan.read_text(encoding="utf-8"),
+            ),
+            encoding="utf-8",
+        )
+        design = fixture.progress_call(
+            "subagent-started", "design-checker", "--round", "1", ok=True,
+        )
+        manifest = json.loads(
+            (fixture.workspace / json.loads(design.stdout)["manifest"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        check(manifest["previous"]["failure"] == proof, manifest["previous"])
+        check(
+            [item["status"] for item in manifest["previous"]["resolution"]]
+            == ["contract-blocked", "carried"],
+            manifest["previous"],
+        )
     finally:
         fixture.close()
 

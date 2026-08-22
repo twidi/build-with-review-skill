@@ -73,13 +73,15 @@ attempt $F_K — this call says $LOT task $N attempt $K. The preserve takes the 
 own identity. Nothing was moved, and nothing was staged."
 
 # A final design- or code-review findings batch owns failure admission before this closer
-# binds or stages anything. The shared validator refuses an unsettled batch and requires
-# one exact, immutable failure handoff when any item was accepted.
+# binds or stages anything. The shared validator refuses an unsettled batch. It requires
+# one exact immutable failure handoff for accepted items, or one exact derived blocker
+# terminal for a controller-owned frozen-task-contract defect.
 FAILURE_DATA=$("$WORKSPACE/prompts/common/progress.py" construction-failure-check \
     "$LOT" "$N" "$K" "$CLASS") \
     || die "the failure is not admitted by the exact final checker state.
-Settle design or code round 10 and, when it accepts a defect, complete its authenticated
-failure report first. Nothing was moved, staged, recorded or bound."
+Settle design or code round 10, or record its exact controller-owned Design blocker.
+When it accepts an implementer-owned defect, complete its authenticated failure report
+first. Nothing was moved, staged, recorded or bound."
 
 # A result ref proves that one gesture of a closer landed. It never chooses
 # that closer. Freeze the exact failure call before the first preserve/reset

@@ -830,16 +830,23 @@ it.**
    task's section of the plan: steps, exposed signatures, chosen and discarded
    alternatives, behaviours it will test. Not one line of code.
 2. **C3.2 — Design checker.** A subagent judges one exact immutable Design generation
-   and returns one strict JSON batch. New candidates use shared impact/probability
-   admission. Prior identities remain public until addressed or carried forward. Rounds
-   1 through 9 require one complete correction account before another manifest. At round
-   10, the implementer records one exact `design.review.resolved` settlement. Zero
+   and returns one strict JSON batch. It proves the Design and frozen task contract
+   against the exact parent product obligation. It follows directly coupled product
+   consequences and task composition only where the current task's guarantee depends on
+   them; it does not perform a lot-wide PRODUCT REVIEW. A controller-owned contract
+   defect returns through the implementer's existing `Blocked` route before code. At
+   round 10, `design.review.blocked` freezes that controller-owned terminal without an
+   implementer disposition. New candidates use shared impact/probability admission.
+   Prior identities remain public until addressed or carried forward. Rounds 1 through
+   9 require one complete correction account before another manifest. At round 10, an
+   implementer-owned batch receives one exact `design.review.resolved` settlement. Zero
    accepted findings can authorize implementation and preserve alternatives in
-   `### Disagreement`. An accepted defect stops before implementation and fails through
-   C3.9b, C3.9c or C3.9d; C3.9a is not valid. **Ten logical rounds at most; regenerating
-   an unconsumed physical result keeps its round. Round 10 never allocates round 11.**
-   A human `pause` or `abort` can still stop immediately. Its durable stop note preserves
-   an accepted final Design obligation for the next attempt.
+   `### Disagreement`. An accepted defect stops before
+   implementation and fails through C3.9b, C3.9c or C3.9d; C3.9a is not valid. **Ten
+   logical rounds at most; regenerating an unconsumed physical result keeps its round.
+   Round 10 never allocates round 11.** A human `pause` or `abort` can still stop
+   immediately. Its durable stop note preserves an accepted final Design obligation for
+   the next attempt.
 3. **C3.3 — Implement.** Step by step. It never invents behaviour the plan does not
    state.
 4. **C3.4 — Free work and the ordinary gate.** It runs any commands it needs. When it
@@ -900,7 +907,7 @@ a reportless failure. The start script refuses a number that left any of those t
 **Mark where the attempt begins first, before the session that will run it exists:**
 
 ```sh
-<workspace>/prompts/construction/attempt-started.sh <lot> <N> <K> [accepted-defect failure report]
+<workspace>/prompts/construction/attempt-started.sh <lot> <N> <K> [checker-obligation report or -]
 ```
 
 *It runs the equivalent of:*
@@ -1022,6 +1029,12 @@ the workspace. After that block, the message gives these role inputs, and nothin
    stop proof, and the first Design manifest carries every accepted identity. This is not
    a reportless failure close. Another stop propagates the same proof until a successful
    retry consumes it.
+
+   A failed round-10 frozen-task-contract blocker is another exact reportless
+   correction obligation. Its `attempt.failed` note binds the derived
+   `design.review.blocked` proof and complete immutable batch. Pass `-` to
+   `attempt-started.sh`. The first Design manifest carries every final identity as
+   `contract-blocked` or `carried` against the corrected plan.
 
 **It builds its own paths from the lot.** The plan is at `<workspace>/plans/<lot>-plan.md`,
 the repository copy is `plan-publish.sh`'s business, and a past task is read with
@@ -1536,7 +1549,7 @@ Read what it is asking, and answer in one of three ways:
 - **The spec or the plan settles it** — quote the passage, set it back to `working`, send
   the answer. It continues from where it stopped.
 - **The plan is at fault** — it is silent where it should not be, or it contradicts
-  itself. Three gestures of your own, then the ordinary routing:
+  itself. Use the following controller sequence before the ordinary routing:
 
   1. **Fix the plan yourself**, in the workspace copy. You wrote it: a silence is yours to
      fill, a contradiction yours to resolve. **This gesture exists nowhere else** — a
@@ -1552,12 +1565,36 @@ Read what it is asking, and answer in one of three ways:
      <workspace>/prompts/construction/attempt-failed.sh <lot> <N> <K> <C3.9b|C3.9d>
      ```
 
+     A round-10 frozen-task-contract finding already has one exact
+     `design.review.blocked` note from the implementer. The closer authenticates its
+     immutable complete batch. It uses the existing reportless plan-fault route and
+     carries every finding to the next attempt. Do not request a settlement or failure
+     report for this controller-owned blocker.
+
      **A blocked implementer may have written code before it stopped**, and none of it may
      reach the next attempt — that is the whole point of one session per attempt.
   3. **Retire it `superseded`**, never `failed`. It did exactly what it had to by stopping
      instead of inventing. *The attempt did not deliver; the session did not fail. The
      script records the first, the retirement records the second, and they are allowed to
      say different things.*
+
+  4. **Publish a C3.9b controller-contract correction before the retry.** This step
+     applies when step 1 changed controller-owned task bytes. After the failure closer
+     removes `attempt-in-flight`, commit the exact corrected workspace plan through its
+     existing controller boundary:
+
+     ```sh
+     <workspace>/prompts/construction/plan-commit.sh <lot> "<subject>"
+     ```
+
+     Repeat C2 against that exact plan generation. If C2 changes the plan, publish its
+     final corrected generation through the same command. Then open and close the C2.7
+     baseline gate for the resulting clean plan commit. Only that green current baseline
+     can precede `attempt-started.sh` for the replacement. Never restore the old
+     committed controller bytes to make the start pass.
+
+     This step does not replace the C3.9d route. C3.9d still performs its existing
+     re-cut, plan commit, C2 proof, rewind, and baseline sequence.
 
   **Then go to C3.9 with that classification and follow it as written**, and nothing of it
   is repeated here — the rewind that takes the earlier tasks and their refs out of the way
@@ -1623,11 +1660,12 @@ pause must not erase**, and three windows hold one:
 note exists for — and the resume routes on it: the C3.9 table as written, rewind and
 re-cut included, never the blanket default.**
 
-If round 10 already has a complete settlement with any `accepted` Design item, the stop
-note also receives the exact immutable Design obligation. The stop does not wait for a
-failure report. A later attempt cannot start as an ordinary reportless retry: it passes
-`-`, freezes the stop proof, and gives every accepted identity to Design round 1. A stop
-with no settlement, or a settlement with zero accepted items, keeps the ordinary route.
+If round 10 already has a complete settlement with any `accepted` Design item, or one
+exact `design.review.blocked` terminal, the stop note also receives the immutable Design
+obligation. The stop does not wait for a failure report. A later attempt cannot start as
+an ordinary reportless retry. It passes `-`, freezes the stop proof, and gives the exact
+required identities to Design round 1. A stop with no correction obligation, or a
+settlement with zero accepted items, keeps the ordinary route.
 
 **The code:**
 
@@ -1671,7 +1709,7 @@ git clean -fd            # the reset does not remove the files the task created
 
 progress.py note paused --task <N> --text-file "$JOURNAL_TEXT_FILE" --data '{"sha":"<sha>","attempt":<K>}'
 progress.py note aborted --task <N> --data '{"sha":"<sha>","attempt":<K>}'
-# progress.py derives and adds any accepted final Design obligation or inherited retry
+# progress.py derives and adds any final Design correction obligation or inherited retry
 ```
 
 **It prints the SHA of the last validated task**, and on a pause the SHA of the preserved

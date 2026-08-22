@@ -527,6 +527,14 @@ def resolve_design_round(round_number, items):
     check(result.returncode == 0, result.stdout + result.stderr)
 
 
+def block_final_design_contract():
+    result = run_progress(
+        "note", "design.review.blocked", "--round", "10",
+        "--data", '{"check":"design"}',
+    )
+    check(result.returncode == 0, result.stdout + result.stderr)
+
+
 def replace_current_design(replacement):
     path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
     text = open(path, encoding="utf-8").read()
@@ -564,6 +572,37 @@ def drive_design_to_round_ten():
                 "what": "The checker proposes another plan-compliant Design.",
                 "why": "The final settlement must preserve the exact alternative.",
                 "impact": "MINOR", "previous": [],
+            })
+        finish_design_round(round_number, opening, findings=findings, previous=previous)
+        if round_number < 10:
+            replace_current_design(
+                f"Implement the accepted task contract. Corrected generation {round_number}."
+            )
+            resolve_design_round(round_number, [{"id": 1, "status": "corrected"}])
+            previous = [{
+                "id": 1, "status": "still-open",
+                "evidence": "The exact admitted defect remains open.",
+            }]
+
+
+def drive_design_to_round_ten_contract_blocker():
+    previous = []
+    for round_number in range(1, 11):
+        opening = open_design_round(round_number)
+        finding = {
+            "id": 1,
+            "where": "frozen task contract" if round_number == 10 else f"Design round {round_number}",
+            "what": "The frozen task contract omits one required parent outcome.",
+            "why": "The current task cannot guarantee its exact parent product obligation.",
+            "impact": "IMPORTANT", "previous": [1] if previous else [],
+        }
+        findings = [finding]
+        if round_number == 10:
+            findings.append({
+                "id": 2, "where": "Design round 10",
+                "what": "The final Design retains another unresolved defect.",
+                "why": "The next Design generation must account for the complete immutable batch.",
+                "impact": "IMPORTANT", "previous": [],
             })
         finish_design_round(round_number, opening, findings=findings, previous=previous)
         if round_number < 10:
@@ -1862,6 +1901,117 @@ def design_parity_accepted_final_defect_requires_exact_failure_handoff():
     check(retry_proof.returncode == 0, retry_proof.stdout + retry_proof.stderr)
 
 
+@test
+def design_parity_final_contract_blocker_reaches_plan_fault_retry_without_settlement():
+    seed_active_attempt()
+    drive_design_to_round_ten_contract_blocker()
+
+    before = len(journal_lines())
+    refused_after(
+        run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9b"),
+        before, "an unrecorded final contract blocker",
+    )
+    block_final_design_contract()
+    refused_after(
+        run_progress(
+            "note", "design.review.blocked", "--round", "10",
+            "--data", '{"check":"design"}',
+        ),
+        len(journal_lines()), "a duplicate final contract-blocker terminal",
+    )
+    settlement_path = os.path.join(BASE, "blocked-design-settlement.md")
+    with open(settlement_path, "w", encoding="utf-8") as target:
+        target.write(
+            "## Finding 1 — accepted\nA settlement must not replace the blocker.\n\n"
+            "## Finding 2 — accepted\nThe complete batch remains blocked.\n"
+        )
+    refused_after(
+        run_progress(
+            "note", "design.review.resolved", "--round", "10",
+            "--text-file", settlement_path,
+            "--data",
+            '{"check":"design","items":[{"id":1,"status":"accepted"},'
+            '{"id":2,"status":"accepted"}]}',
+        ),
+        len(journal_lines()), "a Design settlement after its blocker terminal",
+    )
+
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "3", "2", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failure_data = json.loads(admitted.stdout)
+    check("report" not in failure_data, failure_data)
+    check(failure_data["design_review"]["contract_blocked"] == [1], failure_data)
+    check(failure_data["design_review"]["required"] == [1, 2], failure_data)
+    decomposition = run_progress(
+        "construction-failure-check", "lot-1", "3", "2", "C3.9d",
+    )
+    check(decomposition.returncode == 0, decomposition.stdout + decomposition.stderr)
+
+    for classification in ("C3.9a", "C3.9c"):
+        refused_after(
+            run_progress(
+                "construction-failure-check", "lot-1", "3", "2", classification,
+            ),
+            len(journal_lines()),
+            f"{classification} for a pre-implementation contract blocker",
+        )
+    failed = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", json.dumps(failure_data),
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0 and retry.stdout.strip() != "-", retry.stdout + retry.stderr)
+    proof = retry.stdout.strip()
+
+    seed_active_attempt(attempt=3)
+    marker = os.path.join(WORKSPACE, "attempt-in-flight")
+    lines = open(marker, encoding="utf-8").read().splitlines()
+    lines[1] = re.sub(r" retry .+$", f" retry {proof}", lines[1])
+    with open(marker, "w", encoding="utf-8") as target:
+        target.write("\n".join(lines) + "\n")
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"]["attempt"] = 3
+    cfg["sessions"][CALLER]["annotations"]["bwr"]["attempt"] = 3
+    set_config(cfg)
+    opening = open_design_round(1)
+    manifest = json.load(open(
+        os.path.join(WORKSPACE, opening["manifest"]), encoding="utf-8",
+    ))
+    previous = manifest["previous"]
+    check([item["id"] for item in previous["findings"]] == [1, 2], previous)
+    check(
+        [item["status"] for item in previous["resolution"]]
+        == ["contract-blocked", "carried"],
+        previous,
+    )
+
+    journal = journal_lines()
+    blocked = next(entry for entry in journal if entry.get("kind") == "design.review.blocked")
+    blocked["data"]["required"] = [1]
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode != 0,
+          "a changed final contract-blocker obligation passed historical validation")
+
+
+@test
+def design_parity_stop_preserves_a_final_contract_blocker():
+    seed_active_attempt()
+    drive_design_to_round_ten_contract_blocker()
+    block_final_design_contract()
+    stop_active_attempt("pause")
+    stopped = journal_lines()[-1]
+    check(stopped["kind"] == "paused", stopped)
+    review = stopped["data"]["design_review"]
+    check(review["contract_blocked"] == [1] and review["required"] == [1, 2], review)
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0 and retry.stdout.strip() != "-", retry.stdout + retry.stderr)
+
+
 def assert_stopped_design_obligation_reaches_retry(mode):
     seed_active_attempt()
     drive_design_to_round_ten()
@@ -1992,7 +2142,7 @@ def design_parity_contract_has_probability_strict_result_repair_and_terminal_rul
           "the retry summary omits one accepted checker handoff")
     check("first Design manifest" in implementer and "first code-checker manifest" in implementer,
           "the retry summary omits one accepted checker manifest")
-    check("no accepted final checker obligation authorizes this retry report" in progress_source,
+    check("no final checker correction obligation authorizes this retry report" in progress_source,
           "the shared retry diagnostic still names only code review")
     check("no accepted final code-review obligation authorizes this retry report"
           not in progress_source,
@@ -2008,6 +2158,10 @@ def design_parity_contract_has_probability_strict_result_repair_and_terminal_rul
                            ("skill", skill)):
         check("design.review.resolved" in contract,
               f"the {name} does not carry the exact design settlement")
+        check("design.review.blocked" in contract,
+              f"the {name} does not carry the exact controller-contract blocker")
+    check('"where":"frozen task contract"' in checker,
+          "the Design checker lacks one exact controller-contract finding identity")
     check("Return one JSON object" in checker and "Return no prose outside it" in checker,
           "the design checker must have one strict result channel")
     check("result-validation refusal" in checker
@@ -5710,6 +5864,52 @@ def risk_admission_rejects_artificially_narrow_probability_bases():
           "the checker must follow evidence outside the Design's named files")
     check("already exists before this task remains in scope" in design_flat,
           "pre-existing conditions relied on by the Design must stay in scope")
+
+
+@test
+def design_checker_proves_parent_product_closure_without_becoming_lot_review():
+    with open(os.path.join(HERE, "prompts", "construction", "design-checker.md"), encoding="utf-8") as f:
+        design = f.read()
+    with open(os.path.join(HERE, "prompts", "construction", "implementer.md"), encoding="utf-8") as f:
+        implementer = f.read()
+    with open(os.path.join(HERE, "prompts", "construction", "MODE.md"), encoding="utf-8") as f:
+        mode = f.read()
+    design_flat = " ".join(design.split())
+    implementer_flat = " ".join(implementer.split())
+    mode_flat = " ".join(mode.split())
+
+    check("exact `Covers:` obligation" in design_flat and "exact `Descends from:` obligation" in design_flat,
+          "the checker must bind the task to its frozen parent obligation")
+    check("The frozen task contract is evidence, not authority that the parent obligation is complete" in design_flat,
+          "the task contract must not prove its own sufficiency")
+    check("externally observable product result" in design_flat,
+          "the checker must trace each affected behaviour to its product result")
+    check("success, failure, ambiguous outcome, repetition, retry and recovery" in design_flat,
+          "the checker must inspect every supported outcome class")
+    check("supported orderings and interactions" in design_flat,
+          "the checker must inspect temporal interactions that affect the same guarantee")
+    check("`unchanged`, `preserved` or `outside scope`" in design_flat,
+          "the checker must challenge exclusions that share the same product guarantee")
+    check("directly coupled task" in design_flat and "independent task" in design_flat,
+          "the checker must distinguish necessary composition from a lot-wide review")
+    check("observe the external contract through the real integration boundary" in design_flat,
+          "the checker must reject tests that prove only its local abstraction")
+    check("the frozen task contract cannot close its exact parent obligation" in design_flat,
+          "an insufficient controller-owned contract must become a checker finding")
+    check("Do not perform a lot-wide PRODUCT REVIEW" in design_flat,
+          "the expanded mandate must remain bounded to the current task")
+    check("finding against the frozen task contract" in implementer_flat and "Blocked" in implementer_flat,
+          "the implementer must route a controller-owned contract defect without widening its Design")
+    check("parent product obligation" in mode_flat and "directly coupled" in mode_flat,
+          "the controller summary must describe the expanded checker boundary")
+    blocked_route = mode.split("### C3.10 · Blocked", 1)[1]
+    check(
+        "plan-commit.sh" in blocked_route
+        and "Repeat C2" in blocked_route
+        and "baseline gate" in blocked_route
+        and "attempt-started.sh" in blocked_route,
+        "the controller-contract correction must publish and establish a baseline before retry",
+    )
 
 
 @test
