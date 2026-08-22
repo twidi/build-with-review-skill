@@ -5913,6 +5913,59 @@ def design_checker_proves_parent_product_closure_without_becoming_lot_review():
 
 
 @test
+def design_self_review_precedes_the_first_checker_without_creating_a_round():
+    with open(os.path.join(HERE, "prompts", "construction", "implementer.md"), encoding="utf-8") as f:
+        implementer = f.read()
+    with open(os.path.join(HERE, "prompts", "construction", "MODE.md"), encoding="utf-8") as f:
+        mode = f.read()
+    with open(os.path.join(HERE, "SKILL.md"), encoding="utf-8") as f:
+        skill = f.read()
+
+    design_self_review = implementer.split("## Design self review", 1)[1].split("## Design checker", 1)[0]
+    self_review_flat = " ".join(design_self_review.split())
+    mode_flat = " ".join(mode.split())
+    skill_flat = " ".join(skill.split())
+    check(implementer.index("## Design") < implementer.index("## Design self review")
+          < implementer.index("## Design checker"),
+          "the Design self review must follow Design writing and precede the first checker")
+    check("Once, and only once, for each newly written Design" in self_review_flat,
+          "the Design self review must have the same one-pass boundary as code self review")
+    check("task contract and its parent product obligation" in self_review_flat,
+          "the Design self review must check complete parent-product coverage")
+    check("steps, interfaces and directly required dependencies" in self_review_flat,
+          "the Design self review must check internal composition")
+    check("chosen and discarded alternatives" in self_review_flat and "repository evidence" in self_review_flat,
+          "the Design self review must check its decisions against real evidence")
+    check("success, failure, ambiguous outcome, repetition, retry and recovery" in self_review_flat,
+          "the Design self review must check supported outcome classes")
+    check("Fix the Design during this same pass" in self_review_flat,
+          "a self-review correction must remain inside the one pass")
+    check("no journal event" in self_review_flat and "no Design-checker round" in self_review_flat,
+          "the Design self review must not become durable workflow state")
+    implementer_flat = " ".join(implementer.split())
+    check("exact `Covers:` obligation" in implementer_flat
+          and "exact `Descends from:` obligation" in implementer_flat,
+          "the implementer must bind the self review to the frozen parent source")
+    check("For a normal lot, read the named spec decision" in implementer_flat,
+          "a normal-lot self review must read its exact spec source")
+    check("For a sub-lot, read the exact confirmed-finding artifact named by `Covers:`" in implementer_flat
+          and "finding identity named by `Descends from:`" in implementer_flat,
+          "a sub-lot self review must read its exact confirmed finding")
+    check("The spec decision your task descends from" not in implementer,
+          "a universal spec-decision source must not override the sub-lot confirmed finding")
+    check("Stay within the current task" in implementer_flat,
+          "the implementer parent-source read must remain task-bounded")
+    check("C3.1a — Design self review" in mode_flat and "before the first Design checker" in mode_flat,
+          "the controller summary must expose the Design self-review boundary")
+    check("Before a newly written Design enters its first Design-checker round" in skill_flat
+          and "Design self review" in skill_flat,
+          "the root skill must preserve the Design self-review boundary across resume")
+    resume_tail = skill.split("The pair is the resume test:", 1)[1].lstrip()
+    check(resume_tail.startswith("- latest domain `bound.spent`, no matching `verdict.consumed`"),
+          "the resume-pair introduction must remain directly attached to its bullets")
+
+
+@test
 def risk_filtered_decisions_never_use_the_shared_blocker_route():
     with open(os.path.join(COMMON_PROMPTS, "review-risk.md"), encoding="utf-8") as f:
         risk = f.read()

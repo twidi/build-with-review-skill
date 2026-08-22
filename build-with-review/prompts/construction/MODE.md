@@ -829,7 +829,13 @@ it.**
 1. **C3.1 — Design.** It reads the real tree and writes a `### Design` block into its
    task's section of the plan: steps, exposed signatures, chosen and discarded
    alternatives, behaviours it will test. Not one line of code.
-2. **C3.2 — Design checker.** A subagent judges one exact immutable Design generation
+2. **C3.1a — Design self review, once.** For each newly written Design, before the first
+   Design checker, it rereads the complete Design against the frozen task contract,
+   parent product obligation and directly relevant repository evidence. It checks
+   coverage, internal composition, decisions and supported outcomes. It fixes anything
+   it finds during that same pass. This creates no event or checker round. A retry that
+   preserves an accepted Design does not repeat it.
+3. **C3.2 — Design checker.** A subagent judges one exact immutable Design generation
    and returns one strict JSON batch. It proves the Design and frozen task contract
    against the exact parent product obligation. It follows directly coupled product
    consequences and task composition only where the current task's guarantee depends on
@@ -847,16 +853,16 @@ it.**
    Round 10 never allocates round 11.** A human `pause` or `abort` can still stop
    immediately. Its durable stop note preserves an accepted final Design obligation for
    the next attempt.
-3. **C3.3 — Implement.** Step by step. It never invents behaviour the plan does not
+4. **C3.3 — Implement.** Step by step. It never invents behaviour the plan does not
    state.
-4. **C3.4 — Free work and the ordinary gate.** It runs any commands it needs. When it
+5. **C3.4 — Free work and the ordinary gate.** It runs any commands it needs. When it
    judges the candidate ready, it stages the exact candidate and runs the complete
    unchanged whole-repo gate through one durable `review` gate operation. **A red
    ordinary gate returns to free work.** A green gate freezes the candidate for one
    checker round.
-5. **C3.5 — Self review, once.** It rereads its whole diff. A fix returns to free work,
+6. **C3.5 — Self review, once.** It rereads its whole diff. A fix returns to free work,
    then the complete ordinary gate when the candidate is ready.
-6. **C3.6 — Code checker.** A subagent judges the whole diff and returns every
+7. **C3.6 — Code checker.** A subagent judges the whole diff and returns every
    independent finding in one strict result artifact. Its finite manifest binds the
    controller-owned task contract, accepted Design, gated candidate and every changed
    file. The checker accounts for every manifest member and preserves concrete checked
@@ -884,7 +890,7 @@ it.**
    still stop before settlement. An accepted defect fails through C3.9. A complete
    account without one can reach the final gate and carries every `alternative` in
    `### Disagreement`. It never allocates round 11.
-7. **C3.7 — Final gate surface and commit.** After publishing its plan copy and staging
+8. **C3.7 — Final gate surface and commit.** After publishing its plan copy and staging
    the exact candidate, a fresh logical gate runner reads the real stored list. It scans
    additions, removals, renames, changed command definitions and uncovered new targets.
    It atomically publishes one op-scoped physical report with every executable gate

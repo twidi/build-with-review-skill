@@ -179,8 +179,16 @@ goes in it.
 
 You are not designing blind: **the tree is in front of you.** Read it.
 
+Establish the task's exact parent product obligation before writing the Design. Read the
+lot's exact `Covers:` obligation and the task's exact `Descends from:` obligation. For a
+normal lot, read the named spec decision. For a sub-lot, read the exact
+confirmed-finding artifact named by `Covers:` and the finding identity named by
+`Descends from:`. Do not infer a source from the lot name or substitute a similar
+artifact. Stay within the current task and the directly coupled evidence its guarantee
+requires.
+
 1. **Read your task's blocks in the plan** — `Achieves`, `Files`, `To verify`, and the
-   spec decision it descends from. Read the spec passage itself.
+   exact parent product source established above.
 2. **Read the code you are going to touch**, and the code around it. Find the patterns
    this project already uses for this kind of thing.
 3. **Split the work into steps.** A step is a coherent change, usually across more
@@ -205,7 +213,7 @@ Sentences about the product, never test names, never files, never commands.
 
 - **Every line of your task's `To verify`.** All of them. A line you leave uncovered is
   a thing nobody will ever prove, and the design checker counts them.
-- **The spec decision** your task descends from, and the **Global Constraints**.
+- **The exact parent product source established above**, and the **Global Constraints**.
 - **Each of your steps**: if this step were done wrong, what would break, and how would
   we see it?
 - **The alternative you discarded.** For each one, there should be a behaviour that
@@ -215,6 +223,33 @@ Sentences about the product, never test names, never files, never commands.
 **A behaviour no test could prove** — a rendering question, a timing, an interaction —
 is declared anyway, with one line saying why nothing will cover it. Dropping it from
 the list is what is forbidden.
+
+---
+
+## Design self review
+
+**Once, and only once, for each newly written Design.** After the `### Design` block is
+complete and before its first Design checker, reread the complete Design, the frozen
+task contract, the exact parent product source established above, and the directly
+relevant repository evidence.
+
+Ask four things:
+
+1. Does the Design satisfy every line of the task contract and its parent product
+   obligation?
+2. Do its steps, interfaces and directly required dependencies form one complete and
+   coherent change?
+3. Do its chosen and discarded alternatives follow the real repository evidence?
+4. Do its declared behaviours cover every supported success, failure, ambiguous
+   outcome, repetition, retry and recovery that affects this task's guarantee?
+
+**Fix the Design during this same pass.** Then reread the affected parts and continue to
+the first Design checker. This self review writes no journal event and consumes no
+Design-checker round.
+
+Do not repeat it after checker corrections. The checker and its bounded rounds own the
+independent passes that follow. A retry that keeps an already accepted Design and starts
+at *Implement* does not run it again. A retry that writes a new Design runs it once.
 
 ---
 

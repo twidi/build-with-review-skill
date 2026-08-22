@@ -1713,6 +1713,14 @@ physical regeneration allocates another logical round or another domain spend. T
 refusal, or loss of checker addressability, the controller sends no guessed follow-up.
 It writes `{"unusable":"lost"}` to **close the exact open call before regeneration**.
 
+Before a newly written Design enters its first Design-checker round, the implementer
+runs one **Design self review**. It checks the complete Design against the frozen task
+contract, parent product obligation, directly relevant repository evidence, internal
+composition, decisions and supported outcomes. It fixes the Design inside that same
+pass. The self review creates no journal event and spends no checker round. Checker
+corrections do not repeat it. A retry that preserves an accepted Design skips it; a
+retry that writes a new Design runs it once.
+
 The pair is the resume test:
 
 - latest domain `bound.spent`, no matching `verdict.consumed` → the result was never made
