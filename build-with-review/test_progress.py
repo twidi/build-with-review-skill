@@ -5966,6 +5966,53 @@ def design_self_review_precedes_the_first_checker_without_creating_a_round():
 
 
 @test
+def human_judgment_context_precedes_every_choice_widget_without_a_new_schema():
+    with open(os.path.join(HERE, "SKILL.md"), encoding="utf-8") as f:
+        skill = f.read()
+    mode_paths = {
+        "SPEC": os.path.join(HERE, "prompts", "spec", "MODE.md"),
+        "CONSTRUCTION": os.path.join(HERE, "prompts", "construction", "MODE.md"),
+        "PRODUCT REVIEW": os.path.join(HERE, "prompts", "product-review", "MODE.md"),
+        "AMENDMENT": os.path.join(HERE, "prompts", "amendment", "MODE.md"),
+    }
+    modes = {}
+    for name, path in mode_paths.items():
+        with open(path, encoding="utf-8") as f:
+            modes[name] = " ".join(f.read().split())
+
+    skill_flat = " ".join(skill.split())
+    check("The widget is the last step, never the explanation" in skill_flat,
+          "a human judgment must receive context before its widget")
+    check("why the answer is necessary now" in skill_flat and "what cannot continue without it" in skill_flat,
+          "the orchestrator must explain the decision need and blocker")
+    check("who detected it" in skill_flat and "evidence confirmed it" in skill_flat,
+          "the orchestrator must identify the decision origin and proof")
+    check("why an earlier phase did not settle it" in skill_flat,
+          "the orchestrator must explain why the question appears at this point")
+    check("Do not invent causality, fault or a missed opportunity" in skill_flat,
+          "the earlier-detection account must remain evidence-based")
+    check("advantages" in skill_flat and "downsides and risks" in skill_flat,
+          "every option must expose its trade-offs")
+    check("what the workflow does next" in skill_flat,
+          "every option must expose its downstream route")
+    check("one numbered context block per question" in skill_flat
+          and "same IDs and short labels in the widget" in skill_flat,
+          "batched decisions must map their prose to one widget call")
+    check("No fixed prose template" in skill_flat and "no new artifact or schema" in skill_flat,
+          "the presentation rule must remain prompt-only and flexible")
+    check("setup choice" in skill_flat and "provider" in skill_flat,
+          "ordinary configuration questions must stay concise")
+
+    for name, mode in modes.items():
+        check("human-judgment presentation rule" in mode,
+              f"{name} does not propagate the shared human-judgment presentation rule")
+    check(modes["PRODUCT REVIEW"].count("human-judgment presentation rule") >= 3,
+          "PRODUCT REVIEW must propagate the rule to initial, supplemental and conflict questions")
+    check("discussion is free-form" in modes["AMENDMENT"] and "final bounded choice" in modes["AMENDMENT"],
+          "AMENDMENT must preserve discussion while contextualising its final choice")
+
+
+@test
 def risk_filtered_decisions_never_use_the_shared_blocker_route():
     with open(os.path.join(COMMON_PROMPTS, "review-risk.md"), encoding="utf-8") as f:
         risk = f.read()

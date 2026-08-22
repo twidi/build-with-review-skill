@@ -152,7 +152,8 @@ The trigger appears verbatim in every child's prompt:
   spends the human's attention for nothing, and teaches them to distrust the next one.
 - **DECIDE** — the spec does settle it and the raiser missed it. Same, with the citation.
 - **ESCALATE** — only a human can answer. Batch it with any others, and give each option
-  its **user-visible consequence**, never its implementation cost.
+  its **user-visible consequence**, never its implementation cost. Present the question
+  through *How you ask*'s human-judgment rule before opening the widget.
 
 **Never hand a DECISION to a worker as if it were a finding.** A product choice made by
 the agent least equipped to make it surfaces much later, when the human sees the built
@@ -712,6 +713,34 @@ first one right before the first reviewer exists — and they hand nothing over.
   question they answer at random.
 - **Say `orchestrator`, never `controller`.** That is the human's word for the session that
   drives the work.
+
+#### Before a human-judgment widget
+
+**The widget is the last step, never the explanation.** This rule applies to every
+DECISION and every human checkpoint that needs a judgement. Before the widget, explain
+the decision in ordinary prose so the human can answer without having followed the
+whole run:
+
+- why the answer is necessary now, and what cannot continue without it;
+- who detected it, in which role and phase, and what evidence confirmed it;
+- why an earlier phase did not settle it. If the evidence shows that an earlier phase
+  missed it, say so factually. If the reason is unknown, say that. **Do not invent
+  causality, fault or a missed opportunity;**
+- for every option: what it means, its product or workflow consequence, its advantages,
+  its downsides and risks, and what the workflow does next if the human selects it.
+
+Use **one numbered context block per question** when several judgements are batched.
+Keep the same IDs and short labels in the widget, in the same order. Then send one widget
+call, up to its normal capacity. A short widget description may summarise the prose; it
+never replaces it.
+
+**No fixed prose template.** Write the amount and structure the decision needs. This is
+presentation only: it creates no new artifact or schema and no mechanical validator
+judges the explanation.
+
+A routine setup choice stays concise: provider, concurrency cap, session placement and
+the ordinary worktree question do not need this account. If setup exposes an abnormal
+state that needs human judgement, explain that judgement through this rule.
 
 ### The human checkpoints that set things up
 

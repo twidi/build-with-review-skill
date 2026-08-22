@@ -672,8 +672,9 @@ The three outcomes of a DECISION, and the rule that no round starts while one is
 in `SKILL.md`. An escalated product answer receives its `R<N>`, `ruling` and complete
 run-wide `ruling.ready` state there. Compare the proposed fixer assignment with every
 active product answer, including closed-batch answers. Resolve any conflict before the
-assignment. One addition here: **no fixer round starts while a DECISION or its global
-answer state is open.**
+assignment. Before its widget, use `SKILL.md`'s **human-judgment presentation rule**:
+give the decision need, origin, evidence, timing and option trade-offs. One addition
+here: **no fixer round starts while a DECISION or its global answer state is open.**
 
 ### Recurring findings, and rotating the fixer
 

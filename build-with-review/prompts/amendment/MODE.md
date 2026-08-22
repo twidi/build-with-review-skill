@@ -147,8 +147,11 @@ unclosed edits, and park the very reviewers whose job is to re-verify the change
 
 ## A1 — Discuss until the decision is settled
 
-**You and the human talk.** No imposed form, no number of exchanges, no widget shape: the
-subject decides how far it goes. Some answers take one message, some take twenty.
+**You and the human talk.** The discussion is free-form. The subject decides how far it
+goes: some answers take one message, some take twenty. When that discussion reaches one
+final bounded choice, use `SKILL.md`'s **human-judgment presentation rule**. Explain the
+need, origin, evidence, timing and each option's trade-offs, then ask through the widget.
+The rule structures the final choice, not the preceding exchanges.
 
 **One origin skips this discussion: an R2.4 decision batch is already settled.** Its
 initial `decision.batch.settled` and any `decision.batch.supplemented` events carry every

@@ -248,6 +248,11 @@ as one complete ruling. Do not ask for the maximum or complete schedule. Reuse t
 until a changed command, materially changed concern, new concern or explicit human
 revocation reasonably reopens it.
 
+This is a judgement question. Before its widget, use `SKILL.md`'s
+**human-judgment presentation rule**. Explain why the uncertainty survives, who found it,
+why it appears now, and the consequences, advantages and downsides of confirming or
+rejecting interference.
+
 Write the complete derived schedule draft to one real file. Publish it only through:
 
 ```sh
@@ -1611,8 +1616,9 @@ Read what it is asking, and answer in one of three ways:
 - **Only a human can answer** — it is a DECISION. Escalate it through `SKILL.md`'s
   identified `R<N>` route and leave the session `blocked`. Publish the run-wide
   `ruling.ready` state and resolve any conflict with an earlier active answer before the
-  spec edit or amendment route. Set the implementer back to `working` only after that
-  route has put the effective answer in the spec, just before you send it down.
+  spec edit or amendment route. Before the widget, use `SKILL.md`'s
+  **human-judgment presentation rule**. Set the implementer back to `working` only after
+  that route has put the effective answer in the spec, just before you send it down.
 
   ```
   progress.py session-status <id> blocked

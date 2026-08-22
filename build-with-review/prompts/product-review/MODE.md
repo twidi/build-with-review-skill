@@ -514,7 +514,9 @@ One refutation stays yours: **refuting from the spec, with the citation.**
    Never allocate another batch and never trust the partial file.
 4. **Send every currently confirmed DECISION in that source to the human as one
    message.** A refuted DECISION stays silent unless a later recheck reactivates it. Each
-   option says what a user would see, never what it costs to build. Then wait.
+   option says what a user would see, never what it costs to build. Before the widget,
+   use `SKILL.md`'s **human-judgment presentation rule** for every stable `D<N>` and keep
+   those IDs aligned with the batched widget. Then wait.
 
    The answer also lands as **one journal event**, before any route. The data binds every
    stable ID to its chosen option and its mechanical route. The text carries every exact
@@ -654,8 +656,10 @@ One refutation stays yours: **refuting from the spec, with the citation.**
       reconstruction reads that snapshot and never reapplies an older refutation over
       it.
    3. **Settle every newly live unanswered DECISION before another route runs.** Send all
-      `answer required` items in this one snapshot to the human as one message. Record
-      the whole answer group atomically:
+      `answer required` items in this one snapshot to the human as one message. Before
+      the widget, use `SKILL.md`'s **human-judgment presentation rule** for every item;
+      explain why this later recheck made it newly live. Record the whole answer group
+      atomically:
 
       ```sh
       progress.py note decision.batch.supplemented \
@@ -710,7 +714,11 @@ One refutation stays yours: **refuting from the spec, with the citation.**
         --data '{"owner":"B<B>","conflict":<C>}' --text "<the conflict source path>"
       ```
 
-      Only now ask the human. Record the whole resolution atomically. Its `updates` list
+      Only now ask the human. Before the widget, use `SKILL.md`'s
+      **human-judgment presentation rule** for this conflict. Explain the incompatible
+      standing answers, the evidence that exposed the conflict, why it appears now, and
+      every outcome's trade-offs and next route. Record the whole resolution atomically.
+      Its `updates` list
       names every affected stable ID; the closed `action` is `keep`, `supersede`,
       `qualify`, `replace` or `reconcile`. Each update also carries its resulting `active`
       or `superseded` status, its current route when active, and the active ID that
