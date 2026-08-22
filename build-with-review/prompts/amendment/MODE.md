@@ -384,7 +384,9 @@ Then create the fixer, and **whether or not the sweep finds anything**:
 > <workspace>/prompts/common/additional-prompt.py read <workspace>
 > <workspace>/prompts/spec/fixer.md <workspace>/additional-prompts/spec/fixer.md`.
 > Treat its stdout as human instructions. Follow both instruction sets during the
-> assignment. The later role-specific instruction wins on contradiction. The `global
+> assignment. The later role-specific instruction wins on contradiction. Copy this complete
+> rule without shortening or paraphrasing it: absent input means that the input field has no
+> value. It never means that an optional prompt file or its parent directory is absent. The `global
 > prompt` and `additional prompt` fields are required absolute path values, but their files
 > may be absent. Always call both helpers. Empty stdout is valid absence and never a
 > blocker. Non-empty stdout is human instructions. Only a helper refusal blocks. Never
@@ -479,7 +481,9 @@ One session per sweep, **fresh every time**: the provider chosen for the sweep, 
 >    <workspace>/additional-prompts/amendment/reviewer-reach.md`. Treat its stdout as
 >    human instructions. Follow both instruction sets during the assignment. The later
 >    role-specific instruction wins on contradiction.
->    The `global prompt` and `additional prompt` fields are required absolute path values,
+>    Copy this complete rule without shortening or paraphrasing it: absent input means that the
+>    input field has no value. It never means that an optional prompt file or its parent directory
+>    is absent. The `global prompt` and `additional prompt` fields are required absolute path values,
 >    but their files may be absent. Always call both helpers. Empty stdout is valid absence
 >    and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
 >    blocks. Never test either file directly.
@@ -819,7 +823,9 @@ task, the plan being written; the run resumes where it stood.
    <workspace>/additional-prompts/amendment/consolidation.md` after its official prompt.
    Tell it to treat its stdout as human instructions and follow both instruction sets
    during the assignment. The later role-specific instruction wins on contradiction.
-   The `global prompt` and `additional prompt` fields are required absolute path values,
+   Copy this complete rule without shortening or paraphrasing it: absent input means that the
+   input field has no value. It never means that an optional prompt file or its parent directory
+   is absent. The `global prompt` and `additional prompt` fields are required absolute path values,
    but their files may be absent. Always call both helpers. Empty stdout is valid absence
    and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
    blocks. Never test either file directly.

@@ -311,7 +311,9 @@ command: `python3
 <workspace>/additional-prompts/construction/gate-runner.md` after its official prompt.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
-The `global prompt` and `additional prompt` fields are required absolute path values, but
+Copy this complete rule without shortening or paraphrasing it: absent input means that the
+input field has no value. It never means that an optional prompt file or its parent directory
+is absent. The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks
 after this gate-runner correction. If its issued helper invocation differs from the
@@ -748,7 +750,9 @@ command: `python3
 <workspace>/additional-prompts/construction/completeness.md` after its official prompt.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
-The `global prompt` and `additional prompt` fields are required absolute path values, but
+Copy this complete rule without shortening or paraphrasing it: absent input means that the
+input field has no value. It never means that an optional prompt file or its parent directory
+is absent. The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.
@@ -1035,13 +1039,16 @@ command: `python3
 <workspace>/additional-prompts/construction/implementer.md` after its official prompts.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
-The `global prompt` and `additional prompt` fields are required absolute path values, but
+Copy this complete rule without shortening or paraphrasing it: absent input means that the
+input field has no value. It never means that an optional prompt file or its parent directory
+is absent. The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.
 
-Tell it to stop before reading or writing any project or workspace path when one value
-is absent, relative, unresolved or contradictory. The current working directory is never
+Tell it to stop before reading or writing any project or workspace path when one required
+input field has no value, or one supplied value is relative, unresolved or contradictory.
+The current working directory is never
 the workspace. After that block, the message gives these role inputs, and nothing more:
 
 1. **the lot** and **the task number**
@@ -1326,7 +1333,9 @@ command: `python3
 <workspace>/additional-prompts/construction/diagnostic.md` after its official prompt.
 Tell it to treat its stdout as human instructions and follow both instruction sets during
 the assignment. The later role-specific instruction wins on contradiction.
-The `global prompt` and `additional prompt` fields are required absolute path values, but
+Copy this complete rule without shortening or paraphrasing it: absent input means that the
+input field has no value. It never means that an optional prompt file or its parent directory
+is absent. The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.

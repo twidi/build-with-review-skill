@@ -23,8 +23,9 @@ additional prompt: <workspace>/additional-prompts/construction/implementer.md
 
 Before doing anything, resolve all five values without following an alias. The role
 prompt must be that exact real file in the workspace. The workspace's physical Git
-repository must equal `repository`. If one value is absent, relative, unresolved or
-contradictory, stop before reading or writing any project or workspace path. Report the
+repository must equal `repository`. If one required input field has no value, or one
+supplied value is relative, unresolved or contradictory, stop before reading or writing
+any project or workspace path. Report the
 blocker to your parent. **The current working directory is never the workspace.** Never
 infer or create a replacement.
 
@@ -278,7 +279,9 @@ generation**.
   <workspace>/additional-prompts/construction/design-checker.md` after its official prompt.
   Tell it to treat its stdout as human instructions and follow both instruction sets
   during the assignment. The later role-specific instruction wins on contradiction.
-  The `global prompt` and `additional prompt` fields are required absolute path values,
+  Copy this complete rule without shortening or paraphrasing it: absent input means that the
+  input field has no value. It never means that an optional prompt file or its parent directory
+  is absent. The `global prompt` and `additional prompt` fields are required absolute path values,
   but their files may be absent. Always call both helpers. Empty stdout is valid absence
   and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
   blocks. Never test either file directly.
@@ -582,7 +585,9 @@ that is what the next step is for.
   <workspace>/additional-prompts/construction/code-checker.md` after its official prompt.
   Tell it to treat its stdout as human instructions and follow both instruction sets
   during the assignment. The later role-specific instruction wins on contradiction.
-  The `global prompt` and `additional prompt` fields are required absolute path values,
+  Copy this complete rule without shortening or paraphrasing it: absent input means that the
+  input field has no value. It never means that an optional prompt file or its parent directory
+  is absent. The `global prompt` and `additional prompt` fields are required absolute path values,
   but their files may be absent. Always call both helpers. Empty stdout is valid absence
   and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
   blocks. Never test either file directly.
@@ -786,7 +791,9 @@ Now spawn one fresh **gate runner** before you commit:
   <workspace>/additional-prompts/construction/gate-runner.md` after its official prompt.
   Tell it to treat its stdout as human instructions and follow both instruction sets
   during the assignment. The later role-specific instruction wins on contradiction. The
-  `global prompt` and `additional prompt` fields are required absolute path values, but
+  Copy this complete rule without shortening or paraphrasing it: absent input means that the
+  input field has no value. It never means that an optional prompt file or its parent directory
+  is absent. The `global prompt` and `additional prompt` fields are required absolute path values, but
   their files may be absent. Always call both helpers. Empty stdout is valid absence and
   never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks
   after this gate-runner correction. If its issued helper invocation differs from the

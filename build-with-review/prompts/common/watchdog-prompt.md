@@ -27,8 +27,9 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 >
 > Resolve all five absolute paths first. `<ROLE_PROMPT>` must be the real source template
 > at `<WORKSPACE>/prompts/common/watchdog-prompt.md`. The workspace's physical Git
-> repository must equal `<REPOSITORY>`. If one value is absent, relative, unresolved or
-> contradictory, stop before reading or writing any project or workspace path and report
+> repository must equal `<REPOSITORY>`. If one required input field has no value, or one
+> supplied value is relative, unresolved or contradictory, stop before reading or writing
+> any project or workspace path and report
 > the blocker to your parent. The current working directory is never the workspace. Never
 > infer or create a replacement.
 >
@@ -42,7 +43,9 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 > role-specific instruction wins on contradiction. An empty stdout means no additional
 > instruction. A refusal is a blocker. Never read the path directly or read another
 > optional prompt path.
-> The `global prompt` and `additional prompt` fields are required absolute path values,
+> Copy this complete rule without shortening or paraphrasing it: absent input means that the
+> input field has no value. It never means that an optional prompt file or its parent directory
+> is absent. The `global prompt` and `additional prompt` fields are required absolute path values,
 > but their files may be absent. Always call both helpers. Empty stdout is valid absence
 > and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
 > blocks. Never test either file directly.

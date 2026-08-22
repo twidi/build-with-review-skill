@@ -254,7 +254,9 @@ the mandate's preset, **question widget disabled**.
 >    <workspace>/additional-prompts/spec/reviewer-<slug>.md`. Treat its stdout as human
 >    instructions; empty stdout means no additional instruction. Follow both instruction
 >    sets during the assignment. The later role-specific instruction wins on contradiction.
->    The `global prompt` and `additional prompt` fields are required absolute path values,
+>    Copy this complete rule without shortening or paraphrasing it: absent input means that
+>    the input field has no value. It never means that an optional prompt file or its parent
+>    directory is absent. The `global prompt` and `additional prompt` fields are required absolute path values,
 >    but their files may be absent. Always call both helpers. Empty stdout is valid absence
 >    and never a blocker. Non-empty stdout is human instructions. Only a helper refusal
 >    blocks. Never test either file directly.
@@ -346,7 +348,9 @@ preset `Fixer`, **question widget disabled**.
 > <workspace>/prompts/common/additional-prompt.py read <workspace>
 > <workspace>/prompts/spec/fixer.md <workspace>/additional-prompts/spec/fixer.md`.
 > Treat its stdout as human instructions. Follow both instruction sets during the
-> assignment. The later role-specific instruction wins on contradiction. The `global
+> assignment. The later role-specific instruction wins on contradiction. Copy this complete
+> rule without shortening or paraphrasing it: absent input means that the input field has no
+> value. It never means that an optional prompt file or its parent directory is absent. The `global
 > prompt` and `additional prompt` fields are required absolute path values, but their files
 > may be absent. Always call both helpers. Empty stdout is valid absence and never a
 > blocker. Non-empty stdout is human instructions. Only a helper refusal blocks. Never

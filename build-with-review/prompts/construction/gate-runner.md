@@ -18,8 +18,9 @@ additional prompt: <workspace>/additional-prompts/construction/gate-runner.md
 
 The role prompt must be that exact real file inside the workspace. The workspace must
 contain its frozen `SKILL.md` and `prompts/`, and its physical repository ancestor must
-equal `repository`. If one field is absent, relative, unresolved or contradictory, stop
-before reading or writing any project or workspace path. Report the blocker. **The current
+equal `repository`. If one required input field has no value, or one supplied value is
+relative, unresolved or contradictory, stop before reading or writing any project or
+workspace path. Report the blocker. **The current
 working directory is never the workspace.** Never infer or create a replacement.
 
 After this official prompt, read the global additional prompt through this command: `python3
@@ -42,7 +43,7 @@ after this same-call correction:
   same live gate runner and the same physical bracket. This local correction does not
   consume a replacement, create another operation or run a gate command.
 - If the exact corrected invocation refuses, report that refusal as a blocker. Also stop
-  immediately when an input value itself is absent, relative, unresolved or
+  immediately when a required input field has no value, or a supplied value is relative, unresolved or
   contradictory. Never infer, repair or replace an authoritative value.
 
 Never test either file directly.

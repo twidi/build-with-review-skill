@@ -110,9 +110,10 @@ tool on Claude Code, its equivalent on Codex.
   additional prompt: <workspace>/additional-prompts/<role-prompt path below prompts/>
   ```
 
-  Include the same refusal in its message: if one field is absent, relative, unresolved
-  or contradictory, it must stop before reading or writing any project or workspace
-  path and report the blocker. The current working directory is never a workspace
+  Include the same refusal in its message: if one required input field has no value, or
+  one supplied value is relative, unresolved or contradictory, it must
+  stop before reading or writing any project or workspace path and report the blocker.
+  The current working directory is never a workspace
   fallback. A prompt path inside the workspace does not replace the explicit workspace.
 - **Read global instructions before role-specific instructions.** After every official
   prompt, read the global additional prompt through this command: `python3
@@ -128,7 +129,9 @@ tool on Claude Code, its equivalent on Codex.
   a blocker. Never read the path directly. Read no other optional prompt path. Follow both
   instruction sets during the assignment. The later role-specific instruction wins on
   contradiction.
-- **Additional-prompt lookup is mandatory; the files are optional.** The `global prompt`
+- **Additional-prompt lookup is mandatory; the files are optional.** Copy this complete
+  rule without shortening or paraphrasing it: absent input means that the input field has
+  no value. It never means that an optional prompt file or its parent directory is absent. The `global prompt`
   and `additional prompt` fields are required absolute path values, but their files may be
   absent. Always call both helpers. Empty stdout is valid absence and never a blocker.
   Non-empty stdout is human instructions. Only a helper refusal blocks. Never test either

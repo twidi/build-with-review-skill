@@ -146,8 +146,9 @@ role prompt: <workspace>/prompts/construction/MODE.md
 global prompt: <workspace>/additional-prompts/global.md
 additional prompt: <workspace>/additional-prompts/construction/MODE.md
 
-Resolve all five runtime inputs first. If one is absent, relative, unresolved or
-contradictory, stop before reading or writing any project or workspace path and tell the
+Resolve all five runtime inputs first. If one required input field has no value, or one
+supplied value is relative, unresolved or contradictory, stop before reading or writing
+any project or workspace path and tell the
 human. The current working directory is never the workspace. Never infer or create a
 replacement.
 
@@ -165,7 +166,9 @@ read the role-specific additional prompt through this command: `python3
 instructions. Follow both instruction sets during the assignment. The later role-specific
 instruction wins on contradiction. Read no other optional prompt path.
 
-The `global prompt` and `additional prompt` fields are required absolute path values, but
+Copy this complete rule without shortening or paraphrasing it: absent input means that the
+input field has no value. It never means that an optional prompt file or its parent directory
+is absent. The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.

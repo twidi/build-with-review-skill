@@ -126,6 +126,28 @@ def shared_runtime_contract_forbids_a_working_directory_fallback():
         check("current working directory" in text and "stop before reading or writing" in text,
               f"{subject} does not refuse a missing workspace before side effects")
 
+    direct_runtime_contracts = [
+        ("SKILL.md", skill),
+        ("worker.md", worker),
+        ("implementer.md", read("prompts/construction/implementer.md")),
+        ("gate-runner.md", read("prompts/construction/gate-runner.md")),
+        ("watchdog-prompt.md", read("prompts/common/watchdog-prompt.md")),
+        ("handover", read("prompts/common/handover-to-construction-rules.md")),
+        ("construction launch", read("prompts/construction/MODE.md")),
+    ]
+    ambiguous_absence_rules = (
+        "if one value is absent",
+        "if one field is absent",
+        "if one is absent",
+        "when one value is absent",
+        "one runtime input is absent",
+    )
+    for subject, text in direct_runtime_contracts:
+        normalized = " ".join(text.lower().split())
+        for stale in ambiguous_absence_rules:
+            check(stale not in normalized,
+                  f"{subject} confuses a missing input value with an absent optional file: {stale}")
+
 
 @test
 def gate_runner_requires_the_exact_workspace_and_output_path():
@@ -349,6 +371,12 @@ def every_launch_reads_the_global_prompt_before_its_role_prompt():
               f"{name} launch does not preserve role-specific precedence")
         check("required absolute path values" in normalized,
               f"{name} launch does not require both additional-prompt path inputs")
+        check("absent input means that the input field has no value" in normalized,
+              f"{name} launch leaves absent input ambiguous with an absent optional file")
+        check("it never means that an optional prompt file or its parent directory is absent" in normalized,
+              f"{name} launch lets an absent optional file trigger the generic input refusal")
+        check("copy this complete rule without shortening or paraphrasing it" in normalized,
+              f"{name} launch permits a partial or paraphrased prompt-lookup rule")
         check("their files may be absent" in normalized,
               f"{name} launch wrongly permits requiring optional prompt files to exist")
         check("always call both helpers" in normalized,

@@ -1539,7 +1539,9 @@ for proven absence. It blocks on an alias or other invalid occupant in the works
 path. Read no other optional prompt path. Follow both instruction sets during the
 assignment. The later role-specific instruction wins on contradiction.
 
-The `global prompt` and `additional prompt` fields are required absolute path values, but
+Copy this complete rule without shortening or paraphrasing it into every child message:
+absent input means that the input field has no value. It never means that an optional prompt
+file or its parent directory is absent. The `global prompt` and `additional prompt` fields are required absolute path values, but
 their files may be absent. Always call both helpers. Empty stdout is valid absence and
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.
@@ -1581,8 +1583,9 @@ python3 <workspace>/prompts/common/additional-prompt.py remove-global \
 
 **The current working directory is never the workspace.** Never omit the workspace because
 the role prompt sits inside it or because the child opens in the repository. Tell every
-child to stop before reading or writing any project or workspace path when one runtime
-input is absent, relative, unresolved or contradictory. It reports the blocker to its
+child to stop before reading or writing any project or workspace path when one required
+runtime input field has no value, or one supplied value is relative, unresolved or
+contradictory. It reports the blocker to its
 parent. It never guesses, derives or creates a replacement workspace.
 
 ---
