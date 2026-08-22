@@ -496,10 +496,12 @@ def parse_artifact_bytes(raw, *, expected_built=None, expected_round=None):
         raise ValueError("the parent correction position is invalid")
     for field in (
         "Parent generation SHA-256", "Source accepted gate", "Correction base gate",
-        "Source opening", "Source findings SHA-256",
+        "Source findings SHA-256",
     ):
         if not HASH_RE.fullmatch(metadata[field]):
             raise ValueError(f"{field} is malformed")
+    if not PROOF_RE.fullmatch(metadata["Source opening"]):
+        raise ValueError("Source opening is malformed")
     for field in ("Source reviewed commit", "Correction base commit"):
         if not COMMIT_RE.fullmatch(metadata[field]):
             raise ValueError(f"{field} is malformed")
@@ -629,6 +631,15 @@ def parse_artifact_bytes(raw, *, expected_built=None, expected_round=None):
         "built": built,
         "round": round_number,
         "parent_position": metadata["Parent position"],
+        "identity": {
+            "parent_generation_sha256": metadata["Parent generation SHA-256"],
+            "source_reviewed_commit": metadata["Source reviewed commit"],
+            "source_accepted_gate": metadata["Source accepted gate"],
+            "correction_base_commit": metadata["Correction base commit"],
+            "correction_base_gate": metadata["Correction base gate"],
+            "source_pass": int(metadata["Source pass"][1:]),
+            "source_opening": metadata["Source opening"],
+        },
         "source_findings_path": metadata["Source findings"],
         "source_findings_sha256": metadata["Source findings SHA-256"],
         "source_findings": list(source_coverage),

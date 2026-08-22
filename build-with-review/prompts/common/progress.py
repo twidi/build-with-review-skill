@@ -29,6 +29,7 @@ The rules for calling this script are in progress-rules.md, next to it.
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -51,6 +52,16 @@ from authority_precedence import (
     validate_global_authority_precedence,
     validate_recheck_generation,
     validate_spec_loop_generation,
+)
+from correction_authority import (
+    CorrectionAuthorityLease,
+    EMPTY_FINAL_CHECKER_SET_SHA256,
+    generation_sha256,
+    normalize_allocation,
+    normalize_controller_successor,
+    product_confirmed_path,
+    product_report_path,
+    publish_content_object,
 )
 
 # The two closed vocabularies. An unknown name is refused: a vocabulary that
@@ -75,6 +86,7 @@ NOTE_KINDS = {
     "rewind.done", "fixer.dispatched", "verdict.consumed", "design.review.resolved",
     "design.review.blocked",
     "code.review.resolved", "code.review.blocked",
+    "correction.round.allocated", "correction.round.allocation.superseded",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -85,8 +97,8 @@ TERMINAL = ("done", "failed", "cancelled", "superseded")
 DIRECT_RULING_ROUTES = {
     "closed", "spec-in-place", "amendment", "spec-fixer", "amendment-fixer",
 }
-BATCH_ROUTES = {"closed", "sublot", "spec-in-place", "amendment"}
-BATCH_CLOSE_OUTCOMES = {"no-correction", "sublot"}
+BATCH_ROUTES = {"closed", "implementation", "sublot", "spec-in-place", "amendment"}
+BATCH_CLOSE_OUTCOMES = {"no-correction", "correction", "sublot"}
 DIRECT_AUTHORITY_KINDS = {"ruling.ready", "decision.conflict.ready"}
 PRODUCT_REVIEW_MANDATES = ("unlooked", "user", "meaning", "quality", "coverage")
 AMENDMENT_ORIGINS = {"construction", "product-review"}
@@ -149,6 +161,20 @@ REPO = str(Path(WORKSPACE).parent.parent.parent.resolve())
 # pointing at the instance that owns these sessions.
 TWICC = shlex.split(os.environ.get("TWICC_BIN") or "twicc")
 NEUTRAL_CWD = tempfile.gettempdir()
+
+# These journal transitions can select, replace, or consume one Correction
+# Round owner. They share one physical lease with the mutating shell helpers.
+CORRECTION_AUTHORITY_NOTE_KINDS = {
+    "pass.opened",
+    "pass.closed",
+    "sublot.allocated",
+    "sublot.opened",
+    "amendment.opened",
+    "amendment.committed",
+    "rewind.done",
+    "correction.round.allocated",
+    "correction.round.allocation.superseded",
+}
 
 
 def fail(what, detail=None, journaled=False):
@@ -5207,6 +5233,11 @@ PASS_OPENING_KEYS = {
     "built", "commit", "gate", "source_scope", "source_owner",
     "source_lot", "source_task", "source_attempt",
 }
+PASS_OPENING_V2_KEYS = {
+    "schema", "built", "position", "generation_sha256", "pass", "commit", "gate",
+    "source_scope", "correction_terminal_kind", "correction_terminal", "source_owner",
+    "source_lot", "source_round", "source_task", "source_attempt",
+}
 
 
 def pass_closes(entries, opening_index, before):
@@ -5263,7 +5294,23 @@ def commit_changes_only(commit, expected_path):
     return result.returncode == 0 and result.stdout.splitlines() == [expected_path]
 
 
-def validate_baseline_pass_successor(entries, before, built, commit, owner, subject):
+def pass_generation_before(entries, opening_index, subject):
+    data = note_data(entries[opening_index])
+    if data.get("schema") == 2:
+        return data["position"], data["generation_sha256"]
+    if data.get("source_scope") == "task":
+        _, generation = validate_task_pass_completion(
+            entries, opening_index, data, subject,
+        )
+        return 0, generation
+    account, generation = validate_baseline_pass_successor(
+        entries, opening_index, data["built"], data["commit"],
+        data["source_owner"], data["gate"], subject,
+    )
+    return account["position"], generation
+
+
+def validate_baseline_pass_successor(entries, before, built, commit, owner, gate, subject):
     prior = [(index, entry) for index, entry in enumerate(entries[:before])
              if entry.get("kind") == "pass.opened"]
     if not prior:
@@ -5275,6 +5322,7 @@ def validate_baseline_pass_successor(entries, before, built, commit, owner, subj
     closes = pass_closes(entries, prior_index, before)
     if len(closes) != 1 or note_data(closes[0][1]) != {"voided": True}:
         fail(f"{subject}'s controller baseline does not follow one exact voided pass")
+    void_index, _ = closes[0]
     amendments = [(index, entry) for index, entry in enumerate(
         entries[prior_index + 1:before], prior_index + 1
     ) if entry.get("kind") == "amendment.opened"
@@ -5293,9 +5341,11 @@ def validate_baseline_pass_successor(entries, before, built, commit, owner, subj
     validate_amendment_commit_entry(entries, commit_index, amendment_commit)
     amendment_sha = note_data(amendment_commit).get("sha")
     expected_owner = f"amendment/{amendment_number}/{commit}"
+    authorities = [journal_line_proof(commit_index)]
     if commit != amendment_sha:
-        plan_events = [entry for entry in entries[commit_index + 1:before]
-                       if entry.get("kind") == "plan.written"]
+        plan_events = [(index, entry) for index, entry in enumerate(
+            entries[commit_index + 1:before], commit_index + 1,
+        ) if entry.get("kind") == "plan.written"]
         expected_plan = f"docs/plans/{os.path.basename(WORKSPACE)}-{built}-plan.md"
         parent = subprocess.run(
             ["git", "-C", project_root(), "rev-parse", f"{commit}^"],
@@ -5306,9 +5356,32 @@ def validate_baseline_pass_successor(entries, before, built, commit, owner, subj
                 or not commit_changes_only(commit, expected_plan):
             fail(f"{subject} is not the amendment commit or its exact C2 plan successor")
         expected_owner = f"plan/{built}/{commit}"
+        authorities.append(journal_line_proof(plan_events[-1][0]))
     if owner != expected_owner:
         fail(f"{subject}'s baseline gate has the wrong controller owner",
              {"expected": expected_owner, "actual": owner})
+    position, predecessor_generation = pass_generation_before(
+        entries, prior_index, f"{subject}'s voided predecessor",
+    )
+    in_pass_successor = in_pass_controller_successor(
+        entries, prior_index, void_index, built,
+        f"{subject}'s voided predecessor", require_current_head=False,
+    )
+    if in_pass_successor is not None:
+        _, predecessor_generation = in_pass_successor
+    account = normalize_controller_successor({
+        "schema": 1,
+        "kind": "controller-successor",
+        "transition": "amendment-or-plan-successor",
+        "built": built,
+        "position": position,
+        "predecessor_generation_sha256": predecessor_generation,
+        "voided_pass": journal_line_proof(void_index),
+        "authorities": authorities,
+        "commit": commit,
+        "gate": gate,
+    })
+    return account, generation_sha256(account)
 
 
 def plan_task_manifest(payload, subject):
@@ -5345,6 +5418,52 @@ def git_object_name(name, subject):
     return result.stdout.strip()
 
 
+def built_sublot_origin(entries, before, built, subject):
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "sublot.opened" and entry.get("text") == built]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact sub-lot origin")
+    opening_index, _ = openings[0]
+    allocations = [(index, entry) for index, entry in enumerate(entries[:opening_index])
+                   if entry.get("kind") == "sublot.allocated" and entry.get("text") == built]
+    if len(allocations) != 1:
+        fail(f"{subject}'s sub-lot origin has no one exact allocation")
+    allocation_index, allocation = allocations[0]
+    allocation_data = note_data(allocation)
+    if allocation_data.get("built") != built.split(".", 1)[0]:
+        fail(f"{subject}'s sub-lot allocation belongs to another root lot")
+    closes = [(index, entry) for index, entry in enumerate(
+        entries[allocation_index + 1:opening_index], allocation_index + 1,
+    ) if entry.get("kind") == "pass.closed"]
+    if len(closes) != 1:
+        fail(f"{subject}'s sub-lot opening has no one exact positive source close")
+    close_index, close = closes[0]
+    _, _, confirmed, parent, _ = validate_pass_close(
+        entries[:close_index], note_data(close), f"{subject}'s sub-lot source close",
+        historical=True,
+    )
+    if not construction_positive_integer(confirmed) or parent != allocation_data["built"]:
+        fail(f"{subject}'s sub-lot source is not one positive parent pass")
+    return {
+        "kind": "sublot",
+        "opening": journal_line_proof(opening_index),
+        "source": journal_line_proof(close_index),
+    }
+
+
+def validate_built_task_success(entries, index, entry, built, task, task_sha, subject):
+    data = note_data(entry)
+    required = {"attempt", "lot", "sha", "gate"}
+    allowed = required | {"retry"}
+    if set(data) not in (required, allowed) \
+            or data.get("lot") != built or data.get("sha") != task_sha \
+            or not construction_positive_integer(data.get("attempt")) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))):
+        fail(f"{subject}'s stable task-{task} has malformed accepted-result authority", data)
+    validate_attempt_succeeded_entry(entries, index, entry)
+    return data
+
+
 def validate_task_pass_completion(entries, before, data, subject):
     """Prove that a task-owned first pass follows one complete built lot."""
     built, commit = data["built"], data["commit"]
@@ -5374,6 +5493,7 @@ def validate_task_pass_completion(entries, before, data, subject):
     base = git_object_name(f"{ref_root}/task-0", f"{subject}'s task-0 base")
     previous = base
     success_indexes = []
+    task_accounts = []
     for task in range(1, final_task + 1):
         task_sha = git_object_name(
             f"{ref_root}/task-{task}", f"{subject}'s stable task-{task} result",
@@ -5387,17 +5507,22 @@ def validate_task_pass_completion(entries, before, data, subject):
         matches = [(index, entry) for index, entry in enumerate(entries[:before])
                    if entry.get("kind") == "attempt.succeeded"
                    and entry.get("lot") == built and entry.get("task") == task
-                   and set(note_data(entry)) == {"attempt", "lot", "sha", "gate"}
-                   and note_data(entry).get("lot") == built
-                   and isinstance(note_data(entry).get("attempt"), int)
-                   and not isinstance(note_data(entry).get("attempt"), bool)
-                   and note_data(entry)["attempt"] > 0
-                   and re.fullmatch(r"[0-9a-f]{64}", str(note_data(entry).get("gate")))
                    and note_data(entry).get("sha") == task_sha]
         if len(matches) != 1:
             fail(f"{subject}'s stable task-{task} has no one exact accepted result",
                  f"found {len(matches)}")
-        success_indexes.append(matches[0][0])
+        success_index, success = matches[0]
+        success_data = validate_built_task_success(
+            entries, success_index, success, built, task, task_sha, subject,
+        )
+        success_indexes.append(success_index)
+        task_accounts.append({
+            "task": task,
+            "attempt": success_data["attempt"],
+            "commit": task_sha,
+            "gate": success_data["gate"],
+            "success": journal_line_proof(success_index),
+        })
         previous = task_sha
     if success_indexes != sorted(success_indexes) or len(set(success_indexes)) != final_task:
         fail(f"{subject}'s accepted task results are not in strict task order")
@@ -5419,12 +5544,47 @@ def validate_task_pass_completion(entries, before, data, subject):
             or built_data["attempts"] < final_task:
         fail(f"{subject}'s lot.built boundary contradicts its completed task manifest",
              built_data)
+    built_index = built_events[0][0]
+    if "." in built:
+        origin = built_sublot_origin(entries, before, built, subject)
+    else:
+        plan_events = [(index, entry) for index, entry in enumerate(entries[:success_indexes[0]])
+                       if entry.get("kind") == "plan.written" and entry.get("lot") == built]
+        if not plan_events:
+            fail(f"{subject}'s root lot has no exact SPEC-to-CONSTRUCTION plan authority")
+        plan_index, plan_event = plan_events[-1]
+        if note_data(plan_event).get("tasks") != final_task:
+            fail(f"{subject}'s root plan authority contradicts its task manifest")
+        plan_proof = journal_line_proof(plan_index)
+        origin = {
+            "kind": "root-lot",
+            "opening": plan_proof,
+            "source": plan_proof,
+        }
+    account = {
+        "schema": 1,
+        "kind": "built",
+        "built": built,
+        "position": 0,
+        "origin": origin,
+        "plan": {
+            "path": committed_relative,
+            "sha256": hashlib.sha256(committed.stdout).hexdigest(),
+        },
+        "tasks": task_accounts,
+        "terminal": journal_line_proof(built_index),
+        "commit": commit,
+        "gate": data["gate"],
+        "final_checker_set_sha256": EMPTY_FINAL_CHECKER_SET_SHA256,
+    }
+    return account, generation_sha256(account)
 
 
 def validate_pass_opening_history(entries, opening_index, subject):
     opening = entries[opening_index]
     data = note_data(opening)
-    if set(data) != PASS_OPENING_KEYS:
+    schema_two = data.get("schema") == 2
+    if set(data) != (PASS_OPENING_V2_KEYS if schema_two else PASS_OPENING_KEYS):
         fail(f"{subject} has a malformed current pass opening", data)
     built, commit, gate = data.get("built"), data.get("commit"), data.get("gate")
     if not isinstance(built, str) or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built):
@@ -5432,7 +5592,7 @@ def validate_pass_opening_history(entries, opening_index, subject):
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit) \
             or not isinstance(gate, str) or not re.fullmatch(r"[0-9a-f]{64}", gate):
         fail(f"{subject} has a malformed reviewed commit or gate identity")
-    if data.get("source_scope") not in {"task", "baseline"} \
+    if data.get("source_scope") not in {"task", "baseline", "correction-task"} \
             or not isinstance(data.get("source_owner"), str) \
             or not re.fullmatch(r"[A-Za-z0-9._:/-]+", data["source_owner"]) \
             or not isinstance(data.get("source_task"), int) \
@@ -5446,7 +5606,14 @@ def validate_pass_opening_history(entries, opening_index, subject):
         if data["source_lot"] != built or data["source_task"] < 1 \
                 or data["source_attempt"] < 1 or data["source_owner"] != expected_owner:
             fail(f"{subject} does not consume the exact built task identity")
-        validate_task_pass_completion(entries, opening_index, data, subject)
+        _, generation = validate_task_pass_completion(entries, opening_index, data, subject)
+        if schema_two and (
+            data.get("position") != 0 or data.get("generation_sha256") != generation
+            or data.get("correction_terminal_kind") is not None
+            or data.get("correction_terminal") is not None
+            or data.get("source_round") is not None
+        ):
+            fail(f"{subject} changes its exact built generation")
         duplicates = [entry for entry in entries[:opening_index]
                       if entry.get("kind") == "pass.opened"
                       and note_data(entry).get("built") == built]
@@ -5456,9 +5623,27 @@ def validate_pass_opening_history(entries, opening_index, subject):
         if data["source_lot"] != "-" or data["source_task"] != 0 \
                 or data["source_attempt"] != 0:
             fail(f"{subject} has a malformed baseline source identity")
-        validate_baseline_pass_successor(
-            entries, opening_index, built, commit, data["source_owner"], subject,
+        successor_account, successor_generation = validate_baseline_pass_successor(
+            entries, opening_index, built, commit, data["source_owner"], gate, subject,
         )
+        if schema_two and (
+            data.get("position") != successor_account["position"]
+            or data.get("generation_sha256") != successor_generation
+            or data.get("correction_terminal_kind") is not None
+            or data.get("correction_terminal") is not None
+            or data.get("source_round") is not None
+        ):
+            fail(f"{subject} changes its exact controller-successor generation")
+    if schema_two:
+        prior_for_built = [entry for entry in entries[:opening_index]
+                           if entry.get("kind") == "pass.opened"
+                           and note_data(entry).get("built") == built]
+        if data.get("pass") != len(prior_for_built) + 1:
+            fail(f"{subject} has the wrong pass ordinal")
+        if not isinstance(data.get("position"), int) or isinstance(data.get("position"), bool) \
+                or data["position"] < 0 \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("generation_sha256"))):
+            fail(f"{subject} has malformed generation authority")
     prior = [(index, entry) for index, entry in enumerate(entries[:opening_index])
              if entry.get("kind") == "pass.opened"]
     if prior and len(pass_closes(entries, prior[-1][0], opening_index)) != 1:
@@ -5509,12 +5694,67 @@ def normalize_pass_opened(data):
         **data, "source_scope": scope, "source_owner": owner,
         "source_lot": source_lot, "source_task": task, "source_attempt": attempt,
     }
+    if scope == "task":
+        _, generation = validate_task_pass_completion(
+            entries, len(entries), normalized, "the new product-review pass",
+        )
+        pass_ordinal = 1 + sum(
+            1 for entry in entries if entry.get("kind") == "pass.opened"
+            and note_data(entry).get("built") == built
+        )
+        normalized = {
+            "schema": 2,
+            "built": built,
+            "position": 0,
+            "generation_sha256": generation,
+            "pass": pass_ordinal,
+            "commit": commit,
+            "gate": gate,
+            "source_scope": scope,
+            "correction_terminal_kind": None,
+            "correction_terminal": None,
+            "source_owner": owner,
+            "source_lot": source_lot,
+            "source_round": None,
+            "source_task": task,
+            "source_attempt": attempt,
+        }
+    elif scope == "baseline":
+        successor_account, successor_generation = validate_baseline_pass_successor(
+            entries, len(entries), built, commit, owner, gate,
+            "the new product-review pass",
+        )
+        pass_ordinal = 1 + sum(
+            1 for entry in entries if entry.get("kind") == "pass.opened"
+            and note_data(entry).get("built") == built
+        )
+        normalized = {
+            "schema": 2,
+            "built": built,
+            "position": successor_account["position"],
+            "generation_sha256": successor_generation,
+            "pass": pass_ordinal,
+            "commit": commit,
+            "gate": gate,
+            "source_scope": scope,
+            "correction_terminal_kind": None,
+            "correction_terminal": None,
+            "source_owner": owner,
+            "source_lot": source_lot,
+            "source_round": None,
+            "source_task": task,
+            "source_attempt": attempt,
+        }
     candidate = {"event": "note", "kind": "pass.opened", "data": normalized}
     validate_pass_opening_history(entries + [candidate], len(entries), "the new product-review pass")
     return normalized
 
 
 PRODUCT_RECEIPT_KEYS = REPORT_COUNT_KEYS | {"pass_commit", "pass_gate", "report_sha256"}
+PRODUCT_RECEIPT_V2_KEYS = REPORT_COUNT_KEYS | {
+    "schema", "pass_opening", "position", "generation_sha256", "pass", "pass_commit",
+    "pass_gate", "mandate", "report", "report_sha256",
+}
 
 
 def product_completion_labels(mandate):
@@ -5608,7 +5848,11 @@ def audit_product_findings(report_text, mandate):
     return counts
 
 
-def product_report_relative(built, mandate):
+def product_report_relative(built, mandate, opening_data=None):
+    if isinstance(opening_data, dict) and opening_data.get("schema") == 2:
+        return product_report_path(
+            built, opening_data["position"], opening_data["pass"], mandate,
+        )
     root = built.split(".", 1)[0]
     return PurePosixPath("reports", "product-review", root, f"{built}-{mandate}.md")
 
@@ -5619,14 +5863,26 @@ def validate_product_report_entry(entries, opening_index, index, entry, built, s
         fail(f"{subject} has an unknown product-review mandate", mandate)
     data = note_data(entry)
     opening_data = note_data(entries[opening_index])
-    if set(data) != PRODUCT_RECEIPT_KEYS or any(
+    schema_two = opening_data.get("schema") == 2
+    expected_keys = PRODUCT_RECEIPT_V2_KEYS if schema_two else PRODUCT_RECEIPT_KEYS
+    if set(data) != expected_keys or any(
         not isinstance(data.get(key), int) or isinstance(data.get(key), bool) or data[key] < 0
         for key in REPORT_COUNT_KEYS
     ) or data.get("pass_commit") != opening_data["commit"] \
             or data.get("pass_gate") != opening_data["gate"] \
             or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("report_sha256"))):
         fail(f"{subject} has malformed or stale durable report proof", data)
-    report = product_report_relative(built, mandate)
+    report = product_report_relative(built, mandate, opening_data)
+    if schema_two and (
+        data.get("schema") != 2
+        or data.get("pass_opening") != journal_line_proof(opening_index)
+        or data.get("position") != opening_data["position"]
+        or data.get("generation_sha256") != opening_data["generation_sha256"]
+        or data.get("pass") != opening_data["pass"]
+        or data.get("mandate") != mandate
+        or data.get("report") != str(report)
+    ):
+        fail(f"{subject} changes its exact pass-local report generation", data)
     path = real_workspace_file(report, f"{subject}'s report")
     with open(path, "rb") as source:
         payload = source.read()
@@ -5668,15 +5924,29 @@ def normalize_product_report(entries, data, mandate):
         )
         if not reopened:
             fail(f"the {mandate} report already has a current accepted receipt")
-    report = product_report_relative(built, mandate)
+    opening_data = note_data(opening)
+    report = product_report_relative(built, mandate, opening_data)
     path = real_workspace_file(report, f"the current {mandate} lens report")
     with open(path, "rb") as source:
         report_sha = sha256_bytes(source.read())
-    opening_data = note_data(opening)
     normalized = {
         **data, "pass_commit": opening_data["commit"], "pass_gate": opening_data["gate"],
         "report_sha256": report_sha,
     }
+    if opening_data.get("schema") == 2:
+        normalized = {
+            **data,
+            "schema": 2,
+            "pass_opening": journal_line_proof(opening_index),
+            "position": opening_data["position"],
+            "generation_sha256": opening_data["generation_sha256"],
+            "pass": opening_data["pass"],
+            "pass_commit": opening_data["commit"],
+            "pass_gate": opening_data["gate"],
+            "mandate": mandate,
+            "report": str(report),
+            "report_sha256": report_sha,
+        }
     candidate = {
         "event": "note", "kind": "report.received", "mandate": mandate,
         "data": normalized,
@@ -5707,6 +5977,28 @@ def product_verifier_identity(entries, before, mandate, subject):
         entries, opening_index, before, built, mandate, subject,
     )
     return opening_index, opening, built, commit, receipt_index, receipt_data
+
+
+def product_verifier_account(opening_index, opening, built, mandate, receipt_data):
+    opening_data = note_data(opening)
+    if opening_data.get("schema") != 2:
+        return {
+            "pass_commit": opening_data["commit"],
+            "pass_gate": opening_data["gate"],
+            "report_sha256": receipt_data["report_sha256"],
+        }
+    return {
+        "schema": 2,
+        "pass_opening": journal_line_proof(opening_index),
+        "position": opening_data["position"],
+        "generation_sha256": opening_data["generation_sha256"],
+        "pass": opening_data["pass"],
+        "pass_commit": opening_data["commit"],
+        "pass_gate": opening_data["gate"],
+        "mandate": mandate,
+        "report": str(product_report_relative(built, mandate, opening_data)),
+        "report_sha256": receipt_data["report_sha256"],
+    }
 
 
 def validate_product_verifier_terminal(data, identity, receipt_data, mandate, subject):
@@ -5775,19 +6067,22 @@ def product_verifier_calls(entries, receipt_index, mandate, identity, receipt_da
 def validate_product_finding_verifier(event, data, mandate):
     if mandate not in PRODUCT_REVIEW_MANDATES:
         fail("a product finding-verifier has no fixed lens mandate", mandate)
-    identity_keys = {"pass_commit", "pass_gate", "report_sha256"}
-    if not isinstance(data, dict) or event == "subagent-started" \
-            and set(data) != identity_keys:
+    input_identity_keys = {"pass_commit", "pass_gate", "report_sha256"}
+    verdict_keys = {"confirmed", "disproved", "malformed", "claims"}
+    terminal_extra = {"unusable"} if isinstance(data, dict) and "unusable" in data else verdict_keys
+    if not isinstance(data, dict) or set(data) != input_identity_keys \
+            | (set() if event == "subagent-started" else terminal_extra):
         fail(f"{event} product finding-verifier has malformed identity or result", data)
     entries = journal_entries()
-    _, opening, _, commit, receipt_index, receipt_data = product_verifier_identity(
+    opening_index, opening, built, commit, receipt_index, receipt_data = product_verifier_identity(
         entries, len(entries), mandate, f"the {mandate} finding-verifier",
     )
-    identity = {
-        "pass_commit": commit, "pass_gate": note_data(opening)["gate"],
-        "report_sha256": receipt_data["report_sha256"],
-    }
-    if any(data.get(key) != value for key, value in identity.items()):
+    identity = product_verifier_account(
+        opening_index, opening, built, mandate, receipt_data,
+    )
+    if commit != identity["pass_commit"] or any(
+        data.get(key) != identity[key] for key in input_identity_keys
+    ):
         fail(f"the {mandate} finding-verifier does not consume the current report generation",
              {"expected": identity, "actual": data})
     calls = product_verifier_calls(
@@ -5799,14 +6094,16 @@ def validate_product_finding_verifier(event, data, mandate):
             fail(f"the current {mandate} report cannot open another finding-verifier call")
         if len(calls) >= 2:
             fail(f"the current {mandate} report already used its one physical verifier relaunch")
-        return
+        return identity
     if not calls or calls[-1]["end"] is not None:
         fail(f"the {mandate} finding-verifier result has no one exact open bracket")
     if note_data(calls[-1]["start"]) != identity:
         fail(f"the {mandate} finding-verifier result changes its opening identity")
     validate_product_verifier_terminal(
-        data, identity, receipt_data, mandate, f"the {mandate} finding-verifier",
+        {**identity, **{key: data[key] for key in terminal_extra}},
+        identity, receipt_data, mandate, f"the {mandate} finding-verifier",
     )
+    return {**identity, **{key: data[key] for key in terminal_extra}}
 
 
 def pass_verifier_state(commit, report_name):
@@ -5816,8 +6113,9 @@ def pass_verifier_state(commit, report_name):
     )
     if commit != current_commit or pass_closes(entries, opening_index, len(entries)):
         fail("verify-open.sh did not receive the current open pass commit", commit)
+    opening_data = note_data(opening)
     matches = [mandate for mandate in PRODUCT_REVIEW_MANDATES
-               if report_name == f"{built}-{mandate}.md"]
+               if report_name == product_report_relative(built, mandate, opening_data).name]
     if len(matches) != 1:
         fail("verify-open.sh did not receive the current pass report name", report_name)
     mandate = matches[0]
@@ -5825,10 +6123,9 @@ def pass_verifier_state(commit, report_name):
         entries, opening_index, len(entries), built, mandate,
         "the physical finding-verifier",
     )
-    identity = {
-        "pass_commit": commit, "pass_gate": note_data(opening)["gate"],
-        "report_sha256": receipt_data["report_sha256"],
-    }
+    identity = product_verifier_account(
+        opening_index, opening, built, mandate, receipt_data,
+    )
     calls = product_verifier_calls(
         entries, receipt_index, mandate, identity, receipt_data,
         "the physical finding-verifier",
@@ -5857,10 +6154,9 @@ def validate_review_receipts(entries, opening_index, before, built, subject):
         if reopened:
             fail(f"{subject} has a reopened {mandate} report without a fresh receipt")
         opening_data = note_data(entries[opening_index])
-        identity = {
-            "pass_commit": opening_data["commit"], "pass_gate": opening_data["gate"],
-            "report_sha256": counts["report_sha256"],
-        }
+        identity = product_verifier_account(
+            opening_index, entries[opening_index], built, mandate, counts,
+        )
         calls = product_verifier_calls(
             entries[:before], receipt_index, mandate, identity, counts,
             f"{subject}'s {mandate} finding-verifier",
@@ -6016,9 +6312,9 @@ def required_positive_carries(entries, before, subject):
         for decision, answer in state["answers"].items():
             if answer["status"] == "superseded":
                 continue
-            if answer["route"] in {"sublot", "amendment"}:
+            if answer["route"] in {"implementation", "sublot", "amendment"}:
                 required.add((batch, decision))
-            if answer["route"] == "sublot":
+            if answer["route"] in {"implementation", "sublot"}:
                 continue
             terminals = [(index, entry) for index, entry in enumerate(entries[:before])
                          if index > answer["state_index"]
@@ -6035,13 +6331,28 @@ def required_positive_carries(entries, before, subject):
     return required_all
 
 
-def validate_positive_close_batches(entries, before, built, subject):
+def validate_positive_close_batches(
+        entries, before, built, subject, *, confirmed_relative=None,
+):
     required = required_positive_carries(entries, before, subject)
-    carries = confirmed_carries(built)
+    carries = confirmed_carries(built, relative=confirmed_relative)
     missing = required - carries
     if missing:
         fail(f"{subject}'s confirmed artifact omits current batch work",
              ", ".join(f"B{batch}/{item}" for batch, item in sorted(missing)))
+
+
+def load_correction_round_parser():
+    path = os.path.join(WORKSPACE, "prompts", "construction", "correction_round.py")
+    specification = importlib.util.spec_from_file_location("bwr_correction_round", path)
+    if specification is None or specification.loader is None:
+        fail("the Correction Round parser cannot be loaded", path)
+    module = importlib.util.module_from_spec(specification)
+    try:
+        specification.loader.exec_module(module)
+    except (OSError, ValueError) as exc:
+        fail("the Correction Round parser cannot be loaded", exc)
+    return module
 
 
 def source_identity_key(identity):
@@ -6184,6 +6495,358 @@ def validate_sublot_allocation(entries, data, text, subject):
     validate_current_direct_terminals(entries, before, subject)
     validate_allocation_identity(entries, opening_index, before, built, text, subject)
     validate_allocation_account(entries, opening_index, before, built, data, subject)
+    opening_data = note_data(entries[opening_index])
+    if opening_data.get("schema") != 2:
+        return data
+    current, supersession = correction_allocation_lineage(
+        entries, opening_index, before, subject,
+    )
+    if current is not None:
+        fail(f"{subject} cannot overlap a live Correction Round allocation")
+    correction_supersession = None
+    if supersession is not None:
+        supersession_index, supersession_entry = supersession
+        if note_data(supersession_entry).get("outcome") != "sublot":
+            fail(f"{subject} cannot consume a reclassification supersession directly")
+        correction_supersession = journal_line_proof(supersession_index)
+    return {
+        "schema": 2,
+        "origin": "product-review",
+        "built": built,
+        "source": journal_line_proof(opening_index),
+        "correction_supersession": correction_supersession,
+        "items": data["items"],
+        "refuted": data["refuted"],
+    }
+
+
+def in_pass_controller_successor(
+    entries, opening_index, before, built, subject, *, require_current_head=True,
+):
+    opening = entries[opening_index]
+    opening_data = note_data(opening)
+    terminals = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:before], opening_index + 1,
+    ) if entry.get("kind") == "ruling.applied"
+        and note_data(entry).get("route") == "spec-in-place"]
+    if not terminals:
+        return None
+
+    validate_current_direct_terminals(entries, before, subject)
+    authorities = []
+    bound_commit_indices = []
+    previous_commit = opening_data["commit"]
+    for terminal_index, terminal in terminals:
+        terminal_data = note_data(terminal)
+        operation, commit_sha = terminal_data.get("recheck_op"), terminal_data.get("sha")
+        if "batch" in terminal_data and "ruling" not in terminal_data:
+            batch, decision = terminal_data.get("batch"), terminal_data.get("decision")
+            validate_batch_applied(
+                entries[:terminal_index], terminal_data, reject_duplicate=False,
+            )
+            owner = f"B{batch}/{decision}"
+            commit_predicate = lambda item: item.get("batch") == batch \
+                and item.get("decision") == decision
+            recheck_predicate = lambda item: item.get("batch") == batch \
+                and item.get("decision") == decision
+        else:
+            owner = terminal_data.get("ruling")
+            commit_predicate = lambda item: item.get("ruling") == owner
+            recheck_predicate = lambda item: item.get("owner") == owner
+        commit_index, commit_entry = exact_indexed(
+            entries[:terminal_index], "spec.committed",
+            lambda item: commit_predicate(item)
+            and item.get("op") == operation and item.get("sha") == commit_sha,
+            f"{subject}'s controller-successor commit for {owner}",
+        )
+        commit_data = note_data(commit_entry)
+        ready_index, ready_entry = exact_indexed(
+            entries[:commit_index], "spec.edit.ready",
+            lambda item: item.get("op") == commit_data.get("ready_op")
+            and item.get("owner") == owner,
+            f"{subject}'s controller-successor ready authority for {owner}",
+        )
+        recheck_index, recheck_entry = exact_indexed(
+            entries[:terminal_index], "decision.recheck.completed",
+            lambda item: recheck_predicate(item)
+            and item.get("commit_op") == operation and item.get("sha") == commit_sha,
+            f"{subject}'s controller-successor recheck for {owner}",
+        )
+        if not opening_index < ready_index < commit_index < recheck_index < terminal_index:
+            fail(f"{subject}'s controller-successor authority is out of order")
+        try:
+            validate_recheck_generation(entries, recheck_index)
+        except AuthorityPrecedenceError as exc:
+            fail(f"{subject}'s controller-successor recheck is invalid", exc)
+        validate_recheck_artifact(entries, recheck_index, recheck_entry)
+        if commit_data.get("parent") != previous_commit:
+            fail(f"{subject}'s controller-successor commit skips its predecessor")
+        parent = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", f"{commit_sha}^"],
+            capture_output=True, text=True,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != previous_commit:
+            fail(f"{subject}'s controller-successor commit is not in the reviewed lineage")
+        if any(note_data(ready_entry).get(key) != commit_data.get(key)
+               for key in ("state_kind", "state_ref", "artifact_sha256")):
+            fail(f"{subject}'s controller-successor commit changes its ready authority")
+        authorities.extend(journal_line_proof(index) for index in (
+            ready_index, commit_index, recheck_index, terminal_index,
+        ))
+        bound_commit_indices.append(commit_index)
+        previous_commit = commit_sha
+
+    all_bound_commits = [index for index, entry in enumerate(entries[:before])
+                         if index > opening_index and entry.get("kind") == "spec.committed"
+                         and any(key in note_data(entry) for key in ("ruling", "batch"))]
+    if bound_commit_indices != all_bound_commits:
+        fail(f"{subject}'s controller-successor account omits bound product authority")
+    if require_current_head:
+        head = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "HEAD"], capture_output=True, text=True,
+        )
+        if head.returncode != 0 or head.stdout.strip() != previous_commit:
+            fail(f"{subject}'s controller-successor commit is not current HEAD")
+    position = opening_data["position"]
+    owner = f"product-review/{built}/c{position}/controller-successor/{previous_commit}"
+    gates = [(index, entry) for index, entry in enumerate(entries[:before])
+             if index > terminals[-1][0]
+             and entry.get("event") == "subagent-ended"
+             and entry.get("kind") == "gate-runner"
+             and "unusable" not in note_data(entry)
+             and note_data(entry).get("scope") == "baseline"
+             and note_data(entry).get("owner") == owner
+             and note_data(entry).get("head") == previous_commit
+             and note_data(entry).get("base") == opening_data["commit"]
+             and note_data(entry).get("green") is True
+             and note_data(entry).get("surface") == "unchanged"]
+    if len(gates) != 1:
+        fail(f"{subject}'s controller-successor has no one exact accepted baseline gate")
+    gate_data = note_data(gates[0][1])
+    account = normalize_controller_successor({
+        "schema": 1,
+        "kind": "controller-successor",
+        "transition": "in-pass-product-authority",
+        "built": built,
+        "position": position,
+        "predecessor_generation_sha256": opening_data["generation_sha256"],
+        "source_pass": journal_line_proof(opening_index),
+        "authorities": authorities,
+        "commit": previous_commit,
+        "gate": gate_data["op"],
+    })
+    return account, generation_sha256(account)
+
+
+def current_product_generation(entries, opening_index, before, built, subject):
+    successor = in_pass_controller_successor(entries, opening_index, before, built, subject)
+    if successor is not None:
+        account, generation = successor
+        return {
+            "position": account["position"],
+            "generation_sha256": generation,
+            "commit": account["commit"],
+            "gate": account["gate"],
+        }
+    opening_data = note_data(entries[opening_index])
+    return {
+        "position": opening_data["position"],
+        "generation_sha256": opening_data["generation_sha256"],
+        "commit": opening_data["commit"],
+        "gate": opening_data["gate"],
+    }
+
+
+def normalize_correction_allocation(entries, data, subject):
+    before = len(entries)
+    opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
+    opening_data = note_data(opening)
+    if opening_data.get("schema") != 2:
+        fail(f"{subject} cannot consume a historical pass opening")
+    if pass_closes(entries, opening_index, before):
+        fail(f"{subject} cannot follow a closed pass")
+    if any(entry.get("kind") == "sublot.allocated"
+           for entry in entries[opening_index + 1:before]):
+        fail(f"{subject}'s current pass already has a successor allocation")
+    try:
+        validate_global_authority_precedence(entries[:before])
+    except AuthorityPrecedenceError as exc:
+        fail(f"an unfinished global product-authority boundary outranks {subject}", exc)
+    validate_current_direct_terminals(entries, before, subject)
+    try:
+        normalized = normalize_allocation(data)
+    except ValueError as exc:
+        fail(f"{subject} has malformed authority", exc)
+    current, supersession = correction_allocation_lineage(
+        entries, opening_index, before, subject,
+    )
+    if current is not None:
+        fail(f"{subject}'s current pass already has a live Correction Round allocation")
+    expected_predecessor = None
+    if supersession is not None:
+        supersession_index, supersession_entry = supersession
+        if note_data(supersession_entry).get("outcome") != "reclassify":
+            fail(f"{subject} cannot replace a Correction Round allocated to a sub-lot")
+        expected_predecessor = journal_line_proof(supersession_index)
+    if normalized["built"] != built \
+            or normalized["round"] != opening_data["position"] + 1 \
+            or normalized["predecessor_supersession"] != expected_predecessor:
+        fail(f"{subject} changes its current built-unit position")
+    expected_pass = {
+        "ordinal": opening_data["pass"],
+        "opening": journal_line_proof(opening_index),
+        "commit": opening_data["commit"],
+        "gate": opening_data["gate"],
+    }
+    expected_parent = current_product_generation(
+        entries, opening_index, before, built, subject,
+    )
+    if normalized["pass"] != expected_pass or normalized["parent"] != expected_parent:
+        fail(
+            f"{subject} does not consume the exact current pass and correction base",
+            {"pass": expected_pass, "parent": expected_parent},
+        )
+    validate_allocation_account(
+        entries, opening_index, before, built,
+        {"built": built, "items": normalized["items"], "refuted": normalized["refuted"]},
+        subject,
+    )
+    return normalized
+
+
+def correction_allocation_lineage(entries, opening_index, before, subject):
+    current = None
+    supersession = None
+    seen = False
+    for index, entry in enumerate(entries[opening_index + 1:before], opening_index + 1):
+        if entry.get("kind") == "correction.round.allocated":
+            try:
+                allocation = normalize_allocation(note_data(entry))
+            except ValueError as exc:
+                fail(f"{subject} has a malformed historical correction allocation", exc)
+            if current is not None:
+                fail(f"{subject} has two live Correction Round allocations")
+            expected = journal_line_proof(supersession[0]) if supersession is not None else None
+            if allocation["predecessor_supersession"] != expected:
+                fail(f"{subject}'s Correction Round allocation lineage forks or skips")
+            if supersession is not None \
+                    and note_data(supersession[1]).get("outcome") != "reclassify":
+                fail(f"{subject} replaces an allocation whose route is already structural")
+            current = (index, entry)
+            supersession = None
+            seen = True
+        elif entry.get("kind") == "correction.round.allocation.superseded":
+            if current is None:
+                fail(f"{subject} supersedes no live Correction Round allocation")
+            if note_data(entry).get("allocation") != journal_line_proof(current[0]):
+                fail(f"{subject}'s supersession names another allocation")
+            supersession = (index, entry)
+            current = None
+    return current, supersession if seen else None
+
+
+def normalize_correction_allocation_supersession(entries, data, subject):
+    before = len(entries)
+    opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
+    if pass_closes(entries, opening_index, before):
+        fail(f"{subject} cannot follow a closed pass")
+    current, prior_supersession = correction_allocation_lineage(
+        entries, opening_index, before, subject,
+    )
+    if current is None or prior_supersession is not None:
+        fail(f"{subject} has no one exact live allocation")
+    allocation_index, allocation_entry = current
+    try:
+        allocation = normalize_allocation(note_data(allocation_entry))
+    except ValueError as exc:
+        fail(f"{subject} has a malformed current allocation", exc)
+    required = {
+        "schema", "built", "round", "allocation", "pass_opening",
+        "parent_generation_sha256", "current_generation_sha256", "outcome",
+        "evidence", "reason", "confirmed_moved_to", "artifact_moved_to",
+    }
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 1 \
+            or data.get("built") != built or data.get("round") != allocation["round"] \
+            or data.get("allocation") != journal_line_proof(allocation_index) \
+            or data.get("pass_opening") != journal_line_proof(opening_index) \
+            or data.get("parent_generation_sha256") != allocation["parent"]["generation_sha256"]:
+        fail(f"{subject} has malformed allocation authority", data)
+    pairs = {
+        "sublot": "artifact-self-review",
+        "reclassify": "controller-successor",
+    }
+    if data.get("outcome") not in pairs or data.get("evidence") != pairs[data["outcome"]] \
+            or not isinstance(data.get("reason"), str) or data["reason"] != data["reason"].strip() \
+            or not data["reason"]:
+        fail(f"{subject} has no exact supersession disposition")
+    opening_data = note_data(opening)
+    current_generation = current_product_generation(
+        entries, opening_index, before, built, subject,
+    )
+    if data["current_generation_sha256"] != current_generation["generation_sha256"]:
+        fail(f"{subject} does not bind the exact current product generation")
+    if data["outcome"] == "sublot":
+        if current_generation != allocation["parent"] or data["confirmed_moved_to"] is not None:
+            fail(f"{subject}'s structural supersession changes its reviewed generation")
+    elif current_generation == allocation["parent"]:
+        fail(f"{subject} has no authenticated controller-successor generation")
+
+    confirmed_relative = product_confirmed_path(
+        built, opening_data["position"], opening_data["pass"],
+    )
+    allocation_hash = data["allocation"].split(":", 1)[1]
+    expected_confirmed_moved = PurePosixPath(
+        confirmed_relative.parent,
+        f"{confirmed_relative.stem}-superseded-{allocation_hash}.md",
+    )
+    if data["outcome"] == "reclassify":
+        if data["confirmed_moved_to"] != str(expected_confirmed_moved):
+            fail(f"{subject} does not name its exact moved confirmed artifact")
+        confirmed_path = real_workspace_file(
+            expected_confirmed_moved, f"{subject}'s moved confirmed artifact",
+        )
+        canonical_confirmed = os.path.join(WORKSPACE, *confirmed_relative.parts)
+        if os.path.exists(canonical_confirmed) or os.path.islink(canonical_confirmed):
+            fail(f"{subject} retains its stale canonical confirmed artifact")
+    else:
+        confirmed_path = real_workspace_file(
+            confirmed_relative, f"{subject}'s retained confirmed artifact",
+        )
+    expected_confirmed = {
+        item["id"]: {"sources": item["sources"], "carries": item["carries"]}
+        for item in allocation["items"]
+    }
+    if confirmed_account(confirmed_path, f"{subject}'s retained confirmed artifact") \
+            != expected_confirmed:
+        fail(f"{subject}'s retained confirmed artifact changes its allocation")
+
+    expected_moved = PurePosixPath(
+        "corrections", built,
+        f"round-{allocation['round']}-superseded-p{opening_data['pass']}-{allocation_hash}.md",
+    )
+    moved_path = os.path.join(WORKSPACE, *expected_moved.parts)
+    moved_exists = os.path.isfile(moved_path) and not os.path.islink(moved_path)
+    if data["artifact_moved_to"] != (str(expected_moved) if moved_exists else None):
+        fail(f"{subject} does not name its exact moved artifact")
+    if moved_exists:
+        with open(moved_path, "rb") as source:
+            artifact_bytes = source.read()
+        with open(confirmed_path, "rb") as source:
+            confirmed_sha256 = hashlib.sha256(source.read()).hexdigest()
+        parser = load_correction_round_parser()
+        try:
+            artifact = parser.parse_artifact_bytes(
+                artifact_bytes, expected_built=built, expected_round=allocation["round"],
+            )
+        except ValueError as exc:
+            fail(f"{subject}'s moved Correction Round artifact is invalid", exc)
+        if artifact["source_findings_path"] != str(confirmed_relative) \
+                or artifact["source_findings_sha256"] != confirmed_sha256 \
+                or list(artifact["source_finding_coverage"]) != [
+                    item["id"] for item in allocation["items"]
+                ]:
+            fail(f"{subject}'s moved artifact changes its allocated findings")
+    return data
 
 
 def confirmed_account(path, subject):
@@ -6253,7 +6916,9 @@ def covers_values(plan):
     return values if active else None
 
 
-def validate_positive_close_artifacts(entries, opening_index, before, built, confirmed, subject):
+def validate_positive_close_artifacts(
+    entries, opening_index, before, built, confirmed, subject, *, historical=False,
+):
     allocations = [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:before], opening_index + 1
     ) if entry.get("kind") == "sublot.allocated"]
@@ -6262,11 +6927,29 @@ def validate_positive_close_artifacts(entries, opening_index, before, built, con
     _, allocation = allocations[0]
     lot = allocation.get("text")
     root = validate_allocation_identity(entries, opening_index, before, built, lot, subject)
+    allocation_data = note_data(allocation)
+    opening_data = note_data(entries[opening_index])
+    if allocation_data.get("schema") == 2:
+        if set(allocation_data) != {
+            "schema", "origin", "built", "source", "correction_supersession",
+            "items", "refuted",
+        } or allocation_data.get("origin") != "product-review" \
+                or allocation_data.get("source") != journal_line_proof(opening_index):
+            fail(f"{subject} has malformed schema-2 sub-lot allocation authority")
+        allocation_data = {
+            "built": allocation_data["built"],
+            "items": allocation_data["items"],
+            "refuted": allocation_data["refuted"],
+        }
     expected_account = validate_allocation_account(
-        entries, opening_index, before, built, note_data(allocation), subject,
+        entries, opening_index, before, built, allocation_data, subject,
     )
 
-    confirmed_relative = PurePosixPath("reports", "product-review", root, f"{built}-confirmed.md")
+    confirmed_relative = product_confirmed_path(
+        built, opening_data["position"], opening_data["pass"],
+    ) if opening_data.get("schema") == 2 else PurePosixPath(
+        "reports", "product-review", root, f"{built}-confirmed.md",
+    )
     confirmed_path = real_workspace_file(confirmed_relative, f"{subject}'s confirmed artifact")
     actual_account = confirmed_account(confirmed_path, f"{subject}'s confirmed artifact")
     finding_ids = [int(identity[1:]) for identity in actual_account]
@@ -6278,17 +6961,131 @@ def validate_positive_close_artifacts(entries, opening_index, before, built, con
             {"allocated": expected_account, "confirmed": actual_account},
         )
 
-    plan_relative = PurePosixPath("plans", f"{lot}-plan.md")
-    plan_path = real_workspace_file(plan_relative, f"{subject}'s allocated sub-lot plan")
-    with open(plan_path, encoding="utf-8") as source:
-        plan = source.read()
-    values = covers_values(plan)
-    valid_pointers = {
-        str(confirmed_relative), os.path.basename(confirmed_path), confirmed_path,
-    }
-    if values is None or len(valid_pointers.intersection(values)) != 1:
-        fail(f"{subject}'s allocated plan does not name its confirmed source", confirmed_relative)
+    if not historical:
+        plan_relative = PurePosixPath("plans", f"{lot}-plan.md")
+        plan_path = real_workspace_file(plan_relative, f"{subject}'s allocated sub-lot plan")
+        with open(plan_path, encoding="utf-8") as source:
+            plan = source.read()
+        values = covers_values(plan)
+        valid_pointers = {
+            str(confirmed_relative), os.path.basename(confirmed_path), confirmed_path,
+        }
+        if values is None or len(valid_pointers.intersection(values)) != 1:
+            fail(
+                f"{subject}'s allocated plan does not name its confirmed source",
+                confirmed_relative,
+            )
     return lot
+
+
+def normalize_correction_pass_close(
+        entries, opening_index, opening, before, built, confirmed, subject,
+):
+    current, _ = correction_allocation_lineage(
+        entries, opening_index, before, subject,
+    )
+    if current is None:
+        fail(f"{subject} requires one current Correction Round allocation")
+    allocation_index, allocation_entry = current
+    allocation = normalize_correction_allocation(
+        entries[:allocation_index], note_data(allocation_entry), subject,
+    )
+    opening_data = note_data(opening)
+
+    confirmed_relative = product_confirmed_path(
+        built, opening_data["position"], opening_data["pass"],
+    )
+    confirmed_path = real_workspace_file(
+        confirmed_relative, f"{subject}'s confirmed correction artifact",
+    )
+    with open(confirmed_path, "rb") as source:
+        confirmed_bytes = source.read()
+    confirmed_sha256 = hashlib.sha256(confirmed_bytes).hexdigest()
+    actual_account = confirmed_account(
+        confirmed_path, f"{subject}'s confirmed correction artifact",
+    )
+    expected_account = {
+        item["id"]: {"sources": item["sources"], "carries": item["carries"]}
+        for item in allocation["items"]
+    }
+    if [int(identity[1:]) for identity in actual_account] != list(range(1, confirmed + 1)):
+        fail(f"{subject}'s confirmed artifact does not match its confirmed count")
+    if actual_account != expected_account:
+        fail(
+            f"{subject}'s confirmed artifact does not consume its allocation",
+            {"allocated": expected_account, "confirmed": actual_account},
+        )
+
+    artifact_relative = PurePosixPath(
+        "corrections", built, f"round-{allocation['round']}.md",
+    )
+    artifact_path = real_workspace_file(
+        artifact_relative, f"{subject}'s Correction Round artifact",
+    )
+    with open(artifact_path, "rb") as source:
+        artifact_bytes = source.read()
+    parser = load_correction_round_parser()
+    try:
+        artifact = parser.parse_artifact_bytes(
+            artifact_bytes, expected_built=built, expected_round=allocation["round"],
+        )
+    except ValueError as exc:
+        fail(f"{subject}'s Correction Round artifact is invalid", exc)
+    expected_identity = {
+        "parent_generation_sha256": allocation["parent"]["generation_sha256"],
+        "source_reviewed_commit": allocation["pass"]["commit"],
+        "source_accepted_gate": allocation["pass"]["gate"],
+        "correction_base_commit": allocation["parent"]["commit"],
+        "correction_base_gate": allocation["parent"]["gate"],
+        "source_pass": allocation["pass"]["ordinal"],
+        "source_opening": allocation["pass"]["opening"],
+    }
+    expected_route = {
+        "Spec": "current and settled",
+        "Human decisions": allocation["admission"]["human_decisions"],
+        "Controller contract": allocation["admission"]["controller_contract"],
+        "Ownership": allocation["admission"]["ownership"],
+        "Decomposition": allocation["admission"]["decomposition"],
+        "Coordination": allocation["admission"]["coordination"],
+        "Repetition": allocation["admission"]["repetition"],
+        "Reason": allocation["admission"]["reason"],
+    }
+    if artifact["schema"] != 1 or artifact["state"] != "active" \
+            or artifact["parent_position"] != f"c{opening_data['position']}" \
+            or artifact["identity"] != expected_identity \
+            or artifact["source_findings_path"] != str(confirmed_relative) \
+            or artifact["source_findings_sha256"] != confirmed_sha256 \
+            or artifact["route"] != expected_route \
+            or list(artifact["source_finding_coverage"]) != list(expected_account):
+        fail(f"{subject}'s Correction Round artifact changes its allocation authority")
+
+    try:
+        confirmed_object = publish_content_object(
+            WORKSPACE, built, confirmed_bytes, ".md",
+        )
+        artifact_object = publish_content_object(
+            WORKSPACE, built, artifact_bytes, ".md",
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} cannot publish its immutable Correction Round authority", exc)
+    return {
+        "schema": 2,
+        "confirmed": confirmed,
+        "route": "correction",
+        "allocation": journal_line_proof(allocation_index),
+        "base_generation_sha256": opening_data["generation_sha256"],
+        "base_commit": opening_data["commit"],
+        "base_gate": opening_data["gate"],
+        "confirmed_artifact": str(confirmed_relative),
+        "confirmed_sha256": confirmed_sha256,
+        "confirmed_object": str(PurePosixPath(confirmed_object.relative_to(WORKSPACE))),
+        "artifact": str(artifact_relative),
+        "artifact_sha256": artifact["artifact_sha256"],
+        "artifact_object": str(PurePosixPath(artifact_object.relative_to(WORKSPACE))),
+        "controller_sha256": artifact["controller_sha256"],
+        "manifest_sha256": artifact["manifest_sha256"],
+        "tasks": len(artifact["tasks"]),
+    }
 
 
 def validate_current_technical_gate(opening, subject):
@@ -6303,7 +7100,7 @@ def validate_current_technical_gate(opening, subject):
              proof.stderr or proof.stdout)
 
 
-def validate_pass_close(entries, data, subject):
+def validate_pass_close(entries, data, subject, *, historical=False):
     before = len(entries)
     opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
     if any(entry.get("kind") == "pass.closed" for entry in entries[opening_index + 1:before]):
@@ -6321,11 +7118,15 @@ def validate_pass_close(entries, data, subject):
                       and note_data(entry).get("amendment") > 0]
         if len(amendments) != 1:
             fail(f"{subject} has no one exact product-review amendment opening")
-        return opening_index, opening, None, built
+        return opening_index, opening, None, built, data
 
-    if set(data) != {"confirmed"}:
+    submitted = data
+    if isinstance(data, dict) and data.get("schema") == 2 and data.get("route") == "correction":
+        confirmed = data.get("confirmed")
+    elif set(data) == {"confirmed"}:
+        confirmed = data.get("confirmed")
+    else:
         fail(f"{subject} has a malformed ordinary close payload", data)
-    confirmed = data.get("confirmed")
     if not isinstance(confirmed, int) or isinstance(confirmed, bool) or confirmed < 0:
         fail(f"{subject} has an invalid confirmed count", confirmed)
     if any(entry.get("kind") == "amendment.opened"
@@ -6335,7 +7136,8 @@ def validate_pass_close(entries, data, subject):
         fail(f"{subject} must void the pass owned by its product-review amendment")
     if any(entry.get("kind") == "sublot.opened" for entry in entries[opening_index + 1:before]):
         fail(f"{subject} cannot close after its sub-lot already opened")
-    validate_current_technical_gate(opening, subject)
+    if not historical:
+        validate_current_technical_gate(opening, subject)
     try:
         validate_global_authority_precedence(entries[:before])
     except AuthorityPrecedenceError as exc:
@@ -6348,11 +7150,31 @@ def validate_pass_close(entries, data, subject):
             fail(f"{subject} cannot close clean after allocating a sub-lot")
         validate_zero_close_batches(entries, opening_index, before, verifier_confirmed, subject)
     else:
+        opening_data = note_data(opening)
+        correction_allocations = [entry for entry in entries[opening_index + 1:before]
+                                  if entry.get("kind") == "correction.round.allocated"]
+        if opening_data.get("schema") == 2 and correction_allocations:
+            normalized = normalize_correction_pass_close(
+                entries, opening_index, opening, before, built, confirmed, subject,
+            )
+            if submitted != {"confirmed": confirmed} and submitted != normalized:
+                fail(f"{subject} changes its derived Correction Round close authority")
+            validate_positive_close_batches(
+                entries, before, built, subject,
+                confirmed_relative=normalized["confirmed_artifact"],
+            )
+            return opening_index, opening, confirmed, built, normalized
         validate_positive_close_artifacts(
             entries, opening_index, before, built, confirmed, subject,
+            historical=historical,
         )
-        validate_positive_close_batches(entries, before, built, subject)
-    return opening_index, opening, confirmed, built
+        confirmed_relative = product_confirmed_path(
+            built, opening_data["position"], opening_data["pass"],
+        ) if opening_data.get("schema") == 2 else None
+        validate_positive_close_batches(
+            entries, before, built, subject, confirmed_relative=confirmed_relative,
+        )
+    return opening_index, opening, confirmed, built, submitted
 
 
 def current_pass_close(entries, subject):
@@ -6363,7 +7185,7 @@ def current_pass_close(entries, subject):
     if len(closes) != 1:
         fail(f"{subject} requires one current pass close", f"found {len(closes)}")
     close_index, close = closes[0]
-    _, _, confirmed, _ = validate_pass_close(
+    _, _, confirmed, _, _ = validate_pass_close(
         entries[:close_index], note_data(close), subject,
     )
     if confirmed is None:
@@ -6431,6 +7253,52 @@ def sublot_close_proof(notes, lot, subject):
     return opening_index, opening, close_index, close, confirmed, built
 
 
+def normalize_batch_implementation_terminal(notes, data, batch, decision, answer):
+    subject = f"batch implementation terminal B{batch}/{decision}"
+    opening_index, _, close_index, close, confirmed, built = current_pass_close(notes, subject)
+    close_data = note_data(close)
+    if confirmed < 1 or close_data.get("schema") != 2 \
+            or close_data.get("route") != "correction":
+        fail(f"{subject} has no exact positive Correction Round close")
+    allocation_index, allocation_entry = journal_entry_from_proof(
+        notes, close_data["allocation"], f"{subject}'s allocation",
+    )
+    if allocation_index >= close_index or allocation_entry.get("kind") != "correction.round.allocated":
+        fail(f"{subject} has no exact preceding correction allocation")
+    allocation = normalize_allocation(note_data(allocation_entry))
+    minimal = {
+        "answer", "batch", "decision", "route", "fulfillment", "built", "round",
+    }
+    expected = {
+        "schema": 2,
+        "answer": f"B{batch}/{decision}",
+        "batch": batch,
+        "decision": decision,
+        "route": "implementation",
+        "fulfillment": "correction",
+        "built": built,
+        "round": allocation["round"],
+        "allocation": close_data["allocation"],
+        "pass_close": journal_line_proof(close_index),
+    }
+    if answer["conflict"] is not None:
+        expected["conflict"] = answer["conflict"][1]
+    if set(data) == minimal:
+        if data != {key: expected[key] for key in minimal}:
+            fail(f"{subject} changes its selected fulfillment", data)
+    elif data != expected:
+        fail(f"{subject} changes its derived authority", {"expected": expected, "actual": data})
+    if answer["state_index"] >= close_index:
+        fail(f"{subject} predates its current product answer")
+    if (batch, decision) not in confirmed_carries(
+        built, relative=close_data["confirmed_artifact"],
+    ):
+        fail(f"{subject}'s confirmed artifact omits its exact product answer")
+    if opening_index >= close_index:
+        fail(f"{subject} has an invalid pass-close order")
+    return expected
+
+
 def validate_batch_applied(notes, data, *, reject_duplicate=True):
     batch, decision = batch_identity(data, "a batch ruling terminal")
     state = batch_state(notes, batch)
@@ -6443,6 +7311,8 @@ def validate_batch_applied(notes, data, *, reject_duplicate=True):
     if route not in BATCH_ROUTES or route != answer["route"]:
         fail(f"a batch ruling terminal does not match B{batch}/{decision}'s current route",
              {"terminal": route, "current": answer["route"]})
+    if route == "implementation":
+        data = normalize_batch_implementation_terminal(notes, data, batch, decision, answer)
     current_conflict = answer["conflict"]
     if current_conflict is None:
         if "conflict" in data:
@@ -6475,6 +7345,8 @@ def validate_batch_applied(notes, data, *, reject_duplicate=True):
                    and item.get("status") == "active" and item.get("route") == route]
         if len(actions) != 1:
             fail(f"a batch spec-in-place terminal's recheck does not prove B{batch}/{decision}")
+    elif route == "implementation":
+        pass
     elif route == "amendment":
         amendment, sha = data.get("amendment"), data.get("sha")
         if not isinstance(amendment, int) or isinstance(amendment, bool) or amendment < 1 \
@@ -6532,12 +7404,15 @@ def validate_batch_applied(notes, data, *, reject_duplicate=True):
                       and note_data(entry).get("decision") == decision]
         if duplicates:
             fail(f"B{batch}/{decision}'s current batch route already has its terminal")
-    return state, answer
+    return data
 
 
-def confirmed_carries(built):
-    root = built.split(".", 1)[0]
-    relative = PurePosixPath("reports", "product-review", root, f"{built}-confirmed.md")
+def confirmed_carries(built, *, relative=None):
+    if relative is None:
+        root = built.split(".", 1)[0]
+        relative = PurePosixPath("reports", "product-review", root, f"{built}-confirmed.md")
+    else:
+        relative = PurePosixPath(relative)
     path = WORKSPACE
     for part in relative.parts:
         path = os.path.join(path, part)
@@ -6576,7 +7451,7 @@ def validate_batch_closed(notes, data):
         if entry.get("kind") == "ruling.applied" and note_data(entry).get("batch") == batch:
             validate_batch_applied(notes[:index], note_data(entry), reject_duplicate=False)
 
-    opening_index, _, close_index, _, confirmed, built = current_pass_close(
+    opening_index, _, close_index, close, confirmed, built = current_pass_close(
         notes, f"decision batch B{batch} close"
     )
     if any(index >= close_index for index in state["item_state_indices"].values()) \
@@ -6586,6 +7461,37 @@ def validate_batch_closed(notes, data):
     if outcome == "no-correction":
         if confirmed != 0 or "lot" in data:
             fail(f"decision batch B{batch} no-correction close does not match its pass close")
+    elif outcome == "correction":
+        close_data = note_data(close)
+        if confirmed < 1 or close_data.get("schema") != 2 \
+                or close_data.get("route") != "correction":
+            fail(f"decision batch B{batch} has no exact Correction Round close")
+        allocation_index, allocation_entry = journal_entry_from_proof(
+            notes, close_data["allocation"], f"decision batch B{batch}'s allocation",
+        )
+        if allocation_index >= close_index \
+                or allocation_entry.get("kind") != "correction.round.allocated":
+            fail(f"decision batch B{batch} has no exact preceding correction allocation")
+        allocation = normalize_allocation(note_data(allocation_entry))
+        minimal = {"batch", "outcome", "built", "round"}
+        expected = {
+            "schema": 2,
+            "batch": batch,
+            "outcome": "correction",
+            "built": built,
+            "round": allocation["round"],
+            "allocation": close_data["allocation"],
+            "pass_close": journal_line_proof(close_index),
+            "confirmed_sha256": close_data["confirmed_sha256"],
+        }
+        if set(data) == minimal:
+            if data != {key: expected[key] for key in minimal}:
+                fail(f"decision batch B{batch} changes its Correction Round target", data)
+        elif data != expected:
+            fail(f"decision batch B{batch} changes its derived Correction Round authority",
+                 {"expected": expected, "actual": data})
+        data = expected
+        carries = confirmed_carries(built, relative=close_data["confirmed_artifact"])
     else:
         lot = data.get("lot")
         proof = sublot_close_proof(notes, lot, f"decision batch B{batch} close")
@@ -6610,7 +7516,7 @@ def validate_batch_closed(notes, data):
         if len(current_terminals) != 1:
             fail(f"decision batch B{batch} close requires one current terminal for B{batch}/{decision}",
                  f"found {len(current_terminals)}")
-        if answer["route"] in {"sublot", "amendment"}:
+        if answer["route"] in {"implementation", "sublot", "amendment"}:
             required_carries.add((batch, decision))
 
     if outcome == "no-correction" and required_carries:
@@ -6619,6 +7525,7 @@ def validate_batch_closed(notes, data):
     if missing:
         fail(f"decision batch B{batch} confirmed artifact omits current work",
              ", ".join(f"B{owner}/{item}" for owner, item in sorted(missing)))
+    return data
 
 
 def tuple_from(data):
@@ -7150,7 +8057,7 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             validate_global_authority_precedence(notes)
         except AuthorityPrecedenceError as exc:
             fail("an unfinished global product-authority boundary outranks this batch terminal", exc)
-        validate_batch_applied(notes, data)
+        data = validate_batch_applied(notes, data)
 
     if kind == "decision.batch.closed":
         try:
@@ -7158,7 +8065,7 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             validate_global_authority_precedence(notes)
         except AuthorityPrecedenceError as exc:
             fail("an unfinished global product-authority boundary outranks this batch close", exc)
-        validate_batch_closed(notes, data or {})
+        data = validate_batch_closed(notes, data or {})
 
     if kind == "decision.refuted" and data and "source" in data:
         validate_source_refutation(
@@ -7166,15 +8073,27 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         )
 
     if kind == "sublot.allocated":
-        validate_sublot_allocation(
+        data = validate_sublot_allocation(
             journal_entries(), data or {}, text, "a product-review sub-lot allocation",
+        )
+
+    if kind == "correction.round.allocated":
+        data = normalize_correction_allocation(
+            journal_entries(), data or {}, "a product-review correction allocation",
+        )
+
+    if kind == "correction.round.allocation.superseded":
+        data = normalize_correction_allocation_supersession(
+            journal_entries(), data or {}, "a Correction Round allocation supersession",
         )
 
     if kind == "pass.opened":
         data = normalize_pass_opened(data or {})
 
     if kind == "pass.closed":
-        validate_pass_close(journal_entries(), data or {}, "a product-review pass close")
+        data = validate_pass_close(
+            journal_entries(), data or {}, "a product-review pass close",
+        )[4]
 
     if kind == "lot.delivered":
         validate_lot_delivered(journal_entries(), data or {})
@@ -7388,7 +8307,7 @@ def cmd_subagent_started(args):
             and data.get("owner") == "spec-loop":
         validate_spec_loop_verifier("subagent-started", data)
     elif args.kind == "finding-verifier":
-        validate_product_finding_verifier("subagent-started", data, args.mandate)
+        data = validate_product_finding_verifier("subagent-started", data, args.mandate)
     elif args.kind == "consolidation":
         data = normalize_consolidation_started(journal_entries(), data, args.round)
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
@@ -7437,7 +8356,7 @@ def cmd_subagent_ended(args):
             and data.get("owner") == "spec-loop":
         validate_spec_loop_verifier("subagent-ended", data)
     elif args.kind == "finding-verifier":
-        validate_product_finding_verifier("subagent-ended", data, args.mandate)
+        data = validate_product_finding_verifier("subagent-ended", data, args.mandate)
     elif args.kind == "consolidation":
         data = normalize_consolidation_ended(journal_entries(), data, args.round)
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
@@ -7557,7 +8476,43 @@ def note_text(args):
             os.close(descriptor)
 
 
-def cmd_note(args):
+def correction_note_operation(args):
+    payload = {
+        "kind": args.kind,
+        "mandate": args.mandate,
+        "task": args.task,
+        "round": args.round,
+        "text": args.text,
+        "text_file": args.text_file,
+        "data": args.data,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    return f"progress-note:{digest}"
+
+
+def refuse_foreign_correction_pending_owner(operation):
+    marker = os.path.join(WORKSPACE, "correction-allocation-supersede-in-progress")
+    if not os.path.lexists(marker):
+        return
+    try:
+        metadata = os.lstat(marker)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            fail("the pending Correction Round authority owner is not one real file")
+        with open(marker, "rb") as source:
+            raw = source.read()
+        account = json.loads(raw)
+    except (OSError, UnicodeError, ValueError) as exc:
+        fail("the pending Correction Round authority owner is malformed", exc)
+    if not isinstance(account, dict) or account.get("operation") != operation:
+        fail(
+            "another Correction Round authority owner is unfinished",
+            "resume correction-round-supersede.sh with its exact recorded arguments",
+        )
+
+
+def append_note(args, lease=None, lease_operation=None):
     if args.kind not in NOTE_KINDS:
         fail(f"unknown note kind `{args.kind}`",
              "Look the name up where the call was given to you — never invent a variant.")
@@ -7565,6 +8520,14 @@ def cmd_note(args):
     data = parse_data(args.data)
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
+    operation = lease_operation or correction_note_operation(args)
+    if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS:
+        refuse_foreign_correction_pending_owner(operation)
+    if lease is not None:
+        try:
+            lease.verify(operation)
+        except (OSError, ValueError) as exc:
+            fail("the correction note does not own its exact authority lease", str(exc))
     if args.kind == "sweep.reported" and finish_interrupted_sweep_receipt(
         journal_entries(), data, context.get("round"),
     ):
@@ -7573,6 +8536,17 @@ def cmd_note(args):
         args.kind, data, text, round_number=context.get("round"),
         mandate=context.get("mandate"), context=context,
     )
+    if lease is not None:
+        acquisition_generation = hashlib.sha256(json.dumps({
+            "kind": args.kind,
+            "context": context,
+            "text": text,
+            "data": data,
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        try:
+            lease.bind_generation(acquisition_generation)
+        except (OSError, ValueError) as exc:
+            fail("the correction note changed its acquisition generation", str(exc))
     if args.kind in {
         "bound.spent", "verdict.consumed", "design.review.resolved", "design.review.blocked",
         "code.review.resolved", "code.review.blocked",
@@ -7587,6 +8561,24 @@ def cmd_note(args):
                  **context)
     if args.kind == "sweep.reported":
         remove_amendment_sweep_preflight(data, "sweep.reported", journaled=True)
+
+
+def cmd_note_with_lease(args, lease, operation=None):
+    if args.kind not in CORRECTION_AUTHORITY_NOTE_KINDS:
+        fail("an outer correction lease cannot append this note kind")
+    append_note(args, lease, operation)
+
+
+def cmd_note(args):
+    if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS:
+        operation = correction_note_operation(args)
+        try:
+            with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+                cmd_note_with_lease(args, lease)
+        except (OSError, ValueError) as exc:
+            fail("the correction authority lease failed", str(exc))
+        return
+    append_note(args)
 
 
 def cmd_spec_close_check(args):

@@ -44,7 +44,7 @@ ARTIFACT_SHA = re.compile(r"[0-9a-f]{64}")
 DIRECT_ROUTES = {
     "closed", "spec-in-place", "amendment", "spec-fixer", "amendment-fixer",
 }
-BATCH_ROUTES = {"closed", "sublot", "spec-in-place", "amendment"}
+BATCH_ROUTES = {"closed", "implementation", "sublot", "spec-in-place", "amendment"}
 CONFLICT_ACTIONS = {"keep", "supersede", "qualify", "replace", "reconcile"}
 SPEC_EDIT_STATE_KINDS = {
     "ruling.ready",

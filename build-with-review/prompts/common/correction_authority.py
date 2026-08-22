@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Validate immutable content-addressed Correction Round authority objects."""
 
+import ctypes
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import pathlib
 import re
 import stat
+import tempfile
 
 LOT_RE = re.compile(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -17,6 +21,10 @@ ALLOCATION_KEYS = {
     "schema", "built", "round", "predecessor_supersession", "parent", "pass",
     "items", "refuted", "admission",
 }
+CONTROLLER_SUCCESSOR_COMMON_KEYS = {
+    "schema", "kind", "transition", "built", "position",
+    "predecessor_generation_sha256", "authorities", "commit", "gate",
+}
 ADMISSION_KEYS = {
     "items", "spec", "human_decisions", "controller_contract", "ownership",
     "decomposition", "coordination", "repetition", "reason",
@@ -25,6 +33,95 @@ EMPTY_FINAL_CHECKER_SET = {"schema": 1, "entries": []}
 EMPTY_FINAL_CHECKER_SET_SHA256 = hashlib.sha256(
     json.dumps(EMPTY_FINAL_CHECKER_SET, sort_keys=True, separators=(",", ":")).encode(),
 ).hexdigest()
+AT_FDCWD = -100
+RENAME_NOREPLACE = 1
+CORRECTION_LOCK_NAME = "correction-authority.lock"
+
+
+class CorrectionAuthorityLease:
+    """One non-serializable owner of the workspace Correction Round lock."""
+
+    def __init__(self, workspace, operation, descriptor, identity):
+        self.workspace = pathlib.Path(workspace)
+        self.operation = _exact_text(operation, "the correction operation")
+        self.acquisition_generation = None
+        self._descriptor = descriptor
+        self._identity = identity
+        self._closed = False
+
+    @classmethod
+    def acquire(cls, workspace, operation):
+        workspace = pathlib.Path(workspace)
+        if not workspace.is_absolute():
+            raise ValueError("the correction authority workspace is not absolute")
+        _lstat_real_directory(workspace, "the correction authority workspace")
+        path = workspace / CORRECTION_LOCK_NAME
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            opened = os.fstat(descriptor)
+            current = path.lstat()
+            if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) \
+                    or not stat.S_ISREG(opened.st_mode) \
+                    or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise ValueError("the correction authority lock changed during acquisition")
+            return cls(workspace, operation, descriptor, (opened.st_dev, opened.st_ino))
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def __enter__(self):
+        self.verify(self.operation)
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        self.close()
+
+    def __reduce__(self):
+        raise TypeError("a correction authority lease is not serializable")
+
+    def bind_generation(self, generation):
+        generation = _exact_text(generation, "the correction acquisition generation")
+        if self.acquisition_generation is None:
+            self.acquisition_generation = generation
+        elif self.acquisition_generation != generation:
+            raise ValueError("the correction lease already owns another acquisition generation")
+        self.verify(self.operation, generation)
+
+    def verify(self, operation, generation=None):
+        if self._closed:
+            raise ValueError("the correction authority lease is closed")
+        if _exact_text(operation, "the correction operation") != self.operation:
+            raise ValueError("the correction authority lease owns another operation")
+        if generation is not None and generation != self.acquisition_generation:
+            raise ValueError("the correction authority lease owns another acquisition generation")
+        opened = os.fstat(self._descriptor)
+        current = (self.workspace / CORRECTION_LOCK_NAME).lstat()
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) \
+                or (opened.st_dev, opened.st_ino) != self._identity \
+                or (current.st_dev, current.st_ino) != self._identity:
+            raise ValueError("the correction authority lease no longer owns its lock")
+
+        probe = os.open(
+            self.workspace / CORRECTION_LOCK_NAME,
+            os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            raise ValueError("the correction authority lease does not hold its lock")
+        finally:
+            os.close(probe)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        os.close(self._descriptor)
 
 
 def _positive_integer(value, subject, *, allow_zero=False):
@@ -150,6 +247,38 @@ def normalize_allocation(value):
     return json.loads(json.dumps(value))
 
 
+def normalize_controller_successor(value):
+    if not isinstance(value, dict) or value.get("schema") != 1 \
+            or value.get("kind") != "controller-successor":
+        raise ValueError("the controller-successor generation has an invalid shape")
+    transition = value.get("transition")
+    proof_key = {
+        "in-pass-product-authority": "source_pass",
+        "amendment-or-plan-successor": "voided_pass",
+    }.get(transition)
+    if proof_key is None or set(value) != CONTROLLER_SUCCESSOR_COMMON_KEYS | {proof_key}:
+        raise ValueError("the controller-successor generation has an invalid transition")
+    if not isinstance(value.get("built"), str) or not LOT_RE.fullmatch(value["built"]):
+        raise ValueError("the controller-successor generation has an invalid built unit")
+    _positive_integer(value.get("position"), "the controller-successor position", allow_zero=True)
+    if not HASH_RE.fullmatch(str(value.get("predecessor_generation_sha256"))) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(value.get("commit"))) \
+            or not HASH_RE.fullmatch(str(value.get("gate"))) \
+            or not re.fullmatch(r"(?:0|[1-9][0-9]*):[0-9a-f]{64}", str(value.get(proof_key))):
+        raise ValueError("the controller-successor generation has malformed authority")
+    authorities = value.get("authorities")
+    if not isinstance(authorities, list) or not authorities or any(
+        not isinstance(proof, str)
+        or not re.fullmatch(r"(?:0|[1-9][0-9]*):[0-9a-f]{64}", proof)
+        for proof in authorities
+    ):
+        raise ValueError("the controller-successor authority account is malformed")
+    indices = [int(proof.split(":", 1)[0]) for proof in authorities]
+    if indices != sorted(set(indices)):
+        raise ValueError("the controller-successor authority account is not ordered and unique")
+    return json.loads(json.dumps(value))
+
+
 def product_report_path(built, position, pass_ordinal, mandate):
     if not isinstance(built, str) or not LOT_RE.fullmatch(built):
         raise ValueError("the product report has an invalid built unit")
@@ -161,6 +290,18 @@ def product_report_path(built, position, pass_ordinal, mandate):
     return pathlib.PurePosixPath(
         "reports", "product-review", root,
         f"{built}-c{position}-p{pass_ordinal}-{mandate}.md",
+    )
+
+
+def product_confirmed_path(built, position, pass_ordinal):
+    if not isinstance(built, str) or not LOT_RE.fullmatch(built):
+        raise ValueError("the confirmed artifact has an invalid built unit")
+    _positive_integer(position, "the correction position", allow_zero=True)
+    _positive_integer(pass_ordinal, "the product pass ordinal")
+    root = built.split(".", 1)[0]
+    return pathlib.PurePosixPath(
+        "reports", "product-review", root,
+        f"{built}-c{position}-p{pass_ordinal}-confirmed.md",
     )
 
 
@@ -180,6 +321,11 @@ def occurrence_label(position, pass_ordinal):
 
 
 def generation_sha256(account):
+    if isinstance(account, dict) and account.get("kind") == "controller-successor":
+        normalized = normalize_controller_successor(account)
+        return hashlib.sha256(
+            json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode(),
+        ).hexdigest()
     expected_keys = {
         "schema", "kind", "built", "position", "origin", "plan", "tasks",
         "terminal", "commit", "gate", "final_checker_set_sha256",
@@ -288,3 +434,72 @@ def validate_content_object(workspace, built, digest, suffix):
     if hashlib.sha256(payload).hexdigest() != digest:
         raise ValueError("the correction authority object does not match its name")
     return target
+
+
+def _ensure_real_directory(path, subject):
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    _lstat_real_directory(path, subject)
+
+
+def _rename_without_replace(source, target):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        AT_FDCWD, os.fsencode(source), AT_FDCWD, os.fsencode(target), RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), target)
+
+
+def publish_content_object(workspace, built, payload, suffix):
+    if not isinstance(payload, bytes) or not payload or len(payload) > MAX_OBJECT_BYTES:
+        raise ValueError("the correction authority publication has invalid bytes")
+    digest = hashlib.sha256(payload).hexdigest()
+    target = content_object_path(workspace, built, digest, suffix)
+    workspace = pathlib.Path(workspace)
+    _lstat_real_directory(workspace, "the correction authority workspace")
+    cursor = workspace
+    for component in ("corrections", built, "objects"):
+        cursor = cursor / component
+        _ensure_real_directory(cursor, "a correction authority parent")
+    if target.exists() or target.is_symlink():
+        return validate_content_object(workspace, built, digest, suffix)
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent,
+    )
+    temporary = pathlib.Path(temporary_name)
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("short correction authority object write")
+            offset += written
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o444)
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            _rename_without_replace(temporary, target)
+        except FileExistsError:
+            return validate_content_object(workspace, built, digest, suffix)
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary.exists():
+            temporary.unlink()
+    return validate_content_object(workspace, built, digest, suffix)

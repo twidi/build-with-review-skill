@@ -14,22 +14,27 @@ returns canned JSON for `whoami` and `session <id>`, records every call it
 receives so order can be asserted, and fails on demand. No real TwiCC
 instance and no file of this repository is ever touched.
 """
+import fcntl
 import hashlib
 import importlib.util
 import json
 import multiprocessing
 import os
+import pathlib
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
+from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.path.join(HERE, "prompts", "common", "progress.py")
 AUTHORITY_SOURCE = os.path.join(HERE, "prompts", "common", "authority_precedence.py")
+CORRECTION_AUTHORITY_SOURCE = os.path.join(HERE, "prompts", "common", "correction_authority.py")
 SPEC_EDIT_SOURCE = os.path.join(HERE, "prompts", "common", "spec_edit_auth.py")
 SPEC_PROMPTS = os.path.join(HERE, "prompts", "spec")
 PRODUCT_PROMPTS = os.path.join(HERE, "prompts", "product-review")
@@ -128,9 +133,12 @@ def reset():
     shutil.rmtree(os.path.join(WORKSPACE, "reports"), ignore_errors=True)
     shutil.rmtree(os.path.join(WORKSPACE, "plans"), ignore_errors=True)
     shutil.rmtree(os.path.join(WORKSPACE, "amendments"), ignore_errors=True)
+    shutil.rmtree(os.path.join(WORKSPACE, "corrections"), ignore_errors=True)
     for marker in (
         "amendment-commit-in-progress", "document-copy-in-progress", "attempt-in-flight",
-        "amendment-sweep-preflight.json",
+        "amendment-sweep-preflight.json", "correction-allocation-supersede-in-progress",
+        "correction-artifact-in-progress", "correction-round-open-in-progress",
+        "correction-product-authority-in-progress",
     ):
         path = os.path.join(WORKSPACE, marker)
         if os.path.lexists(path):
@@ -172,6 +180,13 @@ def journal_lines():
             if raw:
                 out.append(json.loads(raw))  # a torn line raises: that IS a failure
     return out
+
+
+def journal_proof(index):
+    path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(path, "rb") as source:
+        raw = source.read().splitlines()[index]
+    return f"{index}:{hashlib.sha256(raw).hexdigest()}"
 
 
 def cli_calls():
@@ -900,6 +915,129 @@ def product_report_text(mandate, findings=()):
     return "\n".join(body)
 
 
+def correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha):
+    admission = allocation["admission"]
+    return f"""# Demo — {allocation['built']} correction round {allocation['round']}
+
+Schema: 1
+Built unit: {allocation['built']}
+Correction round: {allocation['round']}
+Parent position: c{allocation['parent']['position']}
+Parent generation SHA-256: {allocation['parent']['generation_sha256']}
+Source reviewed commit: {allocation['pass']['commit']}
+Source accepted gate: {allocation['pass']['gate']}
+Correction base commit: {allocation['parent']['commit']}
+Correction base gate: {allocation['parent']['gate']}
+Source pass: p{allocation['pass']['ordinal']}
+Source opening: {allocation['pass']['opening']}
+Source findings: {confirmed_relative}
+Source findings SHA-256: {confirmed_sha}
+
+## Route account
+Spec: current and settled
+Human decisions: {admission['human_decisions']}
+Controller contract: {admission['controller_contract']}
+Ownership: {admission['ownership']}
+Decomposition: {admission['decomposition']}
+Coordination: {admission['coordination']}
+Repetition: {admission['repetition']}
+Reason: {admission['reason']}
+
+## Finding coverage
+F1: task 1
+
+---
+
+## Task 1 - Correct the accepted finding
+
+Covers: F1
+Depends on: -
+Consumes final-checker obligations: -
+Achieves:
+  - The accepted behavior uses the current implementation contract.
+Files: src/demo.py and its focused tests
+To verify: The accepted behavior passes through the production entry point.
+
+### Design
+[written at correction task Design - see below]
+"""
+
+
+def seed_unopened_correction_allocation(token="correction-allocation"):
+    commit, gate, _ = seed_task_gate("lot-1", token)
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening_index = len(journal_lines()) - 1
+    opening = journal_lines()[opening_index]["data"]
+    opening_proof = journal_proof(opening_index)
+    seed_review_receipts("lot-1", confirmed=1)
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": opening["generation_sha256"],
+            "commit": commit,
+            "gate": gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": opening_proof,
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": ["unlooked/F1"], "carries": []}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The finding first appeared bounded.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The initial account appeared bounded.",
+        },
+    }
+    accepted = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+    allocation_index = len(journal_lines()) - 1
+    allocation_proof = journal_proof(allocation_index)
+    confirmed_relative = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    confirmed_sha = write_report(
+        confirmed_relative, "## F1 · correction\nSources: unlooked/F1\n",
+    )
+    artifact_relative = "corrections/lot-1/round-1.md"
+    write_report(
+        artifact_relative,
+        correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha),
+    )
+    return {
+        "commit": commit,
+        "gate": gate,
+        "opening_index": opening_index,
+        "opening": opening,
+        "opening_proof": opening_proof,
+        "allocation": allocation,
+        "allocation_index": allocation_index,
+        "allocation_proof": allocation_proof,
+        "confirmed_relative": confirmed_relative,
+        "artifact_relative": artifact_relative,
+    }
+
+
 def spec_report_text(mandate, findings=()):
     labels = completion_labels(mandate)
     values = []
@@ -1322,15 +1460,28 @@ def write_confirmed(built, carries, *, lot="lot-1.1", count=1, sources=None,
 
 def seed_review_receipts(built="lot-1", *, confirmed=0, omit=None):
     root = built.split(".", 1)[0]
-    opening = next(entry for entry in reversed(journal_lines()) if entry.get("kind") == "pass.opened")
+    entries = journal_lines()
+    opening_index = next(
+        index for index in range(len(entries) - 1, -1, -1)
+        if entries[index].get("kind") == "pass.opened"
+    )
+    opening = entries[opening_index]
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "rb") as journal:
+        opening_raw = journal.read().splitlines()[opening_index]
+    opening_proof = f"{opening_index}:{hashlib.sha256(opening_raw).hexdigest()}"
     pass_commit = opening["data"]["commit"]
     pass_gate = opening["data"]["gate"]
     for mandate in ("unlooked", "user", "meaning", "quality", "coverage"):
         if mandate == omit:
             continue
-        report = os.path.join(
-            WORKSPACE, "reports", "product-review", root, f"{built}-{mandate}.md",
-        )
+        stem = f"{built}-{mandate}.md"
+        if opening["data"].get("schema") == 2:
+            stem = (
+                f"{built}-c{opening['data']['position']}-p{opening['data']['pass']}"
+                f"-{mandate}.md"
+            )
+        relative = f"reports/product-review/{root}/{stem}"
+        report = os.path.join(WORKSPACE, *relative.split("/"))
         os.makedirs(os.path.dirname(report), exist_ok=True)
         content = product_report_text(
             mandate, ("IMPORTANT",) * confirmed if mandate == "unlooked" else (),
@@ -1342,16 +1493,30 @@ def seed_review_receipts(built="lot-1", *, confirmed=0, omit=None):
             "critical": 0, "important": confirmed if mandate == "unlooked" else 0,
             "minor": 0, "decision": 0,
         }
-        append_note(
-            "report.received",
-            {**counts, "pass_commit": pass_commit, "pass_gate": pass_gate,
-             "report_sha256": report_sha},
-            mandate=mandate,
-        )
+        receipt = {
+            **counts, "pass_commit": pass_commit, "pass_gate": pass_gate,
+            "report_sha256": report_sha,
+        }
         identity = {
             "pass_commit": pass_commit, "pass_gate": pass_gate,
             "report_sha256": report_sha,
         }
+        if opening["data"].get("schema") == 2:
+            generation = {
+                "schema": 2,
+                "pass_opening": opening_proof,
+                "position": opening["data"]["position"],
+                "generation_sha256": opening["data"]["generation_sha256"],
+                "pass": opening["data"]["pass"],
+                "pass_commit": pass_commit,
+                "pass_gate": pass_gate,
+                "mandate": mandate,
+                "report": relative,
+                "report_sha256": report_sha,
+            }
+            receipt = {**counts, **generation}
+            identity = generation
+        append_note("report.received", receipt, mandate=mandate)
         append_subagent(
             "subagent-started", "finding-verifier", mandate=mandate, data=identity,
         )
@@ -1441,6 +1606,7 @@ def seed_task_gate(built="lot-1", token=None, *, tasks=1, add_lot_built=True,
         ).strip()
     gate = hashlib.sha256(f"gate:{built}:{commit}".encode()).hexdigest()
     owner = f"{built}/task-1/attempt-1"
+    append_note("plan.written", {"tasks": tasks, "op": f"plan:{built}:{token or 'current'}"}, lot=built)
     append_checker_verdict("code", lot=built, task=1, attempt=1)
     with open(os.path.join(WORKSPACE, "progress.jsonl"), "rb") as journal:
         raw_lines = journal.read().splitlines()
@@ -1496,6 +1662,98 @@ def seed_baseline_gate(owner, commit, base):
               "report_sha256": report_sha, "commands": 1},
     )
     return gate
+
+
+def seed_in_pass_controller_successor(opening_index, *, built="lot-1", ruling="R1"):
+    opening = journal_lines()[opening_index]["data"]
+    predecessor = opening["commit"]
+    state_path = seed_direct_ruling(ruling=ruling, route="spec-in-place")
+    spec_relative = f"docs/plans/{ruling.lower()}-controller-successor.md"
+    write_project(spec_relative, f"# Accepted successor authority for {ruling}\n")
+    subprocess.run(["git", "-C", REPO, "add", "--", spec_relative], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-q",
+        "-m", f"docs: accept {ruling} successor", "--", spec_relative,
+    ], check=True)
+    successor = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    artifact_sha = file_sha256(state_path)
+    operation = f"edit-{ruling.lower()}-controller-successor"
+    ready_op = f"ready-{ruling.lower()}-controller-successor"
+    append_note("spec.edit.ready", {
+        "op": ready_op,
+        "owner": ruling,
+        "status": "active",
+        "route": "spec-in-place",
+        "state_kind": "ruling.ready",
+        "state_ref": ruling,
+        "source_sha": predecessor,
+        "spec_path_sha256": hashlib.sha256(spec_relative.encode()).hexdigest(),
+        "artifact_sha256": artifact_sha,
+    }, state_path)
+    ready_index = len(journal_lines()) - 1
+    append_note("spec.committed", {
+        "op": operation,
+        "sha": successor,
+        "parent": predecessor,
+        "ready_op": ready_op,
+        "state_kind": "ruling.ready",
+        "state_ref": ruling,
+        "artifact_sha256": artifact_sha,
+        "ruling": ruling,
+    })
+    commit_index = len(journal_lines()) - 1
+    recheck_path = f"reports/answers/{ruling}-controller-successor-recheck.md"
+    recheck_sha = write_report(recheck_path, "The successor preserves the current answer.\n")
+    action = [{"answer": ruling, "status": "active", "route": "spec-in-place"}]
+    rechecked = run_progress(
+        "note", "decision.recheck.completed",
+        "--data", json.dumps(recheck_data(
+            ruling, operation, successor, action, artifact_sha=recheck_sha,
+        )),
+        "--text", recheck_path,
+    )
+    check(rechecked.returncode == 0, rechecked.stdout + rechecked.stderr)
+    recheck_index = len(journal_lines()) - 1
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": ruling,
+            "ruling": ruling,
+            "route": "spec-in-place",
+            "sha": successor,
+            "recheck_op": operation,
+            "authority_kind": "ruling.ready",
+            "authority_ref": ruling,
+            "authority_sha256": artifact_sha,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    terminal_index = len(journal_lines()) - 1
+    owner = (
+        f"product-review/{built}/c{opening['position']}"
+        f"/controller-successor/{successor}"
+    )
+    gate = seed_baseline_gate(owner, successor, predecessor)
+    account = {
+        "schema": 1,
+        "kind": "controller-successor",
+        "transition": "in-pass-product-authority",
+        "built": built,
+        "position": opening["position"],
+        "predecessor_generation_sha256": opening["generation_sha256"],
+        "source_pass": journal_proof(opening_index),
+        "authorities": [
+            journal_proof(ready_index),
+            journal_proof(commit_index),
+            journal_proof(recheck_index),
+            journal_proof(terminal_index),
+        ],
+        "commit": successor,
+        "gate": gate,
+    }
+    authority = load_common_module("correction_authority")
+    return successor, gate, account, authority.generation_sha256(account)
 
 
 def seed_review_pass(*, built="lot-1", commit=None, confirmed=0, omit=None):
@@ -4150,6 +4408,1096 @@ def pass_opening_binds_the_exact_task_lot_and_one_open_generation():
 
 
 @test
+def schema_two_pass_opening_binds_the_built_generation_and_ordinal():
+    commit, gate, owner = seed_task_gate("lot-1", "schema-two-source")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    data = journal_lines()[-1]["data"]
+    check(data == {
+        "schema": 2,
+        "built": "lot-1",
+        "position": 0,
+        "generation_sha256": data.get("generation_sha256"),
+        "pass": 1,
+        "commit": commit,
+        "gate": gate,
+        "source_scope": "task",
+        "correction_terminal_kind": None,
+        "correction_terminal": None,
+        "source_owner": owner,
+        "source_lot": "lot-1",
+        "source_round": None,
+        "source_task": 1,
+        "source_attempt": 1,
+    }, data)
+    check(re.fullmatch(r"[0-9a-f]{64}", data["generation_sha256"]), data)
+    entries = journal_lines()
+    plan_index = next(index for index, entry in enumerate(entries)
+                      if entry.get("kind") == "plan.written" and entry.get("lot") == "lot-1")
+    success_index = next(index for index, entry in enumerate(entries)
+                         if entry.get("kind") == "attempt.succeeded")
+    built_index = next(index for index, entry in enumerate(entries)
+                       if entry.get("kind") == "lot.built")
+    plan_relative = "docs/plans/test-run-lot-1-plan.md"
+    with open(os.path.join(REPO, plan_relative), "rb") as source:
+        plan_sha = hashlib.sha256(source.read()).hexdigest()
+    account = {
+        "schema": 1,
+        "kind": "built",
+        "built": "lot-1",
+        "position": 0,
+        "origin": {
+            "kind": "root-lot",
+            "opening": journal_proof(plan_index),
+            "source": journal_proof(plan_index),
+        },
+        "plan": {"path": plan_relative, "sha256": plan_sha},
+        "tasks": [{
+            "task": 1,
+            "attempt": 1,
+            "commit": commit,
+            "gate": gate,
+            "success": journal_proof(success_index),
+        }],
+        "terminal": journal_proof(built_index),
+        "commit": commit,
+        "gate": gate,
+        "final_checker_set_sha256": hashlib.sha256(
+            b'{"entries":[],"schema":1}',
+        ).hexdigest(),
+    }
+    expected_generation = hashlib.sha256(
+        json.dumps(account, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    check(data["generation_sha256"] == expected_generation,
+          "the built generation does not consume the exact root plan authority")
+
+
+@test
+def schema_two_product_receipt_uses_the_exact_pass_local_report():
+    commit, gate, _ = seed_task_gate("lot-1", "schema-two-report")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening = journal_lines()[-1]
+    opening_data = opening["data"]
+    relative = "reports/product-review/lot-1/lot-1-c0-p1-user.md"
+    content = product_report_text("user")
+    write_report(relative, content)
+    receipt = run_progress(
+        "note", "report.received", "--mandate", "user",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    data = journal_lines()[-1]["data"]
+    check(data["schema"] == 2 and data["position"] == 0 and data["pass"] == 1, data)
+    check(data["generation_sha256"] == opening_data["generation_sha256"], data)
+    check(data["mandate"] == "user" and data["report"] == relative, data)
+    check(re.fullmatch(r"(?:0|[1-9][0-9]*):[0-9a-f]{64}", data["pass_opening"]), data)
+    verifier = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps({
+            "pass_commit": commit,
+            "pass_gate": gate,
+            "report_sha256": data["report_sha256"],
+        }),
+    )
+    check(verifier.returncode == 0, verifier.stdout + verifier.stderr)
+    verifier_data = journal_lines()[-1]["data"]
+    check(verifier_data["schema"] == 2 and verifier_data["report"] == relative, verifier_data)
+    check(verifier_data["pass_opening"] == data["pass_opening"], verifier_data)
+    ended = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps({
+            "pass_commit": commit,
+            "pass_gate": gate,
+            "report_sha256": data["report_sha256"],
+            "confirmed": 0,
+            "disproved": 0,
+            "malformed": 0,
+            "claims": [],
+        }),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    terminal_data = journal_lines()[-1]["data"]
+    check(terminal_data["schema"] == 2 and terminal_data["claims"] == [], terminal_data)
+
+
+@test
+def correction_allocation_consumes_one_exact_schema_two_pass_generation():
+    commit, gate, _ = seed_task_gate("lot-1", "correction-allocation")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_review_receipts("lot-1", confirmed=1)
+    entries = journal_lines()
+    opening_index = next(
+        index for index in range(len(entries) - 1, -1, -1)
+        if entries[index].get("kind") == "pass.opened"
+    )
+    opening = entries[opening_index]["data"]
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "rb") as journal:
+        opening_raw = journal.read().splitlines()[opening_index]
+    opening_proof = f"{opening_index}:{hashlib.sha256(opening_raw).hexdigest()}"
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": opening["generation_sha256"],
+            "commit": commit,
+            "gate": gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": opening_proof,
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": ["unlooked/F1"], "carries": []}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The finding has one bounded implementation outcome.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The complete correction stays inside one existing area.",
+        },
+    }
+    accepted = run_progress(
+        "note", "correction.round.allocated",
+        "--data", json.dumps(allocation, separators=(",", ":")),
+    )
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+    check(journal_lines()[-1]["data"] == allocation, journal_lines()[-1])
+
+    before = len(journal_lines())
+    duplicate = run_progress(
+        "note", "correction.round.allocated",
+        "--data", json.dumps(allocation, separators=(",", ":")),
+    )
+    check(duplicate.returncode != 0 and len(journal_lines()) == before,
+          "a second current correction allocation was accepted")
+
+    confirmed_relative = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    confirmed_text = "## F1 · correction\nSources: unlooked/F1\n"
+    confirmed_sha = write_report(confirmed_relative, confirmed_text)
+    artifact_relative = "corrections/lot-1/round-1.md"
+    artifact = f"""# Demo — lot-1 correction round 1
+
+Schema: 1
+Built unit: lot-1
+Correction round: 1
+Parent position: c0
+Parent generation SHA-256: {opening['generation_sha256']}
+Source reviewed commit: {commit}
+Source accepted gate: {gate}
+Correction base commit: {commit}
+Correction base gate: {gate}
+Source pass: p1
+Source opening: {opening_proof}
+Source findings: {confirmed_relative}
+Source findings SHA-256: {confirmed_sha}
+
+## Route account
+Spec: current and settled
+Human decisions: settled
+Controller contract: preserved
+Ownership: preserved
+Decomposition: preserved
+Coordination: bounded
+Repetition: independent
+Reason: The complete correction stays inside one existing area.
+
+## Finding coverage
+F1: task 1
+
+---
+
+## Task 1 - Correct the accepted finding
+
+Covers: F1
+Depends on: -
+Consumes final-checker obligations: -
+Achieves:
+  - The accepted behavior uses the current implementation contract.
+Files: src/demo.py and its focused tests
+To verify: The accepted behavior passes through the production entry point.
+
+### Design
+[written at correction task Design - see below]
+"""
+    write_report(artifact_relative, artifact)
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_data = journal_lines()[-1]["data"]
+    check(close_data["schema"] == 2 and close_data["route"] == "correction", close_data)
+    check(re.fullmatch(r"(?:0|[1-9][0-9]*):[0-9a-f]{64}", close_data["allocation"]), close_data)
+    check(close_data["confirmed_artifact"] == confirmed_relative, close_data)
+    check(close_data["artifact"] == artifact_relative and close_data["tasks"] == 1, close_data)
+    for key in ("confirmed_object", "artifact_object"):
+        object_path = os.path.join(WORKSPACE, *close_data[key].split("/"))
+        check(os.path.isfile(object_path) and os.stat(object_path).st_mode & 0o222 == 0,
+              f"{key} was not published read-only")
+
+
+@test
+def controller_successor_generation_replaces_the_correction_base_before_allocation():
+    commit, gate, _ = seed_task_gate("lot-1", "controller-successor")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening_index = len(journal_lines()) - 1
+    opening = journal_lines()[opening_index]["data"]
+
+    state_path = seed_direct_ruling(ruling="R1", route="spec-in-place")
+    spec_relative = "docs/plans/controller-successor.md"
+    write_project(spec_relative, "# Accepted successor product authority\n")
+    subprocess.run(["git", "-C", REPO, "add", "--", spec_relative], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-q",
+        "-m", "docs: accept successor authority", "--", spec_relative,
+    ], check=True)
+    successor = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    artifact_sha = file_sha256(state_path)
+    ready_op = "ready-controller-successor"
+    append_note("spec.edit.ready", {
+        "op": ready_op,
+        "owner": "R1",
+        "status": "active",
+        "route": "spec-in-place",
+        "state_kind": "ruling.ready",
+        "state_ref": "R1",
+        "source_sha": commit,
+        "spec_path_sha256": hashlib.sha256(spec_relative.encode()).hexdigest(),
+        "artifact_sha256": artifact_sha,
+    }, state_path)
+    ready_index = len(journal_lines()) - 1
+    append_note("spec.committed", {
+        "op": "edit-controller-successor",
+        "sha": successor,
+        "parent": commit,
+        "ready_op": ready_op,
+        "state_kind": "ruling.ready",
+        "state_ref": "R1",
+        "artifact_sha256": artifact_sha,
+        "ruling": "R1",
+    })
+    commit_index = len(journal_lines()) - 1
+    recheck_path = "reports/answers/R1-controller-successor-recheck.md"
+    recheck_sha = write_report(recheck_path, "The successor preserves the current answer.\n")
+    action = [{"answer": "R1", "status": "active", "route": "spec-in-place"}]
+    rechecked = run_progress(
+        "note", "decision.recheck.completed",
+        "--data", json.dumps(recheck_data(
+            "R1", "edit-controller-successor", successor, action,
+            artifact_sha=recheck_sha,
+        )),
+        "--text", recheck_path,
+    )
+    check(rechecked.returncode == 0, rechecked.stdout + rechecked.stderr)
+    recheck_index = len(journal_lines()) - 1
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "R1",
+            "ruling": "R1",
+            "route": "spec-in-place",
+            "sha": successor,
+            "recheck_op": "edit-controller-successor",
+            "authority_kind": "ruling.ready",
+            "authority_ref": "R1",
+            "authority_sha256": artifact_sha,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    terminal_index = len(journal_lines()) - 1
+    owner = f"product-review/lot-1/c0/controller-successor/{successor}"
+    successor_gate = seed_baseline_gate(owner, successor, commit)
+    seed_review_receipts("lot-1", confirmed=1)
+
+    successor_account = {
+        "schema": 1,
+        "kind": "controller-successor",
+        "transition": "in-pass-product-authority",
+        "built": "lot-1",
+        "position": 0,
+        "predecessor_generation_sha256": opening["generation_sha256"],
+        "source_pass": journal_proof(opening_index),
+        "authorities": [
+            journal_proof(ready_index),
+            journal_proof(commit_index),
+            journal_proof(recheck_index),
+            journal_proof(terminal_index),
+        ],
+        "commit": successor,
+        "gate": successor_gate,
+    }
+    authority = load_common_module("correction_authority")
+    successor_generation = authority.generation_sha256(successor_account)
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": successor_generation,
+            "commit": successor,
+            "gate": successor_gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": journal_proof(opening_index),
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": ["unlooked/F1"], "carries": []}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The finding remains one bounded implementation correction.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The successor authority preserves the bounded implementation route.",
+        },
+    }
+    accepted = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+    check(journal_lines()[-1]["data"]["parent"] == allocation["parent"], journal_lines()[-1])
+
+
+@test
+def implementation_batch_closes_through_one_exact_correction_fulfillment():
+    commit, gate, _ = seed_task_gate("lot-1", "correction-batch")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_review_receipts("lot-1", confirmed=0)
+    seed_batch(
+        items=[{"id": "D1", "verdict": "confirmed"}],
+        answers=[{"id": "D1", "choice": "O1", "route": "implementation"}],
+    )
+    entries = journal_lines()
+    opening_index = next(index for index, entry in enumerate(entries)
+                         if entry.get("kind") == "pass.opened")
+    opening = entries[opening_index]["data"]
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": opening["generation_sha256"],
+            "commit": commit,
+            "gate": gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": journal_proof(opening_index),
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": [], "carries": ["B1/D1"]}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The accepted product answer needs one bounded code change.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The implementation answer remains inside the existing task boundary.",
+        },
+    }
+    allocated = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    confirmed_relative = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    confirmed_sha = write_report(
+        confirmed_relative, "## F1 · correction\nCarries: B1/D1\n",
+    )
+    write_report(
+        "corrections/lot-1/round-1.md",
+        correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha),
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_proof = journal_proof(len(journal_lines()) - 1)
+    allocation_proof = journal_proof(next(
+        index for index, entry in enumerate(journal_lines())
+        if entry.get("kind") == "correction.round.allocated"
+    ))
+
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "B1/D1",
+            "batch": 1,
+            "decision": "D1",
+            "route": "implementation",
+            "fulfillment": "correction",
+            "built": "lot-1",
+            "round": 1,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    check(journal_lines()[-1]["data"] == {
+        "schema": 2,
+        "answer": "B1/D1",
+        "batch": 1,
+        "decision": "D1",
+        "route": "implementation",
+        "fulfillment": "correction",
+        "built": "lot-1",
+        "round": 1,
+        "allocation": allocation_proof,
+        "pass_close": close_proof,
+    }, journal_lines()[-1])
+
+    batch_closed = run_progress(
+        "note", "decision.batch.closed",
+        "--data", '{"batch":1,"outcome":"correction","built":"lot-1","round":1}',
+    )
+    check(batch_closed.returncode == 0, batch_closed.stdout + batch_closed.stderr)
+    data = journal_lines()[-1]["data"]
+    check(data == {
+        "schema": 2,
+        "batch": 1,
+        "outcome": "correction",
+        "built": "lot-1",
+        "round": 1,
+        "allocation": allocation_proof,
+        "pass_close": close_proof,
+        "confirmed_sha256": confirmed_sha,
+    }, data)
+
+
+@test
+def correction_allocation_self_review_can_select_the_exact_sublot_exit():
+    commit, gate, _ = seed_task_gate("lot-1", "correction-supersession")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_review_receipts("lot-1", confirmed=1)
+    entries = journal_lines()
+    opening_index = next(index for index in range(len(entries) - 1, -1, -1)
+                         if entries[index].get("kind") == "pass.opened")
+    opening = entries[opening_index]["data"]
+    opening_proof = journal_proof(opening_index)
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": opening["generation_sha256"],
+            "commit": commit,
+            "gate": gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": opening_proof,
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": ["unlooked/F1"], "carries": []}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The finding first appeared bounded.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The initial account appeared bounded.",
+        },
+    }
+    accepted = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+    allocation_index = len(journal_lines()) - 1
+    allocation_proof = journal_proof(allocation_index)
+
+    confirmed_relative = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    confirmed_sha = write_report(
+        confirmed_relative, "## F1 · correction\nSources: unlooked/F1\n",
+    )
+    artifact_relative = "corrections/lot-1/round-1.md"
+    write_report(
+        artifact_relative,
+        correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha),
+    )
+    artifact_path = os.path.join(WORKSPACE, *artifact_relative.split("/"))
+    allocation_hash = allocation_proof.split(":", 1)[1]
+    moved_relative = (
+        f"corrections/lot-1/round-1-superseded-p1-{allocation_hash}.md"
+    )
+    moved_path = os.path.join(WORKSPACE, *moved_relative.split("/"))
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-supersede.sh",
+    )
+    helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_round_supersede.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_round_supersede_test", helper_path,
+    )
+    helper = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(helper)
+    helper_args = SimpleNamespace(
+        built="lot-1",
+        round=1,
+        allocation=allocation_proof,
+        outcome="sublot",
+        reason="The complete task graph requires structural decomposition.",
+    )
+    operation = helper.operation_identity(helper_args)
+    with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+        helper.atomic_marker(
+            pathlib.Path(WORKSPACE) / helper.MARKER_NAME,
+            helper.derive_account(helper_args, operation),
+        )
+    blocked_close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(blocked_close.returncode != 0 and not any(
+        entry.get("kind") == "pass.closed" for entry in journal_lines()
+    ), "a non-owner closed the pass while allocation supersession was pending")
+    retired = subprocess.run(
+        [
+            script, "lot-1", "1", allocation_proof, "sublot",
+            "The complete task graph requires structural decomposition.",
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    supersession = journal_lines()[-1]["data"]
+    check(supersession == {
+        "schema": 1,
+        "built": "lot-1",
+        "round": 1,
+        "allocation": allocation_proof,
+        "pass_opening": opening_proof,
+        "parent_generation_sha256": opening["generation_sha256"],
+        "current_generation_sha256": opening["generation_sha256"],
+        "outcome": "sublot",
+        "evidence": "artifact-self-review",
+        "reason": "The complete task graph requires structural decomposition.",
+        "confirmed_moved_to": None,
+        "artifact_moved_to": moved_relative,
+    }, supersession)
+    check(journal_lines()[-1]["data"] == supersession, journal_lines()[-1])
+    check(not os.path.exists(artifact_path) and os.path.isfile(moved_path),
+          "the supersession helper did not move the exact unclosed artifact")
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "correction-allocation-supersede-in-progress",
+    )), "the completed supersession retained its pending owner")
+
+    before = len(journal_lines())
+    replacement = json.loads(json.dumps(allocation))
+    replacement["predecessor_supersession"] = journal_proof(before - 1)
+    refused = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(replacement),
+    )
+    check(refused.returncode != 0 and len(journal_lines()) == before,
+          "a sub-lot supersession admitted another Correction Round allocation")
+
+    sublot = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps({
+            "built": "lot-1",
+            "items": allocation["items"],
+            "refuted": [],
+        }),
+    )
+    check(sublot.returncode == 0, sublot.stdout + sublot.stderr)
+    check(journal_lines()[-1]["data"] == {
+        "schema": 2,
+        "origin": "product-review",
+        "built": "lot-1",
+        "source": opening_proof,
+        "correction_supersession": journal_proof(before - 1),
+        "items": allocation["items"],
+        "refuted": [],
+    }, journal_lines()[-1])
+
+
+@test
+def controller_successor_reclassifies_one_unopened_allocation_before_replacement():
+    commit, gate, _ = seed_task_gate("lot-1", "correction-reclassify")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_review_receipts("lot-1", confirmed=1)
+    opening_index = len(journal_lines()) - 6
+    while journal_lines()[opening_index].get("kind") != "pass.opened":
+        opening_index -= 1
+    opening = journal_lines()[opening_index]["data"]
+    opening_proof = journal_proof(opening_index)
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": opening["generation_sha256"],
+            "commit": commit,
+            "gate": gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": opening_proof,
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": ["unlooked/F1"], "carries": []}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The finding first appeared bounded.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The initial account appeared bounded.",
+        },
+    }
+    allocated = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    allocation_index = len(journal_lines()) - 1
+    allocation_proof = journal_proof(allocation_index)
+    allocation_hash = allocation_proof.split(":", 1)[1]
+
+    confirmed_relative = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    confirmed_sha = write_report(
+        confirmed_relative, "## F1 · correction\nSources: unlooked/F1\n",
+    )
+    artifact_relative = "corrections/lot-1/round-1.md"
+    write_report(
+        artifact_relative,
+        correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha),
+    )
+    successor, successor_gate, _, successor_generation = (
+        seed_in_pass_controller_successor(opening_index)
+    )
+
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-supersede.sh",
+    )
+    result = subprocess.run(
+        [
+            script, "lot-1", "1", allocation_proof, "reclassify",
+            "The accepted product authority changed the correction base.",
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(result.returncode == 0, result.stdout + result.stderr)
+    supersession_index = len(journal_lines()) - 1
+    supersession = journal_lines()[supersession_index]["data"]
+    moved_confirmed = (
+        "reports/product-review/lot-1/"
+        f"lot-1-c0-p1-confirmed-superseded-{allocation_hash}.md"
+    )
+    moved_artifact = f"corrections/lot-1/round-1-superseded-p1-{allocation_hash}.md"
+    check(supersession == {
+        "schema": 1,
+        "built": "lot-1",
+        "round": 1,
+        "allocation": allocation_proof,
+        "pass_opening": opening_proof,
+        "parent_generation_sha256": opening["generation_sha256"],
+        "current_generation_sha256": successor_generation,
+        "outcome": "reclassify",
+        "evidence": "controller-successor",
+        "reason": "The accepted product authority changed the correction base.",
+        "confirmed_moved_to": moved_confirmed,
+        "artifact_moved_to": moved_artifact,
+    }, supersession)
+    for source in (confirmed_relative, artifact_relative):
+        check(not os.path.exists(os.path.join(WORKSPACE, *source.split("/"))),
+              f"the stale source remained at {source}")
+    for destination in (moved_confirmed, moved_artifact):
+        check(os.path.isfile(os.path.join(WORKSPACE, *destination.split("/"))),
+              f"the frozen source was not moved to {destination}")
+
+    replacement = json.loads(json.dumps(allocation))
+    replacement["predecessor_supersession"] = journal_proof(supersession_index)
+    replacement["parent"] = {
+        "position": 0,
+        "generation_sha256": successor_generation,
+        "commit": successor,
+        "gate": successor_gate,
+    }
+    replacement["admission"]["reason"] = (
+        "The successor authority still permits one bounded implementation correction."
+    )
+    replacement["admission"]["items"][0]["reason"] = (
+        "The finding remains bounded under the successor authority."
+    )
+    replaced = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(replacement),
+    )
+    check(replaced.returncode == 0, replaced.stdout + replaced.stderr)
+    check(journal_lines()[-1]["data"] == replacement, journal_lines()[-1])
+
+    forked = json.loads(json.dumps(replacement))
+    forked["predecessor_supersession"] = journal_proof(supersession_index)
+    before = len(journal_lines())
+    refused = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(forked),
+    )
+    check(refused.returncode != 0 and len(journal_lines()) == before,
+          "a consumed reclassification supersession admitted a fork")
+
+    replacement_confirmed_sha = write_report(
+        confirmed_relative, "## F1 · correction\nSources: unlooked/F1\n",
+    )
+    write_report(
+        artifact_relative,
+        correction_artifact_text(
+            opening, replacement, confirmed_relative, replacement_confirmed_sha,
+        ),
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    check(journal_lines()[-1]["data"]["allocation"] == journal_proof(before - 1),
+          "the pass close did not consume the replacement allocation")
+
+
+@test
+def reclassification_supersession_resumes_every_durable_move_prefix():
+    for cut in ("artifact-moved", "both-moved", "event-appended"):
+        reset()
+        state = seed_unopened_correction_allocation(f"reclassify-{cut}")
+        seed_in_pass_controller_successor(state["opening_index"])
+        helper_path = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction_round_supersede.py",
+        )
+        specification = importlib.util.spec_from_file_location(
+            f"correction_round_supersede_{cut}", helper_path,
+        )
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        args = SimpleNamespace(
+            built="lot-1",
+            round=1,
+            allocation=state["allocation_proof"],
+            outcome="reclassify",
+            reason="The accepted product authority changed the correction base.",
+        )
+        operation = helper.operation_identity(args)
+        account = helper.derive_account(args, operation)
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+            helper.atomic_marker(marker, account)
+        if cut == "artifact-moved":
+            destination = pathlib.Path(WORKSPACE) / account["destination"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(pathlib.Path(WORKSPACE) / account["source"], destination)
+        else:
+            helper.finish_move(account)
+        if cut == "event-appended":
+            append_note("correction.round.allocation.superseded", account["event"])
+
+        script = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction-round-supersede.sh",
+        )
+        resumed = subprocess.run(
+            [
+                script, "lot-1", "1", state["allocation_proof"], "reclassify",
+                "The accepted product authority changed the correction base.",
+            ],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(resumed.returncode == 0, f"{cut}: {resumed.stdout}{resumed.stderr}")
+        matches = [entry for entry in journal_lines()
+                   if entry.get("kind") == "correction.round.allocation.superseded"]
+        check(len(matches) == 1 and matches[0]["data"] == account["event"],
+              f"{cut}: recovery did not preserve one exact terminal")
+        check(not marker.exists(), f"{cut}: recovery retained its pending owner")
+        for key in ("destination", "confirmed_destination"):
+            check(os.path.isfile(pathlib.Path(WORKSPACE) / account[key]),
+                  f"{cut}: recovery did not preserve {key}")
+
+
+@test
+def schema_two_direct_sublot_close_keeps_its_historical_close_shape():
+    commit, gate, _ = seed_task_gate("lot-1", "schema-two-sublot")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_review_receipts("lot-1", confirmed=1)
+    allocation = {
+        "built": "lot-1",
+        "items": [{"id": "F1", "sources": ["unlooked/F1"], "carries": []}],
+        "refuted": [],
+    }
+    allocated = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps(allocation),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    confirmed = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    write_report(confirmed, "## F1 · correction\nSources: unlooked/F1\n")
+    write_report(
+        "plans/lot-1.1-plan.md",
+        f"Covers: {confirmed}\n\n## Task 1 - Correct F1\n",
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    check(journal_lines()[-1]["data"] == {"confirmed": 1}, journal_lines()[-1])
+
+
+@test
+def sublot_built_generation_consumes_its_exact_positive_parent_close():
+    seed_review_pass(confirmed=1)
+    allocated = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps(allocation_data()),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    write_confirmed("lot-1", [])
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    append_note("sublot.opened", None, text="lot-1.1")
+
+    commit, gate, _ = seed_task_gate("lot-1.1", "exact-sublot-origin")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1.1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    write_report(
+        "reports/product-review/lot-1/lot-1.1-c0-p1-user.md",
+        product_report_text("user"),
+    )
+    write_report("reports/product-review/lot-1/lot-1-confirmed.md", "changed\n")
+    before = len(journal_lines())
+    receipt = run_progress(
+        "note", "report.received", "--mandate", "user",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(receipt.returncode != 0 and len(journal_lines()) == before,
+          "a child pass consumed changed parent confirmed authority")
+
+
+@test
+def sublot_built_generation_refuses_an_opening_without_its_parent_close():
+    append_note("sublot.opened", None, text="lot-1.1")
+    commit, gate, _ = seed_task_gate("lot-1.1", "missing-sublot-source")
+    before = len(journal_lines())
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1.1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode != 0 and len(journal_lines()) == before,
+          "a sub-lot generation opened without its exact parent allocation and close")
+
+
+@test
+def correction_lock_allows_one_inherited_same_owner_append():
+    commit, gate, _ = seed_task_gate("lot-1", "inherited-correction-lock")
+    owner = """
+import importlib.util
+import os
+import sys
+
+source = sys.argv[1]
+sys.path.insert(0, os.path.dirname(source))
+spec = importlib.util.spec_from_file_location("leased_progress", source)
+progress = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(progress)
+args = progress.build_parser().parse_args(sys.argv[2:])
+operation = progress.correction_note_operation(args)
+with progress.CorrectionAuthorityLease.acquire(progress.WORKSPACE, operation) as lease:
+    progress.cmd_note_with_lease(args, lease)
+"""
+    result = subprocess.run(
+        [
+            sys.executable, "-c", owner, SCRIPT, "note", "pass.opened", "--data",
+            json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+        ],
+        capture_output=True,
+        text=True,
+        env=ENV,
+        timeout=10,
+    )
+    check(result.returncode == 0, result.stdout + result.stderr)
+
+
+@test
+def correction_lock_serializes_a_competing_progress_append():
+    commit, gate, _ = seed_task_gate("lot-1", "competing-correction-lock")
+    lock_path = os.path.join(WORKSPACE, "correction-authority.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    process = None
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [
+                sys.executable, SCRIPT, "note", "pass.opened", "--data",
+                json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=ENV,
+        )
+        wait_channel = f"/proc/{process.pid}/wchan"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with open(wait_channel, encoding="utf-8") as source:
+                    if "lock" in source.read():
+                        break
+            except FileNotFoundError:
+                break
+            time.sleep(0.001)
+        else:
+            raise AssertionError("the competing progress process never reached the correction lock")
+        check(process.poll() is None, "the competing append bypassed the correction lock")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(descriptor)
+    check(process.returncode == 0, stdout + stderr)
+
+
+@test
+def correction_lock_rejects_another_operation_owner():
+    commit, gate, _ = seed_task_gate("lot-1", "foreign-correction-lock")
+    owner = """
+import importlib.util
+import os
+import sys
+
+source = sys.argv[1]
+sys.path.insert(0, os.path.dirname(source))
+spec = importlib.util.spec_from_file_location("leased_progress", source)
+progress = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(progress)
+args = progress.build_parser().parse_args(sys.argv[2:])
+with progress.CorrectionAuthorityLease.acquire(progress.WORKSPACE, "foreign-operation") as lease:
+    progress.cmd_note_with_lease(args, lease)
+"""
+    result = subprocess.run(
+        [
+            sys.executable, "-c", owner, SCRIPT, "note", "pass.opened", "--data",
+            json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+        ],
+        capture_output=True,
+        text=True,
+        env=ENV,
+        timeout=10,
+    )
+    check(result.returncode != 0 and not any(
+        entry.get("kind") == "pass.opened" for entry in journal_lines()
+    ), "a correction lease for another operation authorized an append")
+
+
+@test
+def correction_lock_owner_death_releases_the_authority():
+    commit, gate, _ = seed_task_gate("lot-1", "dead-correction-lock-owner")
+    lock_path = os.path.join(WORKSPACE, "correction-authority.lock")
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys, time; "
+                "fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o600); "
+                "fcntl.flock(fd, fcntl.LOCK_EX); print('LOCKED', flush=True); "
+                "time.sleep(60)"
+            ),
+            lock_path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        check(owner.stdout.readline().strip() == "LOCKED", "the lock owner did not acquire its lease")
+        owner.kill()
+        owner.wait(timeout=10)
+        result = run_progress(
+            "note", "pass.opened", "--data",
+            json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+        )
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+    check(result.returncode == 0, result.stdout + result.stderr)
+
+
+@test
 def task_pass_requires_the_final_manifest_task_and_lot_built_boundary():
     commit, gate, _ = seed_task_gate("lot-1", "missing-built", add_lot_built=False)
     data = json.dumps({"built": "lot-1", "commit": commit, "gate": gate})
@@ -4160,6 +5508,47 @@ def task_pass_requires_the_final_manifest_task_and_lot_built_boundary():
     append_note("lot.built", {"tasks": 1, "attempts": 1}, lot="lot-1")
     valid = run_progress("note", "pass.opened", "--data", data)
     check(valid.returncode == 0, valid.stdout + valid.stderr)
+
+
+@test
+def task_pass_consumer_accepts_and_reauthenticates_a_retry_success_shape():
+    progress = load_common_module("progress")
+    retry = "17:" + "a" * 64
+    success = {
+        "event": "note",
+        "kind": "attempt.succeeded",
+        "lot": "lot-1",
+        "task": 1,
+        "data": {
+            "attempt": 2,
+            "lot": "lot-1",
+            "sha": "b" * 40,
+            "gate": "c" * 64,
+            "retry": retry,
+        },
+    }
+    validated = []
+    progress.validate_attempt_succeeded_entry = (
+        lambda entries, index, entry: validated.append((entries, index, entry))
+    )
+    data = progress.validate_built_task_success(
+        [success], 0, success, "lot-1", 1, "b" * 40, "the test pass",
+    )
+    check(data["retry"] == retry and validated == [([success], 0, success)],
+          "the pass consumer did not reauthenticate the successful retry proof")
+
+    success["data"]["foreign"] = "not authority"
+    progress.fail = lambda message, detail=None: (_ for _ in ()).throw(
+        ValueError((message, detail))
+    )
+    try:
+        progress.validate_built_task_success(
+            [success], 0, success, "lot-1", 1, "b" * 40, "the test pass",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the pass consumer accepted a foreign success field")
 
 
 @test
@@ -4280,8 +5669,46 @@ def baseline_pass_requires_the_exact_amendment_successor_owner():
         "--data", json.dumps({"built": "lot-1", "commit": amendment_commit, "gate": gate}),
     )
     check(valid.returncode == 0, valid.stdout + valid.stderr)
-    check(journal_lines()[-1]["data"]["source_owner"] == f"amendment/1/{amendment_commit}",
-          "the successor pass did not freeze its exact amendment owner")
+    entries = journal_lines()
+    first_opening_index = next(index for index, entry in enumerate(entries)
+                               if entry.get("kind") == "pass.opened")
+    void_index = next(index for index, entry in enumerate(entries)
+                      if entry.get("kind") == "pass.closed"
+                      and entry.get("data") == {"voided": True})
+    amendment_commit_index = next(index for index, entry in enumerate(entries)
+                                  if entry.get("kind") == "amendment.committed")
+    authority = load_common_module("correction_authority")
+    successor_account = {
+        "schema": 1,
+        "kind": "controller-successor",
+        "transition": "amendment-or-plan-successor",
+        "built": "lot-1",
+        "position": 0,
+        "predecessor_generation_sha256": entries[first_opening_index]["data"][
+            "generation_sha256"
+        ],
+        "voided_pass": journal_proof(void_index),
+        "authorities": [journal_proof(amendment_commit_index)],
+        "commit": amendment_commit,
+        "gate": gate,
+    }
+    check(entries[-1]["data"] == {
+        "schema": 2,
+        "built": "lot-1",
+        "position": 0,
+        "generation_sha256": authority.generation_sha256(successor_account),
+        "pass": 2,
+        "commit": amendment_commit,
+        "gate": gate,
+        "source_scope": "baseline",
+        "correction_terminal_kind": None,
+        "correction_terminal": None,
+        "source_owner": f"amendment/1/{amendment_commit}",
+        "source_lot": "-",
+        "source_round": None,
+        "source_task": 0,
+        "source_attempt": 0,
+    }, entries[-1])
 
 
 @test
@@ -4331,8 +5758,68 @@ def baseline_pass_accepts_only_the_exact_c2_plan_successor():
         "--data", json.dumps({"built": "lot-1", "commit": plan_commit, "gate": gate}),
     )
     check(successor.returncode == 0, successor.stdout + successor.stderr)
-    check(journal_lines()[-1]["data"]["source_owner"] == f"plan/lot-1/{plan_commit}",
-          "the pass did not freeze its exact C2 plan successor")
+    data = journal_lines()[-1]["data"]
+    check(data["schema"] == 2 and data["position"] == 0 and data["pass"] == 2
+          and data["source_owner"] == f"plan/lot-1/{plan_commit}"
+          and re.fullmatch(r"[0-9a-f]{64}", data["generation_sha256"]),
+          "the pass did not freeze its exact C2 plan-successor generation")
+
+
+@test
+def amendment_successor_preserves_the_latest_in_pass_controller_generation():
+    seed_committed_spec()
+    first_commit, first_gate, _ = seed_task_gate("lot-1", "pre-successor-amendment")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({
+            "built": "lot-1", "commit": first_commit, "gate": first_gate,
+        }),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening_index = len(journal_lines()) - 1
+    _, _, _, in_pass_generation = seed_in_pass_controller_successor(opening_index)
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "preserve the accepted in-pass authority",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    amendment_commit = seed_clean_amendment_landing(
+        {"amendment": 1, "origin": "product-review", "built": "lot-1"},
+        "preserve the accepted in-pass authority",
+    )
+    gate = seed_baseline_gate(
+        f"amendment/1/{amendment_commit}", amendment_commit,
+        journal_lines()[opening_index]["data"]["commit"],
+    )
+    successor = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({
+            "built": "lot-1", "commit": amendment_commit, "gate": gate,
+        }),
+    )
+    check(successor.returncode == 0, successor.stdout + successor.stderr)
+    entries = journal_lines()
+    void_index = next(index for index, entry in enumerate(entries)
+                      if entry.get("kind") == "pass.closed"
+                      and entry.get("data") == {"voided": True})
+    amendment_commit_index = next(index for index, entry in enumerate(entries)
+                                  if entry.get("kind") == "amendment.committed")
+    account = {
+        "schema": 1,
+        "kind": "controller-successor",
+        "transition": "amendment-or-plan-successor",
+        "built": "lot-1",
+        "position": 0,
+        "predecessor_generation_sha256": in_pass_generation,
+        "voided_pass": journal_proof(void_index),
+        "authorities": [journal_proof(amendment_commit_index)],
+        "commit": amendment_commit,
+        "gate": gate,
+    }
+    authority = load_common_module("correction_authority")
+    check(entries[-1]["data"]["generation_sha256"] == authority.generation_sha256(account),
+          "the AMENDMENT successor jumped back over its accepted in-pass generation")
 
 
 @test
@@ -7163,6 +8650,10 @@ def main():
         os.chmod(SCRIPT, 0o755)
         shutil.copyfile(AUTHORITY_SOURCE,
                         os.path.join(WORKSPACE, "prompts", "common", "authority_precedence.py"))
+        shutil.copyfile(
+            CORRECTION_AUTHORITY_SOURCE,
+            os.path.join(WORKSPACE, "prompts", "common", "correction_authority.py"),
+        )
         shutil.copyfile(SPEC_EDIT_SOURCE,
                         os.path.join(WORKSPACE, "prompts", "common", "spec_edit_auth.py"))
         for name in ("spec-commit.sh", "attempt-closer.sh", "bare-stop.sh", "stop.sh",
@@ -7192,7 +8683,8 @@ def main():
         os.makedirs(os.path.join(WORKSPACE, "prompts", "construction"))
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
-            "construction_review.py",
+            "construction_review.py", "correction_round.py",
+            "correction_round_supersede.py", "correction-round-supersede.sh",
         ):
             destination = os.path.join(WORKSPACE, "prompts", "construction", name)
             shutil.copyfile(os.path.join(HERE, "prompts", "construction", name), destination)

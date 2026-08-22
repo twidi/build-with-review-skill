@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import pickle
 import re
 import stat
 import tempfile
@@ -48,7 +49,7 @@ Source accepted gate: {'c' * 64}
 Correction base commit: {'d' * 40}
 Correction base gate: {'e' * 64}
 Source pass: p1
-Source opening: {'f' * 64}
+Source opening: 6:{'f' * 64}
 Source findings: reports/product-review/lot-1/lot-1.1-c0-p1-confirmed.md
 Source findings SHA-256: {'1' * 64}
 
@@ -175,6 +176,85 @@ def work_units_are_explicit_and_canonical():
             pass
         else:
             raise AssertionError(f"accepted invalid work unit: {invalid}")
+
+
+@test
+def correction_authority_lease_is_one_live_non_serializable_owner():
+    module = load_module(
+        "correction_authority_lease", HERE / "prompts" / "common" / "correction_authority.py",
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        with module.CorrectionAuthorityLease.acquire(directory, "allocate:lot-1:1") as lease:
+            lease.verify("allocate:lot-1:1")
+            lease.bind_generation("a" * 64)
+            lease.verify("allocate:lot-1:1", "a" * 64)
+            for operation, generation in (
+                ("allocate:lot-1:2", "a" * 64),
+                ("allocate:lot-1:1", "b" * 64),
+            ):
+                try:
+                    lease.verify(operation, generation)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("a correction lease accepted foreign authority")
+            try:
+                pickle.dumps(lease)
+            except TypeError:
+                pass
+            else:
+                raise AssertionError("a live correction lease became serializable authority")
+        try:
+            lease.verify("allocate:lot-1:1", "a" * 64)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a closed correction lease retained authority")
+
+
+@test
+def controller_successor_generation_has_one_finite_ordered_authority_account():
+    module = load_module(
+        "correction_authority_successor",
+        HERE / "prompts" / "common" / "correction_authority.py",
+    )
+    account = {
+        "schema": 1,
+        "kind": "controller-successor",
+        "transition": "in-pass-product-authority",
+        "built": "lot-1.1",
+        "position": 2,
+        "predecessor_generation_sha256": "a" * 64,
+        "source_pass": "17:" + "b" * 64,
+        "authorities": [
+            "18:" + "c" * 64,
+            "19:" + "d" * 64,
+            "20:" + "e" * 64,
+            "21:" + "f" * 64,
+        ],
+        "commit": "1" * 40,
+        "gate": "2" * 64,
+    }
+    normalized = module.normalize_controller_successor(account)
+    check(normalized == account, normalized)
+    check(module.generation_sha256(normalized) == hashlib.sha256(
+        json.dumps(account, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest(), "the controller-successor digest uses another preimage")
+
+    for mutate in (
+        lambda value: value["authorities"].reverse(),
+        lambda value: value["authorities"].append(value["authorities"][0]),
+        lambda value: value.update(transition="unknown"),
+        lambda value: value.update(position=True),
+    ):
+        invalid = json.loads(json.dumps(account))
+        mutate(invalid)
+        try:
+            module.normalize_controller_successor(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid controller successor: {invalid}")
 
 
 @test
@@ -343,6 +423,35 @@ def content_addressed_object_requires_exact_immutable_regular_bytes():
             pass
         else:
             raise AssertionError("accepted a symlink authority object")
+
+
+@test
+def content_addressed_publication_is_atomic_idempotent_and_non_replacing():
+    module = load_module(
+        "correction_publication", HERE / "prompts" / "common" / "correction_authority.py",
+    )
+    raw = valid_artifact()
+    digest = hashlib.sha256(raw).hexdigest()
+    with tempfile.TemporaryDirectory() as temporary:
+        workspace = pathlib.Path(temporary)
+        first = module.publish_content_object(workspace, "lot-1.1", raw, ".md")
+        check(first.name == f"sha256-{digest}.md", first)
+        check(first.read_bytes() == raw and first.stat().st_mode & 0o222 == 0, first)
+        second = module.publish_content_object(workspace, "lot-1.1", raw, ".md")
+        check(second == first, second)
+
+        foreign_raw = b"foreign bytes\n"
+        foreign_digest = hashlib.sha256(foreign_raw).hexdigest()
+        foreign = module.content_object_path(workspace, "lot-1.1", foreign_digest, ".md")
+        foreign.write_bytes(b"different bytes\n")
+        foreign.chmod(0o444)
+        try:
+            module.publish_content_object(workspace, "lot-1.1", foreign_raw, ".md")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("replaced a foreign content-addressed occupant")
+        check(foreign.read_bytes() == b"different bytes\n", foreign)
 
 
 @test
