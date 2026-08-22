@@ -328,6 +328,17 @@ their files may be absent. Always call both helpers. Empty stdout is valid absen
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.
 
+The launch message also gives the verifier this bounded invocation rule: before you use
+its stdout, compare the invocation you issued with the exact prescribed command and the
+exact RUNTIME INPUTS. If your issued invocation transcribed or reconstructed a different
+value, discard its stdout even when it succeeded. Correct only that invocation once in
+the same live verifier and the same physical bracket, then use only the corrected
+invocation's stdout. Apply the same rule to the exact `verify-open.sh` and
+`verify-close.sh` helper invocations prescribed by the official role prompt. This local
+correction does not consume the one physical verifier regeneration. It creates no
+terminal and no replacement. If the exact corrected invocation refuses, that refusal is
+a blocker. Never repair, infer or replace an invalid authoritative runtime value.
+
 It returns, per finding: **confirmed**, **disproved with what it observed**, or
 **malformed**.
 

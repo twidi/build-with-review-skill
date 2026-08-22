@@ -23,6 +23,15 @@ You are given: the workspace path, the path to the report, the path to the spec,
 
 Before you inspect any claim, open one detached copy for this report:
 
+Before you invoke `verify-open.sh` or `verify-close.sh`, compare the complete command
+that you are about to issue with the exact prescribed command and its authoritative
+workspace, reviewed commit and report file name. If your local command differs, correct
+only that helper invocation once in the same live verifier and the same physical
+bracket. Do not issue the mismatched command. If you discover the mismatch only after
+issuing it, discard its stdout and result even when it succeeded. Then issue and use
+only the exact corrected invocation. An exact corrected refusal is a blocker. Never
+repair, infer or replace an authoritative input.
+
 ```sh
 <workspace>/prompts/product-review/verify-open.sh <reviewed commit> <the file name of the report you are verifying>
 ```
@@ -31,6 +40,18 @@ The script accepts only the current open pass commit, the current accepted repor
 and your one live verifier bracket. Its output is the verification-copy path. Use that
 copy for **every** proof form: drafted tests, exhibitions, absence searches and the spec
 passage for a DECISION. Never read the real working tree after the copy opens.
+
+Treat the exact non-empty output line from `verify-open.sh` as an **opaque authoritative
+path**. Retain it and reuse it exactly in every command. Never reconstruct, shorten,
+normalize or infer that path from the repository, workspace, report name or any other
+value. Before you run each proof command, compare every copy path that it names with the
+retained output. Before you use its result, repeat that comparison against the command
+you actually issued. A mismatch invalidates the result even when the command succeeded.
+Discard that result and correct only that local invocation once in the same live
+verifier and the same physical bracket, then use only the corrected command's result. Do
+not close the copy, return an unusable result or request a replacement before this
+correction. If the command with the exact retained path still refuses, follow its real
+blocker or error route.
 
 Close the copy once, after every finding has a verdict, and also on every blocker or
 error path:

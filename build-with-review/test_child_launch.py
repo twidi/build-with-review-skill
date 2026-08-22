@@ -174,6 +174,52 @@ def gate_runner_corrects_one_local_helper_invocation_without_replacement():
 
 
 @test
+def product_verifier_corrects_local_path_transcription_without_physical_relaunch():
+    prompt = read("prompts/product-review/verifier.md")
+    launch = section("prompts/product-review/MODE.md", "### R2.1", "### R2.2")
+    normalized_prompt = " ".join(prompt.lower().split())
+    normalized_launch = " ".join(launch.lower().split())
+
+    check("opaque authoritative path" in normalized_prompt,
+          "the verifier does not treat verify-open stdout as authoritative path data")
+    check("reuse it exactly" in normalized_prompt and "never reconstruct" in normalized_prompt,
+          "the verifier can reconstruct the verification-copy path")
+    check("before you use its result" in normalized_prompt,
+          "the verifier does not compare each proof command before using a successful result")
+    check("different locally derived copy path and fails" not in normalized_prompt,
+          "the verifier limits copy-path correction to failed commands")
+    check("correct only that local invocation once" in normalized_prompt,
+          "the verifier does not correct one local copy-path transcription error")
+    check("same live verifier" in normalized_prompt and "same physical bracket" in normalized_prompt,
+          "the verifier replaces itself for a local copy-path transcription error")
+    check("do not close the copy" in normalized_prompt and "before this correction" in normalized_prompt,
+          "the verifier can destroy its copy before correcting its local command")
+    check("before you invoke `verify-open.sh` or `verify-close.sh`" in normalized_prompt,
+          "the verifier does not compare its open and close helper invocations before execution")
+    check("reviewed commit and report file name" in normalized_prompt,
+          "the verifier does not bind open and close helpers to their authoritative values")
+    check("correct only that helper invocation once" in normalized_prompt,
+          "the verifier cannot correct its own open or close helper invocation")
+
+    check("compare the invocation you issued" in normalized_launch,
+          "the verifier launch does not require comparison with authoritative runtime inputs")
+    check("before you use its stdout" in normalized_launch,
+          "the verifier launch does not compare the helper invocation before successful stdout use")
+    check("before you treat an additional-prompt helper refusal" not in normalized_launch,
+          "the verifier launch limits helper comparison to refused invocations")
+    check("correct only that invocation once" in normalized_launch,
+          "the verifier launch does not correct one additional-prompt invocation error")
+    check("same live verifier" in normalized_launch and "same physical bracket" in normalized_launch,
+          "the verifier launch replaces the physical call for its own helper invocation error")
+    check("does not consume the one physical verifier regeneration" in normalized_launch,
+          "the verifier launch charges a local helper correction as physical regeneration")
+    check("exact corrected invocation" in normalized_launch and "blocker" in normalized_launch,
+          "the verifier launch does not stop after an authoritative corrected helper refusal")
+    check("verify-open.sh" in normalized_launch and "verify-close.sh" in normalized_launch,
+          "the verifier launch correction does not propagate to its open and close helpers")
+
+
+@test
 def closed_form_session_messages_carry_the_complete_runtime_identity():
     implementer_launch = section(
         "prompts/construction/MODE.md", "### Launching an attempt", "### What comes back"
