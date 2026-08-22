@@ -5132,6 +5132,71 @@ def amendment_reach_contract_preflights_before_retirement_and_owns_its_handoff()
 
 
 @test
+def post_amendment_completeness_keeps_built_design_historical():
+    amendment_mode = open(
+        os.path.join(AMENDMENT_PROMPTS, "MODE.md"), encoding="utf-8",
+    ).read()
+    construction_mode = open(
+        os.path.join(HERE, "prompts", "construction", "MODE.md"), encoding="utf-8",
+    ).read()
+    completeness = open(
+        os.path.join(HERE, "prompts", "construction", "completeness.md"),
+        encoding="utf-8",
+    ).read()
+    skill = open(os.path.join(HERE, "SKILL.md"), encoding="utf-8").read()
+
+    amendment = " ".join(amendment_mode.split())
+    construction = " ".join(construction_mode.split())
+    checker = " ".join(completeness.split())
+    root = " ".join(skill.split())
+
+    for subject, contract in (("AMENDMENT", amendment),
+                              ("CONSTRUCTION", construction),
+                              ("completeness checker", checker),
+                              ("root skill", root)):
+        check("post-amendment C2" in contract,
+              f"{subject} does not distinguish the post-amendment C2 rerun")
+        check("historical implementation record" in contract,
+              f"{subject} lets post-amendment C2 reinterpret a built Design")
+        check("controller-owned task contract" in contract,
+              f"{subject} gives post-amendment C2 no exact current plan boundary")
+
+    check("must not be added retroactively to the built plan's `Covers:` or "
+          "`Descends from:`" in checker,
+          "the checker folds amendment-created work into the built sub-lot")
+    check("mandatory input to the fresh complete PRODUCT REVIEW" in checker,
+          "the checker can discard the amendment-created implementation obligation")
+    check("never rewrite `### design` or `### disagreement`" in construction.lower(),
+          "CONSTRUCTION can repair post-amendment C2 by rewriting historical Design")
+    check("C2.5 plan-only successor" in construction,
+          "CONSTRUCTION has no bounded route for a real controller-contract mismatch")
+
+    counter_1 = checker[checker.index("### 1 ·"):checker.index("### 2 ·")]
+    counter_2 = checker[checker.index("### 2 ·"):checker.index("### 3 ·")]
+    counter_4 = checker[checker.index("### 4 ·"):checker.index("## For a sub-lot")]
+    for number, counter in ((1, counter_1), (2, counter_2), (4, counter_4)):
+        check("In ordinary C2" in counter and "In post-amendment C2" in counter,
+              f"counter {number} leaves its ordinary rule active after an amendment")
+    check("**The reference set is the plan's `Covers:` line, never the whole spec.**"
+          not in counter_1,
+          "counter 1 still states one unconditional current-source rule")
+    check("The plan's `Global Constraints` section is a copy of the spec's" not in counter_4,
+          "counter 4 still requires unconditional current-spec copy equality")
+    check("post-amendment rules below replace, rather than supplement" in checker,
+          "the checker can combine ordinary and post-amendment counter rules")
+    check("Post-amendment C2 reports" in checker
+          and "Historical Covers retained" in checker
+          and "Current product contract" in checker,
+          "the post-amendment report still asks for ordinary source-copy counts")
+
+    check("In post-amendment C2, keep the exact built `Covers:` set" in construction
+          and "In post-amendment C2, every task traces to that frozen set" in construction
+          and "In post-amendment C2, do not compare the historical Global Constraints copy"
+          in construction,
+          "CONSTRUCTION leaves ordinary C2.1, C2.2 or C2.4 active post-amendment")
+
+
+@test
 def sweep_receipt_binds_each_disposition_to_one_exact_place_block():
     seed_written_amendment_for_reach()
     valid = reach_report((2, 0), ("kept", "removed"))

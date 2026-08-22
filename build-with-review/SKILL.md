@@ -118,6 +118,17 @@ A single skill has no natural mid-arc entry, so name yours before starting.
 | **A validated spec exists** | it is committed, its lot breakdown is readable, and you know which lot is next. Start in CONSTRUCTION. |
 | **An amendment** | one or more DECISIONs have been answered and the answers change what the product does on parts a lot has already built. One R2.4 batch groups all active initial, supplemental and conflict-resolved answers in one file. It has its own phases — `prompts/amendment/MODE.md`. |
 
+After a PRODUCT REVIEW amendment lands, **post-amendment C2** checks the built plan's
+current controller-owned task contract against the amended product. A filled Design and
+optional Disagreement stay the historical implementation record; C2 never turns them into
+new promises. Its per-counter rules replace ordinary current-spec source-copy checks: the
+built `Covers:`, `Descends from:` and copied Global Constraints remain historical, while
+an explicit controller-contract contradiction still fails. Amendment-created
+implementation work remains mandatory input to the fresh
+complete PRODUCT REVIEW. It is not added retroactively to the built plan's `Covers:` or
+`Descends from:`. A real controller-contract mismatch uses the bounded C2.5 plan-only
+successor.
+
 In every case: **the workspace comes first**, before any child, and the watchdog right
 after.
 

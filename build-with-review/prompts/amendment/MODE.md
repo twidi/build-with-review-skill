@@ -1027,12 +1027,23 @@ completed global recheck when that
 pass reaches R2.4/R2.5. The
 open batch is durable input to the fresh pass; it never skips or shortens those readings.
 
-**And once the amendment has landed and the plan is back in line — whatever the row,
-whatever the origin — run construction's completeness pass (C2) again before anything is
-built.** The amendment moved the reference set, and C2's own logic applies: a change to
-the counts means the previous pass no longer proves anything. A completeness verdict
-returned against the old spec — delivered before the amendment, or by a subagent that
-was still running when it opened — proves the old coverage, and nothing else.
+**And once the amendment has landed — whatever the row, whatever the origin — run
+construction's completeness pass (C2) again before anything is built.** Identify this
+launch as **post-amendment C2**. For an already built lot, its filled `### Design` and
+optional `### Disagreement` are the historical implementation record, not the current
+controller-owned task contract. The checker compares only the task's controller-owned
+blocks with the amended product and delivered parent obligations. It does not require the
+amendment-created implementation obligation in the built plan's original `Covers:` or
+`Descends from:`. That obligation remains mandatory input to the fresh complete PRODUCT
+REVIEW, which judges the built product and creates later correction work.
+
+A real mismatch in controller-owned task bytes uses construction's C2.5 plan-only
+successor. Never repair this rerun by changing a historical Design or Disagreement. The
+post-amendment counter rules replace ordinary current-spec source-copy rules for this
+invocation. The amendment changed the current product authority, and C2's own retry logic
+otherwise applies: a change to the counts means the previous pass no longer proves anything. A completeness verdict returned
+against the old spec — delivered before the amendment, or by a subagent that was still
+running when it opened — proves the old coverage, and nothing else.
 
 ---
 

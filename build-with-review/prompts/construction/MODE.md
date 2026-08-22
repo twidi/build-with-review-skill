@@ -717,6 +717,21 @@ says what the plan said at that moment.
 
 ## C2 — Completeness
 
+Ordinary C2 checks a new plan before implementation. **Post-amendment C2** is the one
+explicit exception: it rechecks the controller-owned task contract of an already built
+lot after its spec changed. In that invocation, a filled `### Design` and optional
+`### Disagreement` are the historical implementation record. They are not current plan
+authority. Tell the checker this is post-amendment C2. It compares only `Descends from`,
+`Depends on`, `Achieves`, `Files` and `To verify` with the amended product and delivered
+parent obligations. It never reinterprets or rewrites the historical sections.
+
+The amendment-created implementation obligation stays mandatory input to the fresh
+complete PRODUCT REVIEW. Do not add it retroactively to the built plan's `Covers:` or
+`Descends from:`. If post-amendment C2 finds a real contradiction in the
+controller-owned task contract, correct only those controller-owned bytes through the
+existing C2.5 plan-only successor, rerun C2, and use its exact baseline. **Never rewrite
+`### Design` or `### Disagreement`** to make this pass green.
+
 One subagent, **a strong model, effort medium**, prompt
 **`<workspace>/prompts/construction/completeness.md`**. Give it that path, the
 **workspace path**, its one optional additional prompt
@@ -766,27 +781,40 @@ plan, and the journal is what a takeover reads.
 It counts. It does not judge signatures — **nobody proves a signature before the code
 exists**, and C3 surfaces any disagreement where it is real.
 
-- **C2.1** — every decision this lot owes — **the plan's `Covers:` set, never the
-  whole spec** — lands in at least one task. **N of N.** A later lot's decision
+- **C2.1** — **In ordinary C2**, every decision this lot owes — **the plan's
+  `Covers:` set, never the whole spec** — lands in at least one task. **N of N.** A later lot's decision
   absent here is the breakdown working, not a gap. **And the set itself is checked
   against its source first**: `Covers:` is your copy of what the breakdown assigns,
   and a decision assigned to this lot that the line omits is a finding — counted
-  without it, every N of N closes over the wrong list.
-- **C2.2** — every task traces back to a decision **of that same set**. **N of N.**
+  without it, every N of N closes over the wrong list. **In post-amendment C2, keep
+  the exact built `Covers:` set.** Do not compare it with the amended breakdown or add
+  amendment-created work. Count only its retained historical task coverage.
+- **C2.2** — **In ordinary C2**, every task traces back to a decision **of that same
+  current set**. **N of N.**
   No scope creep — a task citing a real decision the breakdown assigns to another
-  lot is creep wearing a citation.
+  lot is creep wearing a citation. **In post-amendment C2, every task traces to that
+  frozen set.** The old decision need not remain at the same current spec location.
+  Separately report only an explicit contradiction between the controller-owned task
+  contract and the amended product. A new obligation's absence is not a C2 finding.
 - **C2.3** — every `Depends on` points at a strictly lower task number, and the reason
   it states holds.
-- **C2.4** — no task contradicts the Global Constraints — **the plan's copy compared
-  with the spec's section first**: a constraint omitted or weakened in the copy is a
+- **C2.4** — **In ordinary C2**, no task contradicts the Global Constraints — **the
+  plan's copy compared with the spec's section first**: a constraint omitted or weakened in the copy is a
   finding, never a shorter list — the copy is what every implementer works from, and
-  nothing downstream compares the two again.
+  nothing downstream compares the two again. **In post-amendment C2, do not compare the
+  historical Global Constraints copy** with the amended spec. Compare the
+  controller-owned task contract with the current constraints and report only an
+  explicit contradiction. Amendment delta absent from the historical copy is expected.
 
-**For a sub-lot the reference set changes:** every finding lands in a task, every task
+**For a sub-lot the reference set is its confirmed finding set:** every finding lands in a task, every task
 traces back to a finding, and nothing breaks the parent lot's spec coverage — **and the
 confirmed file the `Covers:` names is authenticated first**, as the opening pass's own:
 one pass follows each lot built, so the expected name is mechanical, and an existing
 file from another pass would have every counter close over the wrong findings.
+In post-amendment C2, that built pointer and finding set stay frozen. Counter 5 reads
+only the controller-owned task contract for explicit contradictions. Filled Design and
+Disagreement remain historical, and amendment-created work stays with the fresh PRODUCT
+REVIEW.
 
 ### What comes back
 
@@ -798,6 +826,9 @@ file from another pass would have every counter close over the wrong findings.
   whichever is later**: each of those opens a fresh C2 phase — a re-cut, the mandatory
   post-amendment rerun — and an earlier phase's passes are not this one's. A normal
   second pass after an amendment is not the forbidden fourth of a phase that ended.
+  In post-amendment C2, this is the **C2.5 plan-only successor** described above. It
+  corrects only a real mismatch in the controller-owned task contract. Historical
+  implementation sections and the built sub-lot's original reference set do not change.
 - **C2.6** — **the split itself is wrong**: a task tracing back to nothing, a
   dependency no ordering can satisfy, a decision that cannot land anywhere. Go back to
   **C1**. Do not patch a broken cut in place.
