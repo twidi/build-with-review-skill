@@ -174,6 +174,16 @@ account.
 **A place you classify `kept` still gets an entry.** An absent place and a place nobody
 looked at are indistinguishable to whoever reads you.
 
+After the complete place account, write every admitted finding with
+`reviewer-common.md`'s fixed `## <CLASS> F<N> — <title>` heading. A `DECISION` place has
+one matching `DECISION` finding. Do not add a finding for a handled place that leaves no
+defect or unresolved product question.
+
+**Place count records coverage. It never decides whether the sweep is actionable or
+clean.** A sweep is actionable when it has at least one public finding heading. A clean
+sweep has a complete block, a closed frontier, and zero `CRITICAL`, `IMPORTANT`, `MINOR`
+or `DECISION` finding headings. A clean sweep can have many handled places.
+
 The completion block uses concrete facts, not its `N`/`M` template text. Its hop, place,
 disposition and frontier values match this exact Reach account. Its active identity list
 matches the amendment's current owners.

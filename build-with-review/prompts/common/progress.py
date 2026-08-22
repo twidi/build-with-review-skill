@@ -1857,10 +1857,25 @@ def audit_reach_report(payload, subject, expected_sources):
     done = audit_reach_completion(
         physical, visible, completion_start, subject, account, expected_sources,
     )
+    finding_counts, _ = spec_report_findings(
+        "\n".join(line if line is not None else "" for line in visible), subject,
+    )
+    if finding_counts["decision"] != account["dispositions"].count("DECISION"):
+        fail(f"{subject}'s DECISION findings do not match its exact Reach account")
     return {
         "hop": account["hop"], "places": account["places"],
         "closed": account["closed"], "done": done,
+        "finding_counts": finding_counts,
+        "findings": sum(finding_counts.values()),
     }
+
+
+def reach_sweep_is_actionable(audit):
+    return audit["findings"] > 0
+
+
+def reach_sweep_is_clean(audit):
+    return audit["done"] is True and audit["closed"] is True and not reach_sweep_is_actionable(audit)
 
 
 def validate_reach_replacement_order(entries, opening_index, before, sweep, subject):
@@ -1954,13 +1969,13 @@ def validate_reach_sweep_owed(entries, opening_index, before, sweep, subject):
         fail(f"{subject} has the wrong sweep ordinal",
              {"expected": len(prior) + 1, "actual": sweep})
     for position, (prior_index, prior_entry) in enumerate(prior):
-        validate_sweep_entry(entries, prior_index, prior_entry, validate_owed=False)
-        data = note_data(prior_entry)
+        _, _, _, audit = validate_sweep_entry(
+            entries, prior_index, prior_entry, validate_owed=False,
+        )
         next_index = prior[position + 1][0] if position + 1 < len(prior) else before
-        if data.get("done") is True and data.get("closed") is True \
-                and data.get("places") == 0:
+        if reach_sweep_is_clean(audit):
             fail(f"{subject} follows a clean Reach close")
-        if isinstance(data.get("places"), int) and data["places"] > 0 \
+        if reach_sweep_is_actionable(audit) \
                 and not any(entry.get("kind") == "fixer.returned"
                             and entry.get("mode") == "amendment"
                             for entry in entries[prior_index + 1:next_index]):
@@ -1997,7 +2012,7 @@ def amendment_sweep_generation(entries, sweep, subject, *, live):
         "amendment": number, "sweep": sweep, "session": accepted["session"],
         "opening_sha256": note_data(opening)["opening_sha256"],
         "report_sha256": sha256_bytes(payload), "amendment_sha256": amendment_sha,
-        **account,
+        **{key: account[key] for key in ("hop", "places", "closed", "done")},
     }
 
 
@@ -2168,7 +2183,7 @@ def validate_sweep_entry(entries, index, entry, *, validate_owed=True):
         "opening_sha256": note_data(opening)["opening_sha256"],
         "report_sha256": sha256_bytes(payload), "session": accepted["session"],
         "amendment_sha256": data.get("amendment_sha256"),
-        **account,
+        **{key: account[key] for key in ("hop", "places", "closed", "done")},
     }
     if not isinstance(data.get("amendment_sha256"), str) \
             or not re.fullmatch(r"[0-9a-f]{64}", data["amendment_sha256"]):
@@ -2179,7 +2194,7 @@ def validate_sweep_entry(entries, index, entry, *, validate_owed=True):
         fail("the first reach sweep does not consume the complete authored amendment")
     if data != expected:
         fail("a reach receipt does not match its exact report and generation", expected)
-    return opening_index, opening, expected
+    return opening_index, opening, expected, account
 
 
 def normalize_sweep_report(entries, data, round_number):
@@ -2219,6 +2234,67 @@ def finish_interrupted_sweep_receipt(entries, data, round_number):
     return True
 
 
+def product_review_amendment_spec_file(entries, opening_index, opening, subject):
+    """Resolve a construction-only run's exact spec from its reviewed committed plan."""
+    opening_data = note_data(opening)
+    pass_index, _, built, commit = current_pass_opening(entries, opening_index, subject)
+    if pass_index >= opening_index or opening_data.get("built") != built:
+        fail(f"{subject} does not consume its exact product-review source pass")
+    plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{built}-plan.md"
+    committed = subprocess.run(
+        ["git", "-C", project_root(), "show", f"{commit}:{plan_relative}"],
+        capture_output=True,
+    )
+    if committed.returncode != 0:
+        fail(f"{subject} has no exact committed plan for its product-review source",
+             plan_relative)
+    try:
+        plan_text = committed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{subject}'s committed plan is not valid UTF-8", exc)
+    _, visible = markdown_structure_lines(plan_text)
+    task_headings = [
+        index for index, line in enumerate(visible)
+        if isinstance(line, str) and re.fullmatch(r"## Task [1-9][0-9]* - .+", line)
+    ]
+    spec_lines = [
+        (index, line[len("Spec: "):]) for index, line in enumerate(visible)
+        if isinstance(line, str) and line.startswith("Spec: ")
+    ]
+    if len(spec_lines) != 1 or not task_headings or spec_lines[0][0] >= task_headings[0]:
+        fail(f"{subject}'s committed plan has no one exact root Spec source")
+    spec_relative = spec_lines[0][1]
+    spec_path = exact_real_file(
+        project_root(), spec_relative, f"{subject}'s product-review specification",
+    )
+    committed_entry = subprocess.run(
+        ["git", "--literal-pathspecs", "-C", project_root(), "ls-tree", "-z",
+         commit, "--", spec_relative],
+        capture_output=True,
+    )
+    entry = committed_entry.stdout.removesuffix(b"\0").split(b"\0")
+    metadata = entry[0].split(b" ", 2) if len(entry) == 1 else []
+    if committed_entry.returncode != 0 or len(metadata) != 3 \
+            or metadata[0] not in {b"100644", b"100755"} \
+            or not metadata[2].endswith(b"\t" + spec_relative.encode("utf-8")):
+        fail(f"{subject}'s product-review specification is absent or not a regular file "
+             "in its reviewed commit", spec_relative)
+    return spec_path
+
+
+def amendment_spec_file(entries, before, opening_index, opening, subject):
+    readiness = [(index, entry) for index, entry in enumerate(entries[:before])
+                 if entry.get("kind") == "spec.written"]
+    if readiness:
+        _, spec_entry = spec_written(entries[:before])
+        return spec_file_from_written(spec_entry)
+    if note_data(opening).get("origin") != "product-review":
+        spec_written(entries[:before])
+    return product_review_amendment_spec_file(
+        entries, opening_index, opening, subject,
+    )
+
+
 def current_amendment_review(entries, before, subject):
     openings = amendment_openings(entries, before)
     if not openings:
@@ -2233,12 +2309,12 @@ def current_amendment_review(entries, before, subject):
     ) if entry.get("kind") == "sweep.reported"]
     if not sweeps:
         fail(f"{subject} has no accepted reach sweep")
+    final_audit = None
     for sweep_index, sweep in sweeps:
-        validate_sweep_entry(entries, sweep_index, sweep)
+        _, _, _, final_audit = validate_sweep_entry(entries, sweep_index, sweep)
     final_sweep_index, final_sweep = sweeps[-1]
     final_data = note_data(final_sweep)
-    if final_data.get("done") is not True or final_data.get("closed") is not True \
-            or final_data.get("places") != 0:
+    if not reach_sweep_is_clean(final_audit):
         fail(f"{subject}'s latest reach sweep is not one complete clean close")
     final_returns = [(index, entry) for index, entry in enumerate(
         entries[final_sweep_index + 1:before], final_sweep_index + 1
@@ -2253,8 +2329,7 @@ def current_amendment_review(entries, before, subject):
         if not any(entry.get("kind") == "fixer.returned"
                    for entry in entries[dispatch_index + 1:before]):
             fail(f"{subject} has an unsettled fixer dispatch")
-    _, spec_entry = spec_written(entries[:before])
-    spec_path = spec_file_from_written(spec_entry)
+    spec_path = amendment_spec_file(entries, before, opening_index, opening, subject)
     return {
         "opening_index": opening_index,
         "opening": opening,

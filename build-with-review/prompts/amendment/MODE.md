@@ -575,9 +575,12 @@ can no longer be launched.
 own: *"the mail now goes out at revocation"* opens a frontier nobody has looked at.
 
 The official preflight proves that this sweep is currently owed. It reauthenticates every
-prior receipt. An actionable prior sweep requires its accepted `fixer.returned`. A clean
-close permits A4, never another sweep. `amendment.committed` closes the generation and
-permits no later sweep.
+prior receipt. An actionable prior sweep has at least one public finding heading and
+requires its accepted `fixer.returned`. A clean close has a complete block, a closed
+frontier and zero `CRITICAL`, `IMPORTANT`, `MINOR` or `DECISION` finding headings. Its
+place count records handled coverage and can be positive. A clean close permits A4,
+never another sweep. `amendment.committed` closes the generation and permits no later
+sweep.
 
 **The fixer's lifecycle is yours to drive, exactly as in a spec review.** `working` just
 before you send it a round's findings; on its return, audit the completion block — the
@@ -594,24 +597,25 @@ finds in the journal which sweep's findings reached it and which return was acce
 
 ```
 you write the amendment
-  → sweep 1        2 places to handle
+  → sweep 1        2 findings to handle
   → the fixer      amendment v2
-  → sweep 2        1 place to handle
+  → sweep 2        1 finding to handle
   → the fixer      amendment v3
-  → sweep 3        closes, nothing new
+  → sweep 3        closes, no finding
   → A4
 ```
 
-**It ends when a sweep closes with no new reference and no finding — with a complete
-block.** A sweep whose completion block carries a `NOT DONE` closes nothing, whatever its
-frontier says: what that line names, nobody walked. Lift the why if you can — the session
-is still live. When you cannot, **retire it as any accepted sweep — its block is honest
-and checks out — then launch a fresh one, the next number**: it walks the whole frontier
-again, so what the `NOT DONE` named is covered whole, and the slot the outgoing sweep
-held is the one its replacement takes. **And once only**: the fresh sweep returning the
-same reason makes the blocker stable — stop launching sweeps and take it to the human,
-as the exit door takes a frontier that will not close; `SKILL.md`'s audit duty carries
-the gesture and its journal line. Nothing runs until they answer.
+**It ends when a sweep has a complete block, a closed frontier and no finding.** The total
+place count can be positive: those places were reached and handled. A sweep whose
+completion block carries a `NOT DONE` closes nothing, whatever its frontier says: what
+that line names, nobody walked. Lift the why if you can — the session is still live. When
+you cannot, **retire it as any accepted sweep — its block is honest and checks out — then
+launch a fresh one, the next number**: it walks the whole frontier again, so what the
+`NOT DONE` named is covered whole, and the slot the outgoing sweep held is the one its
+replacement takes. **And once only**: the fresh sweep returning the same reason makes the
+blocker stable — stop launching sweeps and take it to the human, as the exit door takes a
+frontier that will not close; `SKILL.md`'s audit duty carries the gesture and its journal
+line. Nothing runs until they answer.
 
 ### A DECISION raised by the sweep
 
@@ -765,6 +769,12 @@ task, the plan being written; the run resumes where it stood.
    and nothing else.** A second line you want to touch is a finding, and a finding reopens
    the loop. Do this before the checker. Its exact result then covers the final bytes that
    the commit consumes.
+
+   **The spec path is authority, not controller memory.** Use the exact `spec.written`
+   source when this run has one. A construction-only run has no such boundary: for a
+   PRODUCT REVIEW amendment, use the one structural root `Spec: <relative path>` in the
+   exact committed plan reviewed by the amendment's voided pass. A fenced example is not
+   that source. Never infer the path from the report, process cwd, or a remembered launch.
 
 4. **A subagent checks the consolidation** — bracket it:
 
@@ -1140,14 +1150,15 @@ breach lifecycle events remain able to complete their own state.
   live owner when one exists. If it cannot continue, stop it, record its non-successful
   retirement, move its partial report aside, and only then launch the replacement. With no
   prior owner, launch a fresh sweep at the next number — sweep 1 when none has run.
-- **A sweep is accepted, with places to handle, and no `fixer.returned` since**: the
+- **A sweep is accepted, with public findings, and no `fixer.returned` since**: the
   recreated fixer goes `working` and receives that sweep's findings — read from its
   report file, never from memory.
 - **A fixer return is accepted and no sweep followed** — `fixer.returned` is the last
   word of the loop: launch the fresh sweep, next number. A correction has a reach of
   its own.
-- **The last sweep closed clean** — frontier closed, nothing to handle, block
-  complete: **A4 is owed, and its own boundaries are read from the journal — never
+- **The last sweep closed clean** — block complete, frontier closed, and no public
+  `CRITICAL`, `IMPORTANT`, `MINOR` or `DECISION` finding; its handled place count can be
+  positive: **A4 is owed, and its own boundaries are read from the journal — never
   replayed.**
   - `amendment.committed` present — **in this amendment's slice, like every test
     here**: an earlier amendment's commit sits before the slice and proves nothing —

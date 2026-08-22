@@ -969,7 +969,7 @@ def amendment_document(number, order, members=()):
     )
 
 
-def reach_report(hops=(0,), dispositions=(), sources=("A1/order",),
+def reach_report(hops=(0,), dispositions=(), sources=("A1/order",), findings=(),
                  open_blocker="missing durable input: deployment event catalogue is absent"):
     labels = (
         "hops walked", "places found", "phrasings swept for every changed thing",
@@ -1010,6 +1010,11 @@ def reach_report(hops=(0,), dispositions=(), sources=("A1/order",),
             f"Disposition: {disposition}", "### Evidence", "Exact place evidence.",
             handling[0], handling[1],
         ])
+    for ordinal, severity in enumerate(findings, 1):
+        lines.extend([
+            "", f"## {severity} F{ordinal} — Reach finding {ordinal}",
+            "The reached behavior contradicts the amendment.",
+        ])
     return "\n".join(lines) + "\n"
 
 
@@ -1023,6 +1028,26 @@ def seed_amendment_context():
             "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
         )
         check(opening.returncode == 0, opening.stdout + opening.stderr)
+
+
+CONSTRUCTION_ONLY_SPEC = "docs/plans/construction-only-design.md"
+
+
+def seed_construction_only_amendment_context(*, plan_spec_lines=None):
+    spec_relative = CONSTRUCTION_ONLY_SPEC
+    write_project(spec_relative, spec_document())
+    commit, gate, owner = seed_task_gate(
+        "lot-1", "construction-only-amendment-context", spec_relative=spec_relative,
+        plan_spec_lines=plan_spec_lines,
+    )
+    opening = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opening.returncode == 0, opening.stdout + opening.stderr)
+    check(not any(entry.get("kind") == "spec.written" for entry in journal_lines()),
+          "the construction-only fixture unexpectedly created a SPEC readiness event")
+    return spec_relative
 
 
 def seed_committed_spec():
@@ -1111,8 +1136,12 @@ def append_raw_reach_receipt(sweep, session, *, hop, places, closed):
     }, mode="amendment", lot="lot-1", round=sweep)
 
 
-def seed_written_amendment_for_reach(order="apply the reach order; return to product review"):
-    seed_amendment_context()
+def seed_written_amendment_for_reach(order="apply the reach order; return to product review",
+                                     *, construction_only=False, plan_spec_lines=None):
+    if construction_only:
+        seed_construction_only_amendment_context(plan_spec_lines=plan_spec_lines)
+    if not construction_only:
+        seed_amendment_context()
     opened = run_progress(
         "note", "amendment.opened",
         "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
@@ -1295,11 +1324,17 @@ def seed_review_receipts(built="lot-1", *, confirmed=0, omit=None):
         )
 
 
-def prepare_review_commit(built="lot-1", token=None, tasks=1):
+def prepare_review_commit(built="lot-1", token=None, tasks=1, spec_relative=None,
+                          plan_spec_lines=None):
     # Build one real clean candidate. The pass terminal rechecks this exact HEAD,
     # tree, gate blob and canonical physical gate report.
     write_project(".gitignore", ".superpowers/\n")
-    manifest = "# Plan\n\n" + "\n\n".join(
+    plan_header = "# Plan\n\n"
+    if plan_spec_lines is None:
+        plan_spec_lines = (f"Spec: {spec_relative}",) if spec_relative else ()
+    if plan_spec_lines:
+        plan_header += "\n".join(plan_spec_lines) + "\n\n"
+    manifest = plan_header + "\n\n".join(
         f"## Task {task} - Task {task}\n"
         f"Achieves: Complete task {task}.\n"
         f"To verify: Task {task} is complete."
@@ -1307,12 +1342,12 @@ def prepare_review_commit(built="lot-1", token=None, tasks=1):
     ) + "\n"
     plan_relative = f"docs/plans/test-run-{built}-plan.md"
     write_project(plan_relative, manifest)
-    subprocess.run(
-        ["git", "-C", REPO, "add", ".gitignore", plan_relative],
-        check=True,
-    )
+    staged = [".gitignore", plan_relative]
+    if spec_relative:
+        staged.append(spec_relative)
+    subprocess.run(["git", "-C", REPO, "add", *staged], check=True)
     subprocess.run(["git", "-C", REPO, "commit", "-qm", "plan review lot"], check=True)
-    plan = "# Plan\n\n" + "\n\n".join(
+    plan = plan_header + "\n\n".join(
         f"## Task {task} - Task {task}\n"
         f"Achieves: Complete task {task}.\n"
         f"To verify: Task {task} is complete.\n\n"
@@ -1353,8 +1388,10 @@ def write_gate_report(op, gate_blob, tree):
 
 
 def seed_task_gate(built="lot-1", token=None, *, tasks=1, add_lot_built=True,
-                   precommit_head=True):
-    commit, tree, gate_blob = prepare_review_commit(built, token, tasks)
+                   precommit_head=True, spec_relative=None, plan_spec_lines=None):
+    commit, tree, gate_blob = prepare_review_commit(
+        built, token, tasks, spec_relative, plan_spec_lines,
+    )
     head = commit
     if precommit_head:
         head = subprocess.check_output(
@@ -4619,14 +4656,15 @@ def amendment_written_requires_the_complete_exact_document_and_report_directory(
     check(ready.returncode == 0, ready.stdout + ready.stderr)
     proof = journal_lines()[-1]["data"]
     check(set(proof) == {"amendment", "opening_sha256", "document_sha256", "snapshot"}, proof)
-    write_report("amendments/1.md", amendment_document(1, order) + "\nchanged after ready\n")
     write_report("reports/amendment/1/sweep-1.md", reach_report())
-    append_reach_session(1)
+    session = "changed-amendment-reach"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    write_report("amendments/1.md", amendment_document(1, order) + "\nchanged after ready\n")
     before = len(journal_lines())
-    stale = run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":1,"places":0,"closed":true}',
-    )
+    stale = run_progress("session-retired", session, "done", "--archive", "--hide")
     check(stale.returncode != 0 and len(journal_lines()) == before,
           "a sweep consumed amendment bytes changed after readiness")
 
@@ -4828,7 +4866,9 @@ def amendment_sweep_receipt_refuses_a_skipped_preflight():
 @test
 def amendment_sweep_preflight_requires_the_exact_owed_next_sweep():
     seed_written_amendment_for_reach()
-    accept_reach_sweep(1, reach_report((1,), ("kept",)), "owed-sweep-1")
+    accept_reach_sweep(
+        1, reach_report((1,), ("kept",), findings=("IMPORTANT",)), "owed-sweep-1",
+    )
     write_report("reports/amendment/1/sweep-2.md", reach_report())
     append_live_reach_session(2, "premature-sweep-2")
     missing_fixer = run_progress("amendment-sweep-check", "2")
@@ -4849,6 +4889,19 @@ def amendment_sweep_preflight_requires_the_exact_owed_next_sweep():
 
     reset()
     seed_written_amendment_for_reach()
+    accept_reach_sweep(
+        1, reach_report((2, 0), ("kept", "removed")), "positive-place-clean-sweep-1",
+    )
+    returned = run_progress("note", "fixer.returned", "--data", '{"applied":1,"declined":0}')
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    write_report("reports/amendment/1/sweep-2.md", reach_report())
+    append_live_reach_session(2, "after-positive-place-clean-sweep-2")
+    after_positive_place_clean = run_progress("amendment-sweep-check", "2")
+    check(after_positive_place_clean.returncode != 0,
+          "an A4 fixer return made a clean positive-place sweep look actionable")
+
+    reset()
+    seed_written_amendment_for_reach()
     append_note("amendment.committed", {"amendment": 1})
     write_report("reports/amendment/1/sweep-1.md", reach_report())
     append_live_reach_session(1, "after-commit-sweep-1")
@@ -4857,9 +4910,108 @@ def amendment_sweep_preflight_requires_the_exact_owed_next_sweep():
 
 
 @test
+def amendment_clean_positive_place_sweep_authorizes_consolidation():
+    seed_written_amendment_for_reach()
+    accept_reach_sweep(
+        1, reach_report((1,), ("kept",), findings=("IMPORTANT",)), "actionable-sweep-1",
+    )
+    returned = run_progress("note", "fixer.returned", "--data", '{"applied":1,"declined":0}')
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    clean_report = reach_report((2, 0), ("kept", "removed")) + (
+        "\n```text\n## IMPORTANT F1 — Example finding heading\n```\n"
+    )
+    accept_reach_sweep(2, clean_report, "clean-sweep-2")
+    consolidated = run_progress(
+        "note", "fixer.returned", "--data", '{"applied":1,"declined":0}',
+    )
+    check(consolidated.returncode == 0, consolidated.stdout + consolidated.stderr)
+    relative = next(entry["text"] for entry in journal_lines()
+                    if entry.get("kind") == "spec.written")
+    write_project(relative, spec_document(status="amended"))
+
+    started = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+
+@test
+def amendment_construction_only_product_pass_authenticates_its_spec_for_consolidation():
+    seed_written_amendment_for_reach(construction_only=True)
+    accept_reach_sweep(
+        1, reach_report((2, 0), ("kept", "removed")), "construction-only-clean-sweep",
+    )
+    consolidated = run_progress(
+        "note", "fixer.returned", "--data", '{"applied":1,"declined":0}',
+    )
+    check(consolidated.returncode == 0, consolidated.stdout + consolidated.stderr)
+    write_project(CONSTRUCTION_ONLY_SPEC, spec_document(status="amended"))
+
+    started = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+
+@test
+def amendment_construction_only_spec_source_fails_closed():
+    cases = (
+        ("missing", ()),
+        ("fenced-only", ("```text", f"Spec: {CONSTRUCTION_ONLY_SPEC}", "```")),
+        ("duplicate", (f"Spec: {CONSTRUCTION_ONLY_SPEC}",
+                       f"Spec: {CONSTRUCTION_ONLY_SPEC}")),
+        ("not-reviewed", ("Spec: docs/plans/not-reviewed-design.md",)),
+    )
+    for label, plan_spec_lines in cases:
+        reset()
+        seed_written_amendment_for_reach(
+            construction_only=True, plan_spec_lines=plan_spec_lines,
+        )
+        if label == "not-reviewed":
+            write_project("docs/plans/not-reviewed-design.md", spec_document())
+        accept_reach_sweep(
+            1, reach_report((1, 0), ("kept",)), f"{label}-clean-sweep",
+        )
+        consolidated = run_progress(
+            "note", "fixer.returned", "--data", '{"applied":1,"declined":0}',
+        )
+        check(consolidated.returncode == 0, consolidated.stdout + consolidated.stderr)
+        write_project(CONSTRUCTION_ONLY_SPEC, spec_document(status="amended"))
+
+        started = run_progress("subagent-started", "consolidation", "--round", "1")
+        check(started.returncode != 0,
+              f"the {label} committed Spec source authorized consolidation")
+        check(not any(entry.get("kind") == "subagent-started"
+                      and entry.get("subagent") == "consolidation"
+                      for entry in journal_lines()),
+              f"the {label} committed Spec source mutated the journal")
+
+
+@test
+def amendment_reach_decision_heading_matches_its_place_disposition():
+    seed_written_amendment_for_reach()
+    session = "reach-decision-account"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    write_report(
+        "reports/amendment/1/sweep-1.md",
+        reach_report((1, 0), ("DECISION",)),
+    )
+    missing_heading = run_progress("amendment-sweep-check", "1")
+    check(missing_heading.returncode != 0,
+          "a Reach DECISION disposition had no matching public finding")
+
+    write_report(
+        "reports/amendment/1/sweep-1.md",
+        reach_report((1, 0), ("DECISION",), findings=("DECISION",)),
+    )
+    matched = run_progress("amendment-sweep-check", "1")
+    check(matched.returncode == 0, matched.stdout + matched.stderr)
+
+
+@test
 def amendment_sweep_preflight_reauthenticates_every_prior_receipt():
     seed_written_amendment_for_reach()
-    accept_reach_sweep(1, reach_report((1,), ("kept",)), "prior-proof-sweep-1")
+    accept_reach_sweep(
+        1, reach_report((1,), ("kept",), findings=("IMPORTANT",)),
+        "prior-proof-sweep-1",
+    )
     returned = run_progress("note", "fixer.returned", "--data", '{"applied":1,"declined":0}')
     check(returned.returncode == 0, returned.stdout + returned.stderr)
     write_report("reports/amendment/1/sweep-1.md", reach_report((1,), ("removed",)))
@@ -4901,7 +5053,9 @@ def amendment_reach_replacement_must_follow_the_prior_owner_retirement():
 @test
 def amendment_sweep_history_rejects_unowed_and_overlapping_receipts():
     seed_written_amendment_for_reach()
-    accept_reach_sweep(1, reach_report((1,), ("kept",)), "history-sweep-1")
+    accept_reach_sweep(
+        1, reach_report((1,), ("kept",), findings=("IMPORTANT",)), "history-sweep-1",
+    )
     write_report("reports/amendment/1/sweep-2.md", reach_report())
     append_reach_session(2, "history-sweep-2")
     append_raw_reach_receipt(2, "history-sweep-2", hop=1, places=0, closed=True)
@@ -4953,9 +5107,18 @@ def amendment_reach_contract_preflights_before_retirement_and_owns_its_handoff()
           and "marker plus its matching receipt" in mode,
           "AMENDMENT does not preserve every preflight interruption boundary")
     check("A Reach replacement never overlaps its prior owner" in normalized_mode
-          and "An actionable prior sweep requires its accepted `fixer.returned`" in normalized_mode
+          and "An actionable prior sweep has at least one public finding heading"
+          in normalized_mode
           and "A clean close permits A4, never another sweep" in normalized_mode,
           "AMENDMENT does not state the exact current-sweep admission boundary")
+    check("Place count records coverage. It never decides whether the sweep is actionable or clean"
+          in " ".join(reviewer.split())
+          and "Its place count records handled coverage and can be positive" in normalized_mode,
+          "AMENDMENT still treats handled place count as actionable work or cleanliness")
+    check("The spec path is authority, not controller memory" in normalized_mode
+          and "one structural root `Spec: <relative path>`" in normalized_mode
+          and "exact committed plan reviewed by the amendment's voided pass" in normalized_mode,
+          "AMENDMENT does not define the construction-only A4 spec source")
 
     for subject, contract in (("shared worker", worker), ("root skill", skill),
                               ("AMENDMENT", mode)):
@@ -4977,12 +5140,9 @@ def sweep_receipt_binds_each_disposition_to_one_exact_place_block():
         "Disposition: kept\n", "Disposition: kept\nDisposition: removed\n", 1,
     ) + after_last
     write_report("reports/amendment/1/sweep-1.md", malformed)
-    append_reach_session(1)
+    append_live_reach_session(1, "malformed-place-account")
     before = len(journal_lines())
-    result = run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":2,"places":2,"closed":true}',
-    )
+    result = run_progress("amendment-sweep-check", "1")
     check(result.returncode != 0 and len(journal_lines()) == before,
           "global disposition counts hid one duplicate P1 disposition and an empty P2")
 
@@ -5011,18 +5171,12 @@ def sweep_receipt_rejects_template_completion_and_out_of_block_structure():
     configure_reach_session(session, 1)
     append_live_reach_session(1, session)
     before = len(journal_lines())
-    placeholder = run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":1,"places":0,"closed":true}',
-    )
+    placeholder = run_progress("amendment-sweep-check", "1")
     check(placeholder.returncode != 0 and len(journal_lines()) == before,
           "the untouched completion template became accepted evidence")
     orphan = reach_report() + "\n## P99 · orphan\nDisposition: removed\n"
     write_report("reports/amendment/1/sweep-1.md", orphan)
-    orphan_result = run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":1,"places":0,"closed":true}',
-    )
+    orphan_result = run_progress("amendment-sweep-check", "1")
     check(orphan_result.returncode != 0 and len(journal_lines()) == before,
           "out-of-block structural lines satisfied the Reach account")
     fenced = reach_report() + (
@@ -5060,14 +5214,9 @@ def reach_accepts_a_finite_five_hop_frontier_and_closes_only_on_zero():
     seed_written_amendment_for_reach()
     report = reach_report(
         (1, 1, 1, 1, 0), ("kept", "moved", "removed", "DECISION"),
+        findings=("DECISION",),
     )
-    write_report("reports/amendment/1/sweep-1.md", report)
-    append_reach_session(1)
-    result = run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":5,"places":4,"closed":true}',
-    )
-    check(result.returncode == 0, result.stdout + result.stderr)
+    accept_reach_sweep(1, report, "five-hop-reach")
     data = journal_lines()[-1]["data"]
     check(data["hop"] == 5 and data["places"] == 4 and data["closed"] is True, data)
 
@@ -5077,21 +5226,25 @@ def open_reach_requires_an_explicit_unenumerable_input_not_only_counts():
     seed_written_amendment_for_reach()
     blocker = "missing durable input: event consumer registry is absent"
     valid = reach_report(
-        (2, 1), ("kept", "removed", "DECISION"), open_blocker=blocker,
+        (2, 1), ("kept", "removed", "DECISION"), findings=("DECISION",),
+        open_blocker=blocker,
     )
     invalid = valid.replace(
         f"; next hop cannot be enumerated — {blocker}", "",
     )
+    session = "open-frontier-reach"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
     write_report("reports/amendment/1/sweep-1.md", invalid)
-    append_reach_session(1)
     before = len(journal_lines())
-    counts_only = run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":2,"places":3,"closed":false}',
-    )
+    counts_only = run_progress("amendment-sweep-check", "1")
     check(counts_only.returncode != 0 and len(journal_lines()) == before,
           "positive hop counts alone became a NOT CLOSED frontier")
     write_report("reports/amendment/1/sweep-1.md", valid)
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    retirement = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retirement.returncode == 0, retirement.stdout + retirement.stderr)
     accepted = run_progress(
         "note", "sweep.reported", "--round", "1",
         "--data", '{"hop":2,"places":3,"closed":false}',
@@ -5155,12 +5308,7 @@ def amendment_commit_refuses_without_the_exact_clean_review_and_accepts_the_full
                                       text=True).strip() == head
           and not os.path.exists(os.path.join(WORKSPACE, "amendment-commit-in-progress")),
           "amendment-commit.sh mutated before clean reach and consolidation")
-    write_report("reports/amendment/1/sweep-1.md", reach_report())
-    append_reach_session(1)
-    check(run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":1,"places":0,"closed":true}',
-    ).returncode == 0, "the clean sweep did not settle")
+    accept_reach_sweep(1, reach_report(), "amendment-commit-reach")
     check(run_progress(
         "note", "fixer.returned", "--data", '{"applied":1,"declined":0}',
     ).returncode == 0, "the final fixer return did not settle")
@@ -5675,13 +5823,7 @@ def subagent_recovery_spec_loop_closes_lost_before_regeneration():
 @test
 def subagent_recovery_consolidation_closes_lost_before_same_round_regeneration():
     seed_written_amendment_for_reach()
-    write_report("reports/amendment/1/sweep-1.md", reach_report())
-    append_reach_session(1)
-    swept = run_progress(
-        "note", "sweep.reported", "--round", "1",
-        "--data", '{"hop":1,"places":0,"closed":true}',
-    )
-    check(swept.returncode == 0, swept.stdout + swept.stderr)
+    accept_reach_sweep(1, reach_report(), "consolidation-recovery-reach")
     returned = run_progress("note", "fixer.returned", "--data", '{"applied":1,"declined":0}')
     check(returned.returncode == 0, returned.stdout + returned.stderr)
     relative = next(entry["text"] for entry in journal_lines()
