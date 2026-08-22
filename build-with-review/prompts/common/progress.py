@@ -5345,6 +5345,19 @@ def git_object_name(name, subject):
     return result.stdout.strip()
 
 
+def validate_built_task_success(entries, index, entry, built, task, task_sha, subject):
+    data = note_data(entry)
+    required = {"attempt", "lot", "sha", "gate"}
+    allowed = required | {"retry"}
+    if set(data) not in (required, allowed) \
+            or data.get("lot") != built or data.get("sha") != task_sha \
+            or not construction_positive_integer(data.get("attempt")) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))):
+        fail(f"{subject}'s stable task-{task} has malformed accepted-result authority", data)
+    validate_attempt_succeeded_entry(entries, index, entry)
+    return data
+
+
 def validate_task_pass_completion(entries, before, data, subject):
     """Prove that a task-owned first pass follows one complete built lot."""
     built, commit = data["built"], data["commit"]
@@ -5387,17 +5400,15 @@ def validate_task_pass_completion(entries, before, data, subject):
         matches = [(index, entry) for index, entry in enumerate(entries[:before])
                    if entry.get("kind") == "attempt.succeeded"
                    and entry.get("lot") == built and entry.get("task") == task
-                   and set(note_data(entry)) == {"attempt", "lot", "sha", "gate"}
-                   and note_data(entry).get("lot") == built
-                   and isinstance(note_data(entry).get("attempt"), int)
-                   and not isinstance(note_data(entry).get("attempt"), bool)
-                   and note_data(entry)["attempt"] > 0
-                   and re.fullmatch(r"[0-9a-f]{64}", str(note_data(entry).get("gate")))
                    and note_data(entry).get("sha") == task_sha]
         if len(matches) != 1:
             fail(f"{subject}'s stable task-{task} has no one exact accepted result",
                  f"found {len(matches)}")
-        success_indexes.append(matches[0][0])
+        success_index, success = matches[0]
+        validate_built_task_success(
+            entries, success_index, success, built, task, task_sha, subject,
+        )
+        success_indexes.append(success_index)
         previous = task_sha
     if success_indexes != sorted(success_indexes) or len(set(success_indexes)) != final_task:
         fail(f"{subject}'s accepted task results are not in strict task order")

@@ -4163,6 +4163,47 @@ def task_pass_requires_the_final_manifest_task_and_lot_built_boundary():
 
 
 @test
+def task_pass_consumer_accepts_and_reauthenticates_a_retry_success_shape():
+    progress = load_common_module("progress")
+    retry = "17:" + "a" * 64
+    success = {
+        "event": "note",
+        "kind": "attempt.succeeded",
+        "lot": "lot-1",
+        "task": 1,
+        "data": {
+            "attempt": 2,
+            "lot": "lot-1",
+            "sha": "b" * 40,
+            "gate": "c" * 64,
+            "retry": retry,
+        },
+    }
+    validated = []
+    progress.validate_attempt_succeeded_entry = (
+        lambda entries, index, entry: validated.append((entries, index, entry))
+    )
+    data = progress.validate_built_task_success(
+        [success], 0, success, "lot-1", 1, "b" * 40, "the test pass",
+    )
+    check(data["retry"] == retry and validated == [([success], 0, success)],
+          "the pass consumer did not reauthenticate the successful retry proof")
+
+    success["data"]["foreign"] = "not authority"
+    progress.fail = lambda message, detail=None: (_ for _ in ()).throw(
+        ValueError((message, detail))
+    )
+    try:
+        progress.validate_built_task_success(
+            [success], 0, success, "lot-1", 1, "b" * 40, "the test pass",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the pass consumer accepted a foreign success field")
+
+
+@test
 def task_pass_rejects_a_nonfinal_task_and_missing_stable_result():
     commit, gate, _ = seed_task_gate("lot-1", "unfinished-plan", tasks=2)
     data = json.dumps({"built": "lot-1", "commit": commit, "gate": gate})
