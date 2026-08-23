@@ -69,6 +69,13 @@ if args[0] == "whoami":
     print(json.dumps(cfg["whoami"]))
     sys.exit(0)
 if args[0] == "session":
+    delayed_reads = cfg.get("session_visibility_delays", {}).get(args[1], 0)
+    if delayed_reads:
+        with open(os.path.join(base, "calls.jsonl")) as f:
+            reads = sum(json.loads(line) == ["session", args[1]] for line in f)
+        if reads <= delayed_reads:
+            print(f"Error: session '{args[1]}' not found.", file=sys.stderr)
+            sys.exit(1)
     payload = cfg["sessions"].get(args[1])
     if payload is None:
         print("session not found", file=sys.stderr)
@@ -1551,6 +1558,48 @@ def session_started_records_target_context():
           "only the seven context fields belong on the line")
     check(line["ts"].startswith("20") and line["ts"].endswith("Z"), "unreadable timestamp")
     check(mutations() == [], "session-started must not mutate anything")
+
+
+@test
+def session_started_waits_for_a_created_session_to_become_visible():
+    cfg = default_config()
+    cfg["session_visibility_delays"] = {TARGET: 2}
+    set_config(cfg)
+
+    proc = run_progress("session-started", TARGET)
+
+    check(proc.returncode == 0, proc.stdout + proc.stderr)
+    check(len(journal_lines()) == 1, "the visibility retry must append exactly one opening")
+    reads = [call for call in cli_calls() if call == ["session", TARGET]]
+    check(len(reads) == 3, f"expected two visibility misses and one success: {reads}")
+
+
+@test
+def session_started_does_not_retry_an_unrelated_cli_failure():
+    cfg = default_config()
+    cfg["fail"] = [["session", TARGET]]
+    set_config(cfg)
+
+    proc = run_progress("session-started", TARGET)
+
+    refused(proc)
+    reads = [call for call in cli_calls() if call == ["session", TARGET]]
+    check(len(reads) == 1, f"an unrelated CLI failure was retried: {reads}")
+
+
+@test
+def session_started_exhaustion_keeps_the_created_identity_and_journals_nothing():
+    cfg = default_config()
+    cfg["session_visibility_delays"] = {TARGET: 100}
+    set_config(cfg)
+
+    proc = run_progress("session-started", TARGET)
+
+    refused(proc)
+    reads = [call for call in cli_calls() if call == ["session", TARGET]]
+    check(len(reads) == 21, f"the bounded visibility retry used the wrong limit: {len(reads)}")
+    check(TARGET in proc.stdout and "Create no replacement" in proc.stdout,
+          "the exhausted boundary did not preserve the authoritative created id")
 
 
 @test

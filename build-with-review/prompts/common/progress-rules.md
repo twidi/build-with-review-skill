@@ -35,6 +35,12 @@ one — the script performs the action and writes the line in the same call. Tha
 point: a record that is produced by the act itself cannot drift from it. **So you do not
 make the TwiCC call separately.**
 
+`session-started` also owns the short visibility interval after a successful child
+creation. It retries only the exact not-found result for the returned id. If that
+bounded wait still refuses, keep the exact id, create no replacement, and retry only the
+same `session-started` call after the child becomes readable. The refused call journals
+nothing.
+
 ---
 
 ## Two things you never pass
