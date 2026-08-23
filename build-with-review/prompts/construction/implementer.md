@@ -143,12 +143,12 @@ answer questions about.
 A human stop after an accepted round-10 Design settlement is different. It has no
 failure report, but its `paused` or `aborted` note owns the exact immutable verdict,
 settlement, result hash and accepted identities. The same stop after
-`design.review.blocked` owns its full final batch. Your first Design manifest carries
+`design.review.blocked` owns its complete blocked batch. Your first Design manifest carries
 the required identities. Verify every identity. Do not treat the absent report as
 permission to discard them. A later stop preserves the same obligation until a
 successful retry consumes it.
 
-A failed round-10 frozen-task-contract blocker also has no report. Its exact
+A failed frozen-task-contract blocker from any Design round also has no report. Its exact
 `design.review.blocked` note owns the immutable full batch. Your first Design manifest
 carries each identity as `contract-blocked` or `carried`. Verify every identity before
 you continue. The corrected controller-owned plan is the authority for the new Design;
@@ -344,12 +344,24 @@ history. Prior admitted identities bypass fresh probability admission.
 The checker also proves the current Design against its exact parent product obligation
 and directly coupled product consequences. A finding against the frozen task contract
 is controller-owned. Do not expand the Design to hide it and do not invent behaviour.
-Stop and report **Blocked** to your parent with the exact finding and source obligation.
-At round 10, first record the derived blocker terminal described below.
+At the round where it is found, do not edit the Design and do not write
+`design.review.resolved`. Record the exact controller-owned terminal first:
+
+```sh
+progress.py note design.review.blocked --round <K> --data '{"check":"design"}'
+```
+
+The command derives the immutable verdict, complete batch, result identity, every
+required finding and every exact contract-blocked identity. It accepts no supplied
+disposition. After it succeeds, stop and report **Blocked** to your parent with the
+exact finding and source obligation. Do not allocate another Design round. This
+terminal authorizes only the controller's C3.9b or C3.9d plan-fault route. It never
+authorizes implementation.
 
 ### Rounds 1 through 9
 
-Account for every finding before another logical round. Correct the Design first. Use
+Unless the controller-owned blocker route above already stopped this batch, account for
+every finding before another logical round. Correct the Design first. Use
 `corrected` when the new Design fixes the finding. Use `unchanged` only when exact plan,
 spec or repository evidence proves no Design change is required.
 
@@ -388,18 +400,8 @@ the implementer's authority classification:
 
 Both routes stop before structured settlement.
 
-When the round-10 batch contains `"where":"frozen task contract"`, do not classify
-that batch as an implementer Design settlement. Record its exact controller-owned
-terminal before reporting Blocked:
-
-```sh
-progress.py note design.review.blocked --round 10 --data '{"check":"design"}'
-```
-
-The command derives the immutable verdict, full batch, result identity, every required
-finding, and every exact contract-blocked identity. It accepts no supplied disposition.
-Do not edit the plan before this note succeeds. This terminal authorizes only the
-controller's C3.9b or C3.9d plan-fault route. It never authorizes implementation.
+The controller-owned contract route above also applies at round 10. It stops before
+this implementer-owned settlement.
 
 For a batch that remains implementer-owned, account for every numbered finding as
 `accepted`, `refuted`, or `alternative`.
