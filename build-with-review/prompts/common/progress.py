@@ -57,6 +57,7 @@ from authority_precedence import (
 from correction_authority import (
     EMPTY_FINAL_CHECKER_SET_SHA256,
     CorrectionAuthorityLease,
+    WorkspaceFileAnchor,
     generation_sha256,
     normalize_allocation,
     normalize_controller_successor,
@@ -180,6 +181,14 @@ CORRECTION_AUTHORITY_NOTE_KINDS = {
     "correction.round.allocated",
     "correction.round.allocation.superseded",
     "correction.round.opened",
+    "decision.batch.supplemented",
+    "decision.conflict.opened",
+    "decision.conflict.sourced",
+    "decision.conflict.settled",
+    "decision.conflict.ready",
+    "spec.breach.opened",
+    "spec.breach.corrected",
+    "spec.breach.restored",
     "spec.edit.ready",
     "spec.committed",
     "decision.recheck.completed",
@@ -187,6 +196,14 @@ CORRECTION_AUTHORITY_NOTE_KINDS = {
 }
 
 CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS = {
+    "decision.batch.supplemented",
+    "decision.conflict.opened",
+    "decision.conflict.sourced",
+    "decision.conflict.settled",
+    "decision.conflict.ready",
+    "spec.breach.opened",
+    "spec.breach.corrected",
+    "spec.breach.restored",
     "spec.edit.ready",
     "spec.committed",
     "decision.recheck.completed",
@@ -200,6 +217,7 @@ HELPER_OWNED_CORRECTION_NOTE_MARKERS = {
         "correction-product-authority-in-progress",
     },
 }
+CORRECTION_VOID_MARKER = "correction-round-void-in-progress"
 
 
 def fail(what, detail=None, journaled=False):
@@ -1531,7 +1549,28 @@ def amendment_openings(entries, before=None):
             if entry.get("kind") == "amendment.opened"]
 
 
-def validate_amendment_opening_entry(entries, index, entry):
+def product_review_amendment_predecessor(entries, before, subject, *, historical=False):
+    """Freeze the exact Correction Round predecessor owned by an AMENDMENT."""
+    opening_index, opening, _, _ = current_pass_opening(entries, before, subject)
+    if note_data(opening).get("schema") != 2:
+        return None
+    current, supersession = correction_allocation_lineage(
+        entries, opening_index, before, subject, historical=historical,
+    )
+    if supersession is not None \
+            and note_data(supersession[1]).get("outcome") != "reclassify":
+        fail(f"{subject} cannot consume a structural supersession")
+    return {
+        "schema": 2,
+        "pass_opening": journal_line_proof(opening_index),
+        "correction_allocation": journal_line_proof(current[0]) if current else None,
+        "correction_supersession": (
+            journal_line_proof(supersession[0]) if supersession else None
+        ),
+    }
+
+
+def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
     data = note_data(entry)
     number = data.get("amendment")
     origin = data.get("origin")
@@ -1572,6 +1611,51 @@ def validate_amendment_opening_entry(entries, index, entry):
             fail("a product-review amendment opening names another pass's built lot")
         if pass_closes(entries, opening_index, index):
             fail("a product-review amendment opening follows an already closed pass")
+        opening_data = note_data(pass_opening)
+        if opening_data.get("schema") == 2:
+            predecessor = product_review_amendment_predecessor(
+                entries, index, "a product-review amendment opening",
+                historical=historical,
+            )
+            if data.get("schema") == 2:
+                if any(data.get(key) != value for key, value in predecessor.items()):
+                    fail("a product-review amendment changes its frozen correction predecessor")
+            elif any(key in data for key in predecessor):
+                fail("a historical product-review amendment has partial successor authority")
+
+            routes = unfulfilled_positive_carry_routes(
+                entries, index, "a product-review amendment opening",
+            )
+            if "sublot" in routes.values():
+                fail("a product-review amendment cannot consume a carried sub-lot route")
+            amendment_batches = sorted({
+                batch for (batch, _), route in routes.items() if route == "amendment"
+            })
+            if amendment_batches:
+                if "batch" not in data:
+                    fail("a product-review amendment omits its carried amendment-route answers")
+                if data.get("batch") != amendment_batches[0]:
+                    fail("a product-review amendment does not own the next unfulfilled batch route")
+                _, members = validate_grouped_amendment_opening(
+                    entries[:index], data,
+                )
+                expected_members = {
+                    f"B{batch}/{decision}"
+                    for (batch, decision), route in routes.items()
+                    if batch == data["batch"] and route == "amendment"
+                }
+                if set(members) != expected_members:
+                    fail("a product-review amendment changes its batch's unfulfilled routes")
+            if any(candidate.get("kind") == "sublot.allocated"
+                   for candidate in entries[opening_index + 1:index]):
+                fail("a product-review amendment cannot replace an allocated sub-lot")
+            _, supersession = correction_allocation_lineage(
+                entries, opening_index, index, "a product-review amendment opening",
+                historical=historical,
+            )
+            if supersession is not None \
+                    and note_data(supersession[1]).get("outcome") != "reclassify":
+                fail("a product-review amendment cannot consume a structural supersession")
     else:
         if "built" in data:
             fail("a construction amendment opening may not claim a product-review built lot")
@@ -1591,11 +1675,21 @@ def normalize_amendment_opened(entries, data, text):
     if not isinstance(data, dict):
         fail("amendment.opened requires structured identity data")
     candidate_data = dict(data)
+    if candidate_data.get("origin") == "product-review":
+        predecessor = product_review_amendment_predecessor(
+            entries, len(entries), "a product-review amendment opening",
+        )
+        if predecessor is not None:
+            if any(key in candidate_data for key in predecessor):
+                fail("a product-review amendment cannot supply derived successor authority")
+            candidate_data.update(predecessor)
     candidate = {"event": "note", "kind": "amendment.opened",
                  "data": candidate_data, "text": text}
     candidate_data["opening_sha256"] = amendment_opening_digest(candidate)
     candidate["data"] = candidate_data
-    validate_amendment_opening_entry(entries + [candidate], len(entries), candidate)
+    validate_amendment_opening_entry(
+        entries + [candidate], len(entries), candidate, historical=False,
+    )
     return candidate_data
 
 
@@ -5404,9 +5498,14 @@ def validate_baseline_pass_successor(entries, before, built, commit, owner, gate
     if prior_data.get("built") != built:
         fail(f"{subject}'s baseline does not succeed the same voided built lot")
     closes = pass_closes(entries, prior_index, before)
-    if len(closes) != 1 or note_data(closes[0][1]) != {"voided": True}:
+    if len(closes) != 1:
         fail(f"{subject}'s controller baseline does not follow one exact voided pass")
-    void_index, _ = closes[0]
+    void_index, void = closes[0]
+    _, _, confirmed, _, normalized_void = validate_pass_close(
+        entries[:void_index], note_data(void), subject, historical=True,
+    )
+    if confirmed is not None or normalized_void.get("voided") is not True:
+        fail(f"{subject}'s controller baseline does not follow one exact voided pass")
     amendments = [(index, entry) for index, entry in enumerate(
         entries[prior_index + 1:before], prior_index + 1
     ) if entry.get("kind") == "amendment.opened"
@@ -6400,26 +6499,88 @@ def required_positive_carries(entries, before, subject):
                 required.add((batch, decision))
             if answer["route"] in {"implementation", "sublot"}:
                 continue
-            terminals = [(index, entry) for index, entry in enumerate(entries[:before])
-                         if index > answer["state_index"]
-                         and entry.get("kind") == "ruling.applied"
-                         and note_data(entry).get("batch") == batch
-                         and note_data(entry).get("decision") == decision]
-            if len(terminals) != 1:
+            if current_batch_route_terminal(
+                entries, before, batch, decision, answer, subject,
+            ) is None:
                 fail(f"{subject} requires one current terminal for B{batch}/{decision}")
-            terminal_index, terminal = terminals[0]
-            validate_batch_applied(
-                entries[:terminal_index], note_data(terminal), reject_duplicate=False,
-            )
         required_all.update(required)
     return required_all
 
 
+def required_positive_carry_routes(entries, before, subject):
+    """Return every current carried product answer and its provenance route."""
+    opened = {note_data(entry).get("batch") for entry in entries[:before]
+              if entry.get("kind") == "decision.batch.opened"}
+    closed = {note_data(entry).get("batch") for entry in entries[:before]
+              if entry.get("kind") == "decision.batch.closed"}
+    routes = {}
+    for batch in sorted(batch for batch in opened - closed
+                        if isinstance(batch, int) and not isinstance(batch, bool)):
+        state = batch_state(entries[:before], batch)
+        for decision, answer in state["answers"].items():
+            if answer["status"] == "active" \
+                    and answer["route"] in {"implementation", "sublot", "amendment"}:
+                routes[(batch, decision)] = answer["route"]
+    return routes
+
+
+def current_batch_route_terminal(entries, before, batch, decision, answer, subject):
+    terminals = [(index, entry) for index, entry in enumerate(entries[:before])
+                 if index > answer["state_index"]
+                 and entry.get("kind") == "ruling.applied"
+                 and note_data(entry).get("batch") == batch
+                 and note_data(entry).get("decision") == decision]
+    if len(terminals) > 1:
+        fail(f"{subject} has multiple current terminals for B{batch}/{decision}")
+    if not terminals:
+        return None
+    terminal_index, terminal = terminals[0]
+    validate_batch_applied(
+        entries[:terminal_index], note_data(terminal), reject_duplicate=False,
+    )
+    return terminal_index, terminal
+
+
+def unfulfilled_positive_carry_routes(entries, before, subject):
+    """Return only routes that still require a successor owner."""
+    routes = required_positive_carry_routes(entries, before, subject)
+    for (batch, decision), route in list(routes.items()):
+        if route != "amendment":
+            continue
+        state = batch_state(entries[:before], batch)
+        answer = state["answers"][decision]
+        if current_batch_route_terminal(
+            entries, before, batch, decision, answer, subject,
+        ) is not None:
+            del routes[(batch, decision)]
+    return routes
+
+
+def require_positive_carry_routes(entries, before, subject, allowed):
+    routes = unfulfilled_positive_carry_routes(entries, before, subject)
+    incompatible = {
+        f"B{batch}/{decision}": route
+        for (batch, decision), route in routes.items() if route not in allowed
+    }
+    if incompatible:
+        fail(f"{subject} cannot consume an incompatible carried product route", incompatible)
+
+
 def validate_positive_close_batches(
         entries, before, built, subject, *, confirmed_relative=None,
+        confirmed_account_data=None,
 ):
     required = required_positive_carries(entries, before, subject)
-    carries = confirmed_carries(built, relative=confirmed_relative)
+    if confirmed_account_data is None:
+        carries = confirmed_carries(built, relative=confirmed_relative)
+    else:
+        carries = set()
+        for item in confirmed_account_data.values():
+            for identity in item["carries"]:
+                match = re.fullmatch(r"B([1-9][0-9]*)/([FD][1-9][0-9]*)", identity)
+                if not match:
+                    fail(f"{subject}'s immutable confirmed account has a malformed carry")
+                carries.add((int(match.group(1)), match.group(2)))
     missing = required - carries
     if missing:
         fail(f"{subject}'s confirmed artifact omits current batch work",
@@ -6572,11 +6733,19 @@ def validate_sublot_allocation(entries, data, text, subject):
         fail(f"{subject} cannot follow a closed pass")
     if any(entry.get("kind") == "sublot.allocated" for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s current pass already has an allocation")
+    if any(entry.get("kind") == "amendment.opened"
+           and note_data(entry).get("origin") == "product-review"
+           and note_data(entry).get("built") == built
+           for entry in entries[opening_index + 1:before]):
+        fail(f"{subject} cannot compete with the current AMENDMENT successor")
     try:
         validate_global_authority_precedence(entries[:before])
     except AuthorityPrecedenceError as exc:
         fail(f"an unfinished global product-authority boundary outranks {subject}", exc)
     validate_current_direct_terminals(entries, before, subject)
+    require_positive_carry_routes(
+        entries, before, subject, {"implementation", "sublot"},
+    )
     validate_allocation_identity(entries, opening_index, before, built, text, subject)
     validate_allocation_account(entries, opening_index, before, built, data, subject)
     opening_data = note_data(entries[opening_index])
@@ -6590,8 +6759,8 @@ def validate_sublot_allocation(entries, data, text, subject):
     correction_supersession = None
     if supersession is not None:
         supersession_index, supersession_entry = supersession
-        if note_data(supersession_entry).get("outcome") != "sublot":
-            fail(f"{subject} cannot consume a reclassification supersession directly")
+        if note_data(supersession_entry).get("outcome") not in {"sublot", "reclassify"}:
+            fail(f"{subject} has an unknown Correction Round supersession route")
         correction_supersession = journal_line_proof(supersession_index)
     return {
         "schema": 2,
@@ -6609,6 +6778,10 @@ def in_pass_controller_successor(
 ):
     opening = entries[opening_index]
     opening_data = note_data(opening)
+    try:
+        validate_global_authority_precedence(entries[:before])
+    except AuthorityPrecedenceError as exc:
+        fail(f"{subject}'s controller-successor authority is unfinished", exc)
     terminals = [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:before], opening_index + 1,
     ) if entry.get("kind") == "ruling.applied"
@@ -6620,6 +6793,7 @@ def in_pass_controller_successor(
     authorities = []
     bound_commit_indices = []
     previous_commit = opening_data["commit"]
+    previous_terminal_index = opening_index
     for terminal_index, terminal in terminals:
         terminal_data = note_data(terminal)
         operation, commit_sha = terminal_data.get("recheck_op"), terminal_data.get("sha")
@@ -6663,26 +6837,53 @@ def in_pass_controller_successor(
         except AuthorityPrecedenceError as exc:
             fail(f"{subject}'s controller-successor recheck is invalid", exc)
         validate_recheck_artifact(entries, recheck_index, recheck_entry)
-        if commit_data.get("parent") != previous_commit:
-            fail(f"{subject}'s controller-successor commit skips its predecessor")
-        parent = subprocess.run(
-            ["git", "-C", project_root(), "rev-parse", f"{commit_sha}^"],
-            capture_output=True, text=True,
-        )
-        if parent.returncode != 0 or parent.stdout.strip() != previous_commit:
-            fail(f"{subject}'s controller-successor commit is not in the reviewed lineage")
         if any(note_data(ready_entry).get(key) != commit_data.get(key)
                for key in ("state_kind", "state_ref", "artifact_sha256")):
             fail(f"{subject}'s controller-successor commit changes its ready authority")
-        authorities.extend(journal_line_proof(index) for index in (
-            ready_index, commit_index, recheck_index, terminal_index,
-        ))
-        bound_commit_indices.append(commit_index)
-        previous_commit = commit_sha
+        transition_indices = [
+            index for index in range(previous_terminal_index + 1, terminal_index + 1)
+            if entries[index].get("kind") in CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS
+        ]
+        for required_index in (ready_index, commit_index, recheck_index, terminal_index):
+            if required_index not in transition_indices:
+                fail(f"{subject}'s controller-successor omits a required authority boundary")
+        for transition_index in transition_indices:
+            transition = entries[transition_index]
+            if transition.get("kind") not in {"spec.committed", "spec.breach.corrected"}:
+                continue
+            transition_data = note_data(transition)
+            transition_sha = transition_data.get("sha")
+            if transition.get("kind") == "spec.breach.corrected":
+                breach = transition_data.get("breach")
+                breach_openings = [
+                    entry for entry in entries[:transition_index]
+                    if entry.get("kind") == "spec.breach.opened"
+                    and note_data(entry).get("breach") == breach
+                ]
+                if len(breach_openings) != 1:
+                    fail(f"{subject}'s breach correction has no exact opening")
+                parent_sha = note_data(breach_openings[0]).get("bad_sha")
+            else:
+                parent_sha = transition_data.get("parent")
+            if parent_sha != previous_commit:
+                fail(f"{subject}'s controller-successor commit skips its predecessor")
+            parent = subprocess.run(
+                ["git", "-C", project_root(), "rev-parse", f"{transition_sha}^"],
+                capture_output=True, text=True,
+            )
+            if parent.returncode != 0 or parent.stdout.strip() != previous_commit:
+                fail(f"{subject}'s controller-successor commit is not in the reviewed lineage")
+            previous_commit = transition_sha
+            if transition.get("kind") == "spec.committed":
+                bound_commit_indices.append(transition_index)
+        if commit_sha != previous_commit:
+            fail(f"{subject}'s terminal does not consume the latest owned commit")
+        authorities.extend(journal_line_proof(index) for index in transition_indices)
+        previous_terminal_index = terminal_index
 
     all_bound_commits = [index for index, entry in enumerate(entries[:before])
                          if index > opening_index and entry.get("kind") == "spec.committed"
-                         and any(key in note_data(entry) for key in ("ruling", "batch"))]
+                         and any(key in note_data(entry) for key in ("ruling", "batch", "breach"))]
     if bound_commit_indices != all_bound_commits:
         fail(f"{subject}'s controller-successor account omits bound product authority")
     if require_current_head:
@@ -6722,8 +6923,13 @@ def in_pass_controller_successor(
     return account, generation_sha256(account)
 
 
-def current_product_generation(entries, opening_index, before, built, subject):
-    successor = in_pass_controller_successor(entries, opening_index, before, built, subject)
+def current_product_generation(
+        entries, opening_index, before, built, subject, *, historical=False,
+):
+    successor = in_pass_controller_successor(
+        entries, opening_index, before, built, subject,
+        require_current_head=not historical,
+    )
     if successor is not None:
         account, generation = successor
         return {
@@ -6741,7 +6947,7 @@ def current_product_generation(entries, opening_index, before, built, subject):
     }
 
 
-def normalize_correction_allocation(entries, data, subject):
+def normalize_correction_allocation(entries, data, subject, *, historical=False):
     before = len(entries)
     opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
     opening_data = note_data(opening)
@@ -6752,17 +6958,25 @@ def normalize_correction_allocation(entries, data, subject):
     if any(entry.get("kind") == "sublot.allocated"
            for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s current pass already has a successor allocation")
+    if any(entry.get("kind") == "amendment.opened"
+           and note_data(entry).get("origin") == "product-review"
+           and note_data(entry).get("built") == built
+           for entry in entries[opening_index + 1:before]):
+        fail(f"{subject} cannot compete with the current AMENDMENT successor")
     try:
         validate_global_authority_precedence(entries[:before])
     except AuthorityPrecedenceError as exc:
         fail(f"an unfinished global product-authority boundary outranks {subject}", exc)
     validate_current_direct_terminals(entries, before, subject)
+    require_positive_carry_routes(entries, before, subject, {"implementation"})
     try:
         normalized = normalize_allocation(data)
     except ValueError as exc:
         fail(f"{subject} has malformed authority", exc)
     current, supersession = correction_allocation_lineage(
         entries, opening_index, before, subject,
+        pending_consumer=normalized["predecessor_supersession"],
+        historical=historical,
     )
     if current is not None:
         fail(f"{subject}'s current pass already has a live Correction Round allocation")
@@ -6783,7 +6997,7 @@ def normalize_correction_allocation(entries, data, subject):
         "gate": opening_data["gate"],
     }
     expected_parent = current_product_generation(
-        entries, opening_index, before, built, subject,
+        entries, opening_index, before, built, subject, historical=historical,
     )
     if normalized["pass"] != expected_pass or normalized["parent"] != expected_parent:
         fail(
@@ -6798,7 +7012,9 @@ def normalize_correction_allocation(entries, data, subject):
     return normalized
 
 
-def correction_allocation_lineage(entries, opening_index, before, subject):
+def correction_allocation_lineage(
+    entries, opening_index, before, subject, *, pending_consumer=None, historical=False,
+):
     current = None
     supersession = None
     seen = False
@@ -6824,9 +7040,28 @@ def correction_allocation_lineage(entries, opening_index, before, subject):
                 fail(f"{subject} supersedes no live Correction Round allocation")
             if note_data(entry).get("allocation") != journal_line_proof(current[0]):
                 fail(f"{subject}'s supersession names another allocation")
+            proof = journal_line_proof(index)
+            republished = pending_consumer == proof or any(
+                (
+                    candidate.get("kind") == "correction.round.allocated"
+                    and note_data(candidate).get("predecessor_supersession") == proof
+                ) or (
+                    candidate.get("kind") == "sublot.allocated"
+                    and note_data(candidate).get("correction_supersession") == proof
+                ) or (
+                    candidate.get("kind") == "pass.closed"
+                    and note_data(candidate).get("schema") == 2
+                    and note_data(candidate).get("voided") is True
+                    and note_data(candidate).get("route") == "amendment"
+                    and note_data(candidate).get("correction_supersession") == proof
+                )
+                for candidate in entries[index + 1:before]
+            )
             normalize_correction_allocation_supersession(
                 entries[:index], note_data(entry), subject,
                 _opening=(opening_index, entries[opening_index]), _current=current,
+                _allow_republished=republished,
+                historical=historical,
             )
             supersession = (index, entry)
             current = None
@@ -6834,7 +7069,8 @@ def correction_allocation_lineage(entries, opening_index, before, subject):
 
 
 def normalize_correction_allocation_supersession(
-    entries, data, subject, *, _opening=None, _current=None,
+    entries, data, subject, *, _opening=None, _current=None, _allow_republished=False,
+    historical=False,
 ):
     before = len(entries)
     if _opening is None:
@@ -6846,7 +7082,7 @@ def normalize_correction_allocation_supersession(
         built = note_data(opening).get("built")
     if _current is None:
         current, prior_supersession = correction_allocation_lineage(
-            entries, opening_index, before, subject,
+            entries, opening_index, before, subject, historical=historical,
         )
         if current is None or prior_supersession is not None:
             fail(f"{subject} has no one exact live allocation")
@@ -6878,7 +7114,7 @@ def normalize_correction_allocation_supersession(
         fail(f"{subject} has no exact supersession disposition")
     opening_data = note_data(opening)
     current_generation = current_product_generation(
-        entries, opening_index, before, built, subject,
+        entries, opening_index, before, built, subject, historical=historical,
     )
     if data["current_generation_sha256"] != current_generation["generation_sha256"]:
         fail(f"{subject} does not bind the exact current product generation")
@@ -6903,7 +7139,8 @@ def normalize_correction_allocation_supersession(
             expected_confirmed_moved, f"{subject}'s moved confirmed artifact",
         )
         canonical_confirmed = os.path.join(WORKSPACE, *confirmed_relative.parts)
-        if os.path.exists(canonical_confirmed) or os.path.islink(canonical_confirmed):
+        if not historical and not _allow_republished \
+                and (os.path.exists(canonical_confirmed) or os.path.islink(canonical_confirmed)):
             fail(f"{subject} retains its stale canonical confirmed artifact")
     else:
         confirmed_path = real_workspace_file(
@@ -7037,11 +7274,20 @@ def validate_positive_close_artifacts(
     allocation_data = note_data(allocation)
     opening_data = note_data(entries[opening_index])
     if allocation_data.get("schema") == 2:
+        current, supersession = correction_allocation_lineage(
+            entries, opening_index, before, subject, historical=historical,
+        )
+        if current is not None:
+            fail(f"{subject} cannot close a sub-lot over a live Correction Round allocation")
+        expected_supersession = (
+            journal_line_proof(supersession[0]) if supersession is not None else None
+        )
         if set(allocation_data) != {
             "schema", "origin", "built", "source", "correction_supersession",
             "items", "refuted",
         } or allocation_data.get("origin") != "product-review" \
-                or allocation_data.get("source") != journal_line_proof(opening_index):
+                or allocation_data.get("source") != journal_line_proof(opening_index) \
+                or allocation_data.get("correction_supersession") != expected_supersession:
             fail(f"{subject} has malformed schema-2 sub-lot allocation authority")
         allocation_data = {
             "built": allocation_data["built"],
@@ -7086,30 +7332,75 @@ def validate_positive_close_artifacts(
 
 
 def normalize_correction_pass_close(
-        entries, opening_index, opening, before, built, confirmed, subject,
+        entries, opening_index, opening, before, built, confirmed, subject, *,
+        historical=False, submitted=None,
 ):
     current, _ = correction_allocation_lineage(
-        entries, opening_index, before, subject,
+        entries, opening_index, before, subject, historical=historical,
     )
     if current is None:
         fail(f"{subject} requires one current Correction Round allocation")
     allocation_index, allocation_entry = current
     allocation = normalize_correction_allocation(
         entries[:allocation_index], note_data(allocation_entry), subject,
+        historical=historical,
     )
     opening_data = note_data(opening)
 
     confirmed_relative = product_confirmed_path(
         built, opening_data["position"], opening_data["pass"],
     )
-    confirmed_path = real_workspace_file(
-        confirmed_relative, f"{subject}'s confirmed correction artifact",
+    artifact_relative = PurePosixPath(
+        "corrections", built, f"round-{allocation['round']}.md",
     )
-    with open(confirmed_path, "rb") as source:
-        confirmed_bytes = source.read()
+    if historical:
+        required = {
+            "schema", "confirmed", "route", "allocation",
+            "base_generation_sha256", "base_commit", "base_gate",
+            "confirmed_artifact", "confirmed_sha256", "confirmed_object",
+            "artifact", "artifact_sha256", "artifact_object",
+            "controller_sha256", "manifest_sha256", "tasks",
+        }
+        if not isinstance(submitted, dict) or set(submitted) != required \
+                or submitted.get("schema") != 2 \
+                or submitted.get("confirmed") != confirmed \
+                or submitted.get("route") != "correction":
+            fail(f"{subject} has a malformed historical Correction Round close")
+        frozen = []
+        for object_key, digest_key in (
+            ("confirmed_object", "confirmed_sha256"),
+            ("artifact_object", "artifact_sha256"),
+        ):
+            try:
+                object_path = validate_content_object(
+                    WORKSPACE, built, submitted[digest_key], ".md",
+                )
+            except ValueError as exc:
+                fail(f"{subject} has no exact immutable {object_key}", exc)
+            if str(PurePosixPath(object_path.relative_to(WORKSPACE))) \
+                    != submitted[object_key]:
+                fail(f"{subject} changes its immutable {object_key} path")
+            try:
+                frozen.append(object_path.read_bytes())
+            except OSError as exc:
+                fail(f"{subject} cannot read its immutable {object_key}", exc)
+        confirmed_bytes, artifact_bytes = frozen
+        confirmed_object = submitted["confirmed_object"]
+        artifact_object = submitted["artifact_object"]
+    else:
+        confirmed_path = real_workspace_file(
+            confirmed_relative, f"{subject}'s confirmed correction artifact",
+        )
+        with open(confirmed_path, "rb") as source:
+            confirmed_bytes = source.read()
+        artifact_path = real_workspace_file(
+            artifact_relative, f"{subject}'s Correction Round artifact",
+        )
+        with open(artifact_path, "rb") as source:
+            artifact_bytes = source.read()
     confirmed_sha256 = hashlib.sha256(confirmed_bytes).hexdigest()
-    actual_account = confirmed_account(
-        confirmed_path, f"{subject}'s confirmed correction artifact",
+    actual_account = confirmed_account_bytes(
+        confirmed_bytes, f"{subject}'s confirmed correction artifact",
     )
     expected_account = {
         item["id"]: {"sources": item["sources"], "carries": item["carries"]}
@@ -7123,14 +7414,6 @@ def normalize_correction_pass_close(
             {"allocated": expected_account, "confirmed": actual_account},
         )
 
-    artifact_relative = PurePosixPath(
-        "corrections", built, f"round-{allocation['round']}.md",
-    )
-    artifact_path = real_workspace_file(
-        artifact_relative, f"{subject}'s Correction Round artifact",
-    )
-    with open(artifact_path, "rb") as source:
-        artifact_bytes = source.read()
     parser = load_correction_round_parser()
     try:
         artifact = parser.parse_artifact_bytes(
@@ -7166,16 +7449,19 @@ def normalize_correction_pass_close(
             or list(artifact["source_finding_coverage"]) != list(expected_account):
         fail(f"{subject}'s Correction Round artifact changes its allocation authority")
 
-    try:
-        confirmed_object = publish_content_object(
-            WORKSPACE, built, confirmed_bytes, ".md",
-        )
-        artifact_object = publish_content_object(
-            WORKSPACE, built, artifact_bytes, ".md",
-        )
-    except (OSError, ValueError) as exc:
-        fail(f"{subject} cannot publish its immutable Correction Round authority", exc)
-    return {
+    if not historical:
+        try:
+            confirmed_path = publish_content_object(
+                WORKSPACE, built, confirmed_bytes, ".md",
+            )
+            artifact_path = publish_content_object(
+                WORKSPACE, built, artifact_bytes, ".md",
+            )
+        except (OSError, ValueError) as exc:
+            fail(f"{subject} cannot publish its immutable Correction Round authority", exc)
+        confirmed_object = str(PurePosixPath(confirmed_path.relative_to(WORKSPACE)))
+        artifact_object = str(PurePosixPath(artifact_path.relative_to(WORKSPACE)))
+    normalized = {
         "schema": 2,
         "confirmed": confirmed,
         "route": "correction",
@@ -7185,14 +7471,15 @@ def normalize_correction_pass_close(
         "base_gate": allocation["parent"]["gate"],
         "confirmed_artifact": str(confirmed_relative),
         "confirmed_sha256": confirmed_sha256,
-        "confirmed_object": str(PurePosixPath(confirmed_object.relative_to(WORKSPACE))),
+        "confirmed_object": confirmed_object,
         "artifact": str(artifact_relative),
         "artifact_sha256": artifact["artifact_sha256"],
-        "artifact_object": str(PurePosixPath(artifact_object.relative_to(WORKSPACE))),
+        "artifact_object": artifact_object,
         "controller_sha256": artifact["controller_sha256"],
         "manifest_sha256": artifact["manifest_sha256"],
         "tasks": len(artifact["tasks"]),
     }
+    return normalized, actual_account
 
 
 def validate_current_technical_gate(opening, subject):
@@ -7207,6 +7494,119 @@ def validate_current_technical_gate(opening, subject):
              proof.stderr or proof.stdout)
 
 
+def correction_void_file(relative, subject, *, required):
+    try:
+        with WorkspaceFileAnchor(WORKSPACE, relative, subject) as anchored:
+            status = anchored.status()
+            if status is None:
+                if required:
+                    fail(f"{subject} is absent", relative)
+                return None
+            return anchored.read_regular()
+    except ValueError as exc:
+        fail(f"{subject} is not one exact workspace file", exc)
+
+
+def validate_correction_void_account(
+        entries, opening_index, opening, current, account, subject, *, historical,
+):
+    allocation_index, allocation_entry = current
+    allocation = normalize_allocation(note_data(allocation_entry))
+    opening_data = note_data(opening)
+    confirmed = product_confirmed_path(
+        allocation["built"], opening_data["position"], opening_data["pass"],
+    )
+    controller = allocation_entry.get("by")
+    if not isinstance(controller, str) or not re.fullmatch(r"[A-Za-z0-9-]+", controller):
+        fail(f"{subject}'s correction allocation has no exact controller owner")
+    confirmed_destination = PurePosixPath(
+        confirmed.parent, f"{confirmed.stem}-superseded-{controller}.md",
+    )
+    artifact = PurePosixPath(
+        "corrections", allocation["built"], f"round-{allocation['round']}.md",
+    )
+    artifact_destination = PurePosixPath(
+        "corrections", allocation["built"],
+        f"round-{allocation['round']}-voided-p{opening_data['pass']}.md",
+    )
+    required = {
+        "schema", "producer", "pass_opening", "allocation",
+        "confirmed", "confirmed_sha256", "confirmed_moved_to",
+        "artifact", "artifact_sha256", "artifact_moved_to",
+    }
+    if not isinstance(account, dict) or set(account) != required \
+            or account.get("schema") != 1 \
+            or account.get("producer") != "correction-round-void" \
+            or account.get("pass_opening") != journal_line_proof(opening_index) \
+            or account.get("allocation") != journal_line_proof(allocation_index) \
+            or account.get("confirmed") != str(confirmed) \
+            or account.get("artifact") != str(artifact):
+        fail(f"{subject} has a malformed physical Correction Round void account")
+
+    members = (
+        ("confirmed", confirmed, confirmed_destination),
+        ("artifact", artifact, artifact_destination),
+    )
+    payloads = {}
+    for name, source, destination in members:
+        digest = account.get(f"{name}_sha256")
+        moved_to = account.get(f"{name}_moved_to")
+        if digest is None:
+            if moved_to is not None:
+                fail(f"{subject}'s absent {name} artifact has a destination")
+            if correction_void_file(destination, f"{subject}'s absent {name} destination", required=False) \
+                    is not None:
+                fail(f"{subject}'s absent {name} artifact has occupied its void destination")
+            if not historical and correction_void_file(
+                source, f"{subject}'s absent {name} source", required=False,
+            ) is not None:
+                fail(f"{subject}'s absent {name} artifact remains at its canonical path")
+            payloads[name] = None
+            continue
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) \
+                or moved_to != str(destination):
+            fail(f"{subject}'s moved {name} artifact has a malformed identity")
+        payload = correction_void_file(
+            destination, f"{subject}'s moved {name} artifact", required=True,
+        )
+        if hashlib.sha256(payload).hexdigest() != digest:
+            fail(f"{subject}'s moved {name} artifact changes its frozen bytes")
+        if not historical and correction_void_file(
+            source, f"{subject}'s canonical {name} artifact", required=False,
+        ) is not None:
+            fail(f"{subject}'s moved {name} artifact remains at its canonical path")
+        payloads[name] = payload
+
+    confirmed_bytes = payloads["confirmed"]
+    artifact_bytes = payloads["artifact"]
+    if artifact_bytes is not None and confirmed_bytes is None:
+        fail(f"{subject}'s Correction Round artifact has no confirmed source authority")
+    if confirmed_bytes is not None:
+        expected_confirmed = {
+            item["id"]: {"sources": item["sources"], "carries": item["carries"]}
+            for item in allocation["items"]
+        }
+        if confirmed_account_bytes(confirmed_bytes, f"{subject}'s moved confirmed artifact") \
+                != expected_confirmed:
+            fail(f"{subject}'s moved confirmed artifact changes its allocation")
+    if artifact_bytes is not None:
+        parser = load_correction_round_parser()
+        try:
+            parsed = parser.parse_artifact_bytes(
+                artifact_bytes, expected_built=allocation["built"],
+                expected_round=allocation["round"],
+            )
+        except ValueError as exc:
+            fail(f"{subject}'s moved Correction Round artifact is invalid", exc)
+        if parsed["source_findings_path"] != str(confirmed) \
+                or parsed["source_findings_sha256"] != account["confirmed_sha256"] \
+                or list(parsed["source_finding_coverage"]) != [
+                    item["id"] for item in allocation["items"]
+                ]:
+            fail(f"{subject}'s moved Correction Round artifact changes its allocation authority")
+    return account
+
+
 def validate_pass_close(entries, data, subject, *, historical=False):
     before = len(entries)
     opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
@@ -7215,17 +7615,66 @@ def validate_pass_close(entries, data, subject, *, historical=False):
     if any(entry.get("kind") == "lot.delivered" for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s current pass is already delivered")
 
-    if data == {"voided": True}:
-        amendments = [entry for entry in entries[opening_index + 1:before]
-                      if entry.get("kind") == "amendment.opened"
-                      and note_data(entry).get("origin") == "product-review"
-                      and note_data(entry).get("built") == built
-                      and isinstance(note_data(entry).get("amendment"), int)
-                      and not isinstance(note_data(entry).get("amendment"), bool)
-                      and note_data(entry).get("amendment") > 0]
+    if isinstance(data, dict) and data.get("voided") is True:
+        amendments = [(index, entry) for index, entry in enumerate(
+            entries[opening_index + 1:before], opening_index + 1,
+        ) if entry.get("kind") == "amendment.opened"
+            and note_data(entry).get("origin") == "product-review"
+            and note_data(entry).get("built") == built
+            and isinstance(note_data(entry).get("amendment"), int)
+            and not isinstance(note_data(entry).get("amendment"), bool)
+            and note_data(entry).get("amendment") > 0]
         if len(amendments) != 1:
             fail(f"{subject} has no one exact product-review amendment opening")
-        return opening_index, opening, None, built, data
+        if note_data(opening).get("schema") != 2:
+            if data != {"voided": True}:
+                fail(f"{subject} changes a historical pass void")
+            return opening_index, opening, None, built, data
+        amendment_index, amendment_entry = amendments[0]
+        current, supersession = correction_allocation_lineage(
+            entries, opening_index, before, subject, historical=historical,
+        )
+        sublots = [entry for entry in entries[opening_index + 1:before]
+                   if entry.get("kind") == "sublot.allocated"]
+        if sublots:
+            fail(f"{subject} cannot void a pass whose sub-lot route is already allocated")
+        correction_supersession = None
+        if supersession is not None:
+            if note_data(supersession[1]).get("outcome") != "reclassify":
+                fail(f"{subject} cannot void a structural supersession through AMENDMENT")
+            correction_supersession = journal_line_proof(supersession[0])
+        amendment_data = note_data(amendment_entry)
+        if amendment_data.get("schema") == 2:
+            frozen = {
+                "pass_opening": journal_line_proof(opening_index),
+                "correction_allocation": journal_line_proof(current[0]) if current else None,
+                "correction_supersession": correction_supersession,
+            }
+            if any(amendment_data.get(key) != value for key, value in frozen.items()):
+                fail(f"{subject}'s AMENDMENT changes its frozen correction predecessor")
+        normalized = {
+            "schema": 2,
+            "voided": True,
+            "route": "amendment",
+            "amendment": journal_line_proof(amendment_index),
+            "correction_allocation": amendment_data.get(
+                "correction_allocation", journal_line_proof(current[0]) if current else None,
+            ),
+            "correction_supersession": amendment_data.get(
+                "correction_supersession", correction_supersession,
+            ),
+        }
+        if current is not None:
+            account = data.get("correction_void") if isinstance(data, dict) else None
+            normalized["correction_void"] = validate_correction_void_account(
+                entries, opening_index, opening, current, account, subject,
+                historical=historical,
+            )
+        if data != {"voided": True} and data != normalized:
+            fail(f"{subject} changes its derived AMENDMENT successor authority")
+        if current is not None and data == {"voided": True}:
+            fail(f"{subject}'s current Correction Round allocation requires its void helper")
+        return opening_index, opening, None, built, normalized
 
     submitted = data
     if isinstance(data, dict) and data.get("schema") == 2 and data.get("route") == "correction":
@@ -7258,17 +7707,22 @@ def validate_pass_close(entries, data, subject, *, historical=False):
         validate_zero_close_batches(entries, opening_index, before, verifier_confirmed, subject)
     else:
         opening_data = note_data(opening)
-        correction_allocations = [entry for entry in entries[opening_index + 1:before]
-                                  if entry.get("kind") == "correction.round.allocated"]
-        if opening_data.get("schema") == 2 and correction_allocations:
-            normalized = normalize_correction_pass_close(
+        current_correction = None
+        if opening_data.get("schema") == 2:
+            current_correction, _ = correction_allocation_lineage(
+                entries, opening_index, before, subject, historical=historical,
+            )
+        if current_correction is not None:
+            normalized, immutable_confirmed = normalize_correction_pass_close(
                 entries, opening_index, opening, before, built, confirmed, subject,
+                historical=historical, submitted=submitted,
             )
             if submitted != {"confirmed": confirmed} and submitted != normalized:
                 fail(f"{subject} changes its derived Correction Round close authority")
             validate_positive_close_batches(
                 entries, before, built, subject,
                 confirmed_relative=normalized["confirmed_artifact"],
+                confirmed_account_data=immutable_confirmed,
             )
             return opening_index, opening, confirmed, built, normalized
         validate_positive_close_artifacts(
@@ -7300,6 +7754,52 @@ def current_pass_close(entries, subject, *, historical=False):
     return opening_index, opening, close_index, close, confirmed, built
 
 
+def correction_allocation_source_batches(allocation):
+    batches = set()
+    for item in allocation["items"]:
+        for identity in item["carries"]:
+            match = re.fullmatch(r"B([1-9][0-9]*)/[FD][1-9][0-9]*", identity)
+            if match is None:
+                fail("a Correction Round opening has a malformed carried batch identity", identity)
+            batches.add(int(match.group(1)))
+    return sorted(batches)
+
+
+def validate_correction_opening_batch_tails(
+        entries, close_index, close_data, allocation, subject,
+):
+    """Authenticate every ordered batch terminal before a round can open."""
+    previous_index = close_index
+    for batch in correction_allocation_source_batches(allocation):
+        matches = [(index, entry) for index, entry in enumerate(
+            entries[close_index + 1:], close_index + 1,
+        ) if entry.get("kind") == "decision.batch.closed"
+            and note_data(entry).get("batch") == batch]
+        if len(matches) != 1:
+            fail(f"{subject} requires one exact decision.batch.closed for B{batch}",
+                 f"found {len(matches)}")
+        terminal_index, terminal = matches[0]
+        if terminal_index <= previous_index:
+            fail(f"{subject}'s decision-batch tails are not in canonical batch order")
+        terminal_data = note_data(terminal)
+        validated = validate_batch_closed(entries[:terminal_index], terminal_data)
+        if validated != terminal_data:
+            fail(f"{subject} changes the complete decision.batch.closed for B{batch}")
+        expected_authority = {
+            "schema": 2,
+            "batch": batch,
+            "outcome": "correction",
+            "built": allocation["built"],
+            "round": allocation["round"],
+            "allocation": close_data["allocation"],
+            "pass_close": journal_line_proof(close_index),
+            "confirmed_sha256": close_data["confirmed_sha256"],
+        }
+        if terminal_data != expected_authority:
+            fail(f"{subject}'s B{batch} terminal names another correction authority")
+        previous_index = terminal_index
+
+
 def normalize_correction_round_opening(entries, data, subject, *, historical=False):
     opening_index, _, close_index, close, confirmed, built = current_pass_close(
         entries, subject, historical=historical,
@@ -7315,6 +7815,9 @@ def normalize_correction_round_opening(entries, data, subject, *, historical=Fal
             or allocation_entry.get("kind") != "correction.round.allocated":
         fail(f"{subject} has no exact preceding correction allocation")
     allocation = normalize_allocation(note_data(allocation_entry))
+    validate_correction_opening_batch_tails(
+        entries, close_index, close_data, allocation, subject,
+    )
     expected = {
         "schema": 1,
         "built": built,
@@ -7442,32 +7945,64 @@ def sublot_close_proof(notes, lot, subject):
 
 def normalize_batch_implementation_terminal(notes, data, batch, decision, answer):
     subject = f"batch implementation terminal B{batch}/{decision}"
-    opening_index, _, close_index, close, confirmed, built = current_pass_close(notes, subject)
+    opening_index, opening, close_index, close, confirmed, built = current_pass_close(notes, subject)
     close_data = note_data(close)
-    if confirmed < 1 or close_data.get("schema") != 2 \
-            or close_data.get("route") != "correction":
-        fail(f"{subject} has no exact positive Correction Round close")
-    allocation_index, allocation_entry = journal_entry_from_proof(
-        notes, close_data["allocation"], f"{subject}'s allocation",
-    )
-    if allocation_index >= close_index or allocation_entry.get("kind") != "correction.round.allocated":
-        fail(f"{subject} has no exact preceding correction allocation")
-    allocation = normalize_allocation(note_data(allocation_entry))
-    minimal = {
-        "answer", "batch", "decision", "route", "fulfillment", "built", "round",
-    }
-    expected = {
-        "schema": 2,
-        "answer": f"B{batch}/{decision}",
-        "batch": batch,
-        "decision": decision,
-        "route": "implementation",
-        "fulfillment": "correction",
-        "built": built,
-        "round": allocation["round"],
-        "allocation": close_data["allocation"],
-        "pass_close": journal_line_proof(close_index),
-    }
+    if confirmed < 1:
+        fail(f"{subject} has no exact positive implementation close")
+    if close_data.get("schema") == 2 and close_data.get("route") == "correction":
+        allocation_index, allocation_entry = journal_entry_from_proof(
+            notes, close_data["allocation"], f"{subject}'s allocation",
+        )
+        if allocation_index >= close_index \
+                or allocation_entry.get("kind") != "correction.round.allocated":
+            fail(f"{subject} has no exact preceding correction allocation")
+        allocation = normalize_allocation(note_data(allocation_entry))
+        minimal = {
+            "answer", "batch", "decision", "route", "fulfillment", "built", "round",
+        }
+        expected = {
+            "schema": 2,
+            "answer": f"B{batch}/{decision}",
+            "batch": batch,
+            "decision": decision,
+            "route": "implementation",
+            "fulfillment": "correction",
+            "built": built,
+            "round": allocation["round"],
+            "allocation": close_data["allocation"],
+            "pass_close": journal_line_proof(close_index),
+        }
+        confirmed_relative = close_data["confirmed_artifact"]
+    else:
+        lot = data.get("lot")
+        proof = sublot_close_proof(notes, lot, subject)
+        if proof[0] != opening_index or proof[2] != close_index:
+            fail(f"{subject} does not consume the current sub-lot successor")
+        allocations = [(index, entry) for index, entry in enumerate(
+            notes[opening_index + 1:close_index], opening_index + 1,
+        ) if entry.get("kind") == "sublot.allocated" and entry.get("text") == lot]
+        if len(allocations) != 1:
+            fail(f"{subject} has no exact preceding sub-lot allocation")
+        allocation_index, _ = allocations[0]
+        minimal = {
+            "answer", "batch", "decision", "route", "fulfillment", "lot",
+        }
+        expected = {
+            "schema": 2,
+            "answer": f"B{batch}/{decision}",
+            "batch": batch,
+            "decision": decision,
+            "route": "implementation",
+            "fulfillment": "sublot",
+            "lot": lot,
+            "allocation": journal_line_proof(allocation_index),
+            "pass_close": journal_line_proof(close_index),
+        }
+        opening_data = note_data(opening)
+        confirmed_relative = (
+            product_confirmed_path(built, opening_data["position"], opening_data["pass"])
+            if opening_data.get("schema") == 2 else None
+        )
     if answer["conflict"] is not None:
         expected["conflict"] = answer["conflict"][1]
     if set(data) == minimal:
@@ -7477,9 +8012,7 @@ def normalize_batch_implementation_terminal(notes, data, batch, decision, answer
         fail(f"{subject} changes its derived authority", {"expected": expected, "actual": data})
     if answer["state_index"] >= close_index:
         fail(f"{subject} predates its current product answer")
-    if (batch, decision) not in confirmed_carries(
-        built, relative=close_data["confirmed_artifact"],
-    ):
+    if (batch, decision) not in confirmed_carries(built, relative=confirmed_relative):
         fail(f"{subject}'s confirmed artifact omits its exact product answer")
     if opening_index >= close_index:
         fail(f"{subject} has an invalid pass-close order")
@@ -7671,6 +8204,16 @@ def validate_batch_closed(notes, data):
             "pass_close": journal_line_proof(close_index),
             "confirmed_sha256": close_data["confirmed_sha256"],
         }
+        if any(
+            entry.get("kind") == "correction.round.opened"
+            and note_data(entry).get("schema") == 1
+            and note_data(entry).get("built") == built
+            and note_data(entry).get("round") == allocation["round"]
+            and note_data(entry).get("allocation") == close_data["allocation"]
+            and note_data(entry).get("pass_close") == journal_line_proof(close_index)
+            for entry in notes[close_index + 1:]
+        ):
+            fail(f"decision batch B{batch} close follows its Correction Round opening")
         if set(data) == minimal:
             if data != {key: expected[key] for key in minimal}:
                 fail(f"decision batch B{batch} changes its Correction Round target", data)
@@ -7684,7 +8227,12 @@ def validate_batch_closed(notes, data):
         proof = sublot_close_proof(notes, lot, f"decision batch B{batch} close")
         if proof[2] != close_index or proof[0] != opening_index:
             fail(f"decision batch B{batch} close does not consume the current pass operation")
-        carries = confirmed_carries(built)
+        opening_data = note_data(notes[opening_index])
+        confirmed_relative = (
+            product_confirmed_path(built, opening_data["position"], opening_data["pass"])
+            if opening_data.get("schema") == 2 else None
+        )
+        carries = confirmed_carries(built, relative=confirmed_relative)
 
     required_carries = set()
     for identity, verdict in state["items"].items():
@@ -8719,40 +9267,242 @@ def product_authority_closed_terminal_matches(account, data):
         and account.get("state_ref") == state["generation_ref"]
 
 
+def product_authority_owner_parts(account):
+    owner = account.get("authority_owner")
+    if isinstance(owner, str) and re.fullmatch(r"R[1-9][0-9]*", owner):
+        return owner, owner, None, None
+    match = re.fullmatch(r"B([1-9][0-9]*)/(D[1-9][0-9]*)", str(owner))
+    if match is None:
+        return None
+    batch = int(match.group(1))
+    return owner, f"B{batch}", batch, match.group(2)
+
+
+def product_authority_state_index(account):
+    match = re.fullmatch(r"(0|[1-9][0-9]*):[0-9a-f]{64}", str(account.get("state_proof")))
+    return int(match.group(1)) if match is not None else None
+
+
+def product_authority_owned_opening(entries, account, kind, identity):
+    state_index = product_authority_state_index(account)
+    if state_index is None:
+        return None
+    matches = [(index, entry) for index, entry in enumerate(entries)
+               if index > state_index and entry.get("kind") == kind and identity(note_data(entry))]
+    return matches[0] if len(matches) == 1 else None
+
+
 def product_authority_note_matches(account, args, data, me):
     if args.kind not in CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS \
             or not isinstance(data, dict) \
             or account.get("owner_session") != me.get("session_id"):
         return False
+    parts = product_authority_owner_parts(account)
+    if parts is None:
+        return False
+    owner, root, batch, decision = parts
+    entries = journal_entries()
     state_kind = account.get("state_kind")
     state_ref = account.get("state_ref")
     ready_op = account.get("ready_op")
+
+    if args.kind == "decision.batch.supplemented":
+        return batch is not None and data.get("batch") == batch
+
+    if args.kind.startswith("decision.conflict."):
+        conflict = data.get("conflict")
+        if data.get("owner") != root or not isinstance(conflict, int) or conflict < 1:
+            return False
+        if args.kind == "decision.conflict.opened":
+            if data.get("state_kind") == "spec.breach.restored":
+                breach = data.get("breach")
+                return isinstance(breach, int) \
+                    and data.get("state_ref") == breach \
+                    and owner in (data.get("ids") or []) \
+                    and product_authority_owned_opening(
+                        entries, account, "spec.breach.opened",
+                        lambda item: item.get("breach") == breach
+                        and item.get("owner") == root and item.get("answer") == owner,
+                    ) is not None \
+                    and any(entry.get("kind") == "spec.breach.restored"
+                            and note_data(entry).get("breach") == breach
+                            for entry in entries)
+            try:
+                current_kind, current_ref = latest_owner_generation(entries, len(entries), owner)
+            except SystemExit:
+                return False
+            return data.get("state_kind") == current_kind \
+                and data.get("state_ref") == current_ref \
+                and owner in (data.get("ids") or [])
+        return product_authority_owned_opening(
+            entries, account, "decision.conflict.opened",
+            lambda item: item.get("owner") == root and item.get("conflict") == conflict,
+        ) is not None
+
+    if args.kind.startswith("spec.breach."):
+        breach = data.get("breach")
+        if not isinstance(breach, int) or breach < 1:
+            return False
+        if args.kind == "spec.breach.opened":
+            return data.get("owner") == root and data.get("answer") == owner
+        return product_authority_owned_opening(
+            entries, account, "spec.breach.opened",
+            lambda item: item.get("breach") == breach
+            and item.get("owner") == root and item.get("answer") == owner,
+        ) is not None
+
     if args.kind == "spec.edit.ready":
-        return data.get("op") == ready_op \
-            and data.get("owner") == account.get("authority_owner") \
-            and data.get("state_kind") == state_kind \
-            and data.get("state_ref") == state_ref
+        if data.get("owner") == owner:
+            if data.get("op") == ready_op:
+                return data.get("state_kind") == state_kind and data.get("state_ref") == state_ref
+            initial_ready_exists = any(
+                entry.get("kind") == "spec.edit.ready"
+                and note_data(entry).get("op") == ready_op
+                and note_data(entry).get("owner") == owner
+                for entry in entries
+            )
+            if not initial_ready_exists:
+                return False
+            try:
+                current_kind, current_ref = latest_owner_generation(entries, len(entries), owner)
+            except SystemExit:
+                return False
+            return (current_kind, current_ref) != (state_kind, state_ref) \
+                and data.get("state_kind") == current_kind and data.get("state_ref") == current_ref
+        repair = re.fullmatch(r"breach-([1-9][0-9]*)/C[1-9][0-9]*", str(data.get("owner")))
+        return repair is not None and product_authority_owned_opening(
+            entries, account, "spec.breach.opened",
+            lambda item: item.get("breach") == int(repair.group(1))
+            and item.get("owner") == root and item.get("answer") == owner,
+        ) is not None
+
     if args.kind == "spec.committed":
-        return data.get("ready_op") == ready_op \
-            and data.get("state_kind") == state_kind \
-            and data.get("state_ref") == state_ref
-    if args.kind == "ruling.applied" and data.get("route") == "closed":
-        return product_authority_closed_terminal_matches(account, data)
-    commit_op = data.get("commit_op") if args.kind == "decision.recheck.completed" \
-        else data.get("recheck_op")
-    commits = [entry for entry in journal_entries()
-               if entry.get("kind") == "spec.committed"
-               and note_data(entry).get("op") == commit_op
-               and note_data(entry).get("ready_op") == ready_op
-               and note_data(entry).get("state_kind") == state_kind
-               and note_data(entry).get("state_ref") == state_ref]
-    return len(commits) == 1
+        if batch is None:
+            direct = data.get("ruling") == owner
+        else:
+            direct = data.get("batch") == batch and data.get("decision") == decision
+        if direct:
+            return any(entry.get("kind") == "spec.edit.ready"
+                       and note_data(entry).get("owner") == owner
+                       and note_data(entry).get("op") == data.get("ready_op")
+                       for entry in entries)
+        breach = data.get("breach")
+        return isinstance(breach, int) and product_authority_owned_opening(
+            entries, account, "spec.breach.opened",
+            lambda item: item.get("breach") == breach
+            and item.get("owner") == root and item.get("answer") == owner,
+        ) is not None
+
+    if args.kind == "decision.recheck.completed":
+        breach = data.get("breach")
+        if isinstance(breach, int):
+            return data.get("owner") == root and product_authority_owned_opening(
+                entries, account, "spec.breach.opened",
+                lambda item: item.get("breach") == breach
+                and item.get("owner") == root and item.get("answer") == owner,
+            ) is not None
+        if batch is None:
+            return data.get("owner") == owner
+        return data.get("batch") == batch and data.get("decision") == decision
+
+    if args.kind == "ruling.applied":
+        return data.get("ruling") == owner if batch is None \
+            else data.get("batch") == batch and data.get("decision") == decision
+    return False
+
+
+def product_authority_state_ref_matches(entry, kind, ref):
+    data = note_data(entry)
+    if kind == "ruling.ready":
+        return data.get("ruling") == ref
+    if kind == "decision.batch.ready":
+        return ref == f"B{data.get('batch')}"
+    if kind == "decision.batch.supplemented":
+        return data.get("after_op") == ref
+    if kind == "decision.recheck.completed":
+        return data.get("commit_op") == ref or data.get("basis_ref") == ref
+    if kind == "decision.conflict.ready":
+        return ref == f"{data.get('owner')}/C{data.get('conflict')}"
+    return False
+
+
+def product_authority_chain(entries, account, before, subject):
+    parts = product_authority_owner_parts(account)
+    state_index = product_authority_state_index(account)
+    if parts is None or state_index is None or state_index >= before:
+        fail(f"{subject} has no exact initial authority state")
+    owner, root, batch, decision = parts
+    state_entry = entries[state_index]
+    if journal_line_proof(state_index) != account.get("state_proof") \
+            or state_entry.get("kind") != account.get("state_kind") \
+            or not product_authority_state_ref_matches(
+                state_entry, account.get("state_kind"), account.get("state_ref"),
+            ) \
+            or authority_artifact_sha(state_entry, f"{subject}'s initial state") \
+            != account.get("state_artifact_sha256"):
+        fail(f"{subject} changes its initial authority state")
+
+    conflict_openings = {}
+    breach_openings = {}
+    proofs = []
+    for index, entry in enumerate(entries[state_index + 1:before], state_index + 1):
+        kind, data = entry.get("kind"), note_data(entry)
+        if kind not in CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS:
+            continue
+        owned = False
+        if kind == "decision.batch.supplemented":
+            owned = batch is not None and data.get("batch") == batch
+        elif kind.startswith("decision.conflict."):
+            identity = data.get("owner"), data.get("conflict")
+            if kind == "decision.conflict.opened":
+                owned = data.get("owner") == root and owner in (data.get("ids") or [])
+                if owned:
+                    conflict_openings[identity] = index
+            else:
+                owned = identity in conflict_openings
+        elif kind.startswith("spec.breach."):
+            breach = data.get("breach")
+            if kind == "spec.breach.opened":
+                owned = data.get("owner") == root and data.get("answer") == owner
+                if owned:
+                    breach_openings[breach] = index
+            else:
+                owned = breach in breach_openings
+        elif kind == "spec.edit.ready":
+            repair = re.fullmatch(r"breach-([1-9][0-9]*)/C[1-9][0-9]*", str(data.get("owner")))
+            owned = data.get("owner") == owner or repair is not None \
+                and int(repair.group(1)) in breach_openings
+        elif kind == "spec.committed":
+            owned = data.get("ruling") == owner if batch is None else (
+                data.get("batch") == batch and data.get("decision") == decision
+            )
+            owned = owned or isinstance(data.get("breach"), int) \
+                and data.get("breach") in breach_openings
+        elif kind == "decision.recheck.completed":
+            owned = data.get("owner") == owner if batch is None else (
+                data.get("batch") == batch and data.get("decision") == decision
+            )
+            owned = owned or isinstance(data.get("breach"), int) \
+                and data.get("breach") in breach_openings and data.get("owner") == root
+        elif kind == "ruling.applied":
+            owned = data.get("ruling") == owner if batch is None else (
+                data.get("batch") == batch and data.get("decision") == decision
+            )
+        if not owned:
+            fail(f"{subject} contains a foreign authority boundary", journal_line_proof(index))
+        proofs.append(journal_line_proof(index))
+    try:
+        validate_global_authority_precedence(entries[:before])
+    except AuthorityPrecedenceError as exc:
+        fail(f"{subject} has an unfinished authority boundary", exc)
+    return proofs
 
 
 def refuse_foreign_correction_pending_owner(operation, args, data, me):
     markers = {
         "correction-allocation-supersede-in-progress": "correction-round-supersede.sh",
         "correction-round-open-in-progress": "correction-round-open.sh",
+        CORRECTION_VOID_MARKER: "correction-round-void.sh",
         "correction-product-authority-in-progress": "correction-product-authority.sh",
     }
     for name, command in markers.items():
@@ -8784,6 +9534,8 @@ def refuse_foreign_correction_pending_owner(operation, args, data, me):
 
 def helper_owned_correction_event(kind, owner_marker, operation):
     allowed = HELPER_OWNED_CORRECTION_NOTE_MARKERS.get(kind)
+    if kind == "pass.closed" and owner_marker == CORRECTION_VOID_MARKER:
+        allowed = {CORRECTION_VOID_MARKER}
     if allowed is None:
         if owner_marker is not None:
             fail("this correction note kind has no helper-owned terminal")
@@ -8854,6 +9606,10 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
         args.kind, data, text, round_number=context.get("round"),
         mandate=context.get("mandate"), context=context,
     )
+    if args.kind == "pass.closed" \
+            and isinstance(data, dict) and data.get("correction_void") is not None \
+            and owner_marker != CORRECTION_VOID_MARKER:
+        fail("a current Correction Round allocation void is owned by its official helper")
     if helper_event is not None and data != helper_event:
         fail("the helper-owned correction terminal changes after validation")
     if lease is not None:

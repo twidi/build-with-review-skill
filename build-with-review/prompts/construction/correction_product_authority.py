@@ -24,7 +24,6 @@ STATE_KINDS = {
     "ruling.ready",
     "decision.batch.ready",
     "decision.batch.supplemented",
-    "decision.recheck.completed",
     "decision.conflict.ready",
 }
 
@@ -42,6 +41,15 @@ def operation_identity(args):
         f"correction-product-authority:{args.built}:{args.round}:"
         f"{args.allocation}:{args.owner}:{args.state_kind}:{args.state_ref}:{args.ready_op}"
     )
+
+
+def refuse_competing_owner_markers():
+    for name in supersede.BLOCKING_MARKERS:
+        if name == MARKER_NAME:
+            continue
+        marker = WORKSPACE / name
+        if marker.exists() or marker.is_symlink():
+            fail("another correction authority owner is unfinished")
 
 
 def atomic_write(path, account, *, replace):
@@ -123,8 +131,34 @@ def exact_state(entries, args):
     return index, artifact_sha256
 
 
-def begin_account(args, operation):
-    entries, opening_index, _, _, allocation = supersede.exact_current_allocation(args)
+def exact_owed_route(entries, args, state_index, artifact_sha256):
+    if args.owner.startswith("R"):
+        _, route, authority = progress.direct_ruling_state(args.owner)
+        expected = {
+            "authority_kind": args.state_kind,
+            "authority_ref": args.state_ref,
+            "authority_sha256": artifact_sha256,
+        }
+        if authority != expected:
+            fail("the product-authority owner does not name the current ruling generation")
+    else:
+        batch_text, decision = args.owner.split("/", 1)
+        state = progress.batch_state(entries, int(batch_text[1:]))
+        answer = state["answers"].get(decision)
+        if answer is None or answer.get("status") != "active" \
+                or state.get("generation_kind") != args.state_kind \
+                or state.get("generation_ref") != args.state_ref \
+                or state_index != answer.get("state_index"):
+            fail("the product-authority owner does not name the current batch generation")
+        route = answer.get("route")
+    if route != "spec-in-place":
+        fail("the current product authority owes no multi-step spec transition")
+
+
+def initial_account(args, operation, *, before=None):
+    entries, opening_index, _, _, allocation = supersede.exact_current_allocation(
+        args, before=before, allowed_marker=MARKER_NAME,
+    )
     current = progress.current_product_generation(
         entries, opening_index, len(entries), args.built, "the product-authority owner",
     )
@@ -134,7 +168,7 @@ def begin_account(args, operation):
     owner = progress.whoami().get("session_id")
     if not isinstance(owner, str) or not owner:
         fail("the product-authority owner has no controller session")
-    return {
+    account = {
         "schema": 1,
         "phase": "authority",
         "operation": operation,
@@ -155,6 +189,13 @@ def begin_account(args, operation):
         "reason": None,
         "supersession": None,
     }
+    return account, entries, state_index, artifact_sha256
+
+
+def begin_account(args, operation):
+    account, entries, state_index, artifact_sha256 = initial_account(args, operation)
+    exact_owed_route(entries, args, state_index, artifact_sha256)
+    return account
 
 
 def validate_marker(account, args, operation):
@@ -181,6 +222,11 @@ def validate_marker(account, args, operation):
         account.get("reason") is not None or account.get("supersession") is not None
     ):
         fail("the pending product authority changes its unfinished authority phase")
+    state_index = int(account["state_proof"].split(":", 1)[0])
+    expected, _, _, _ = initial_account(args, operation, before=state_index + 1)
+    frozen_keys = required - {"phase", "reason", "supersession"}
+    if any(account.get(key) != expected.get(key) for key in frozen_keys):
+        fail("the pending product authority changes its frozen initial account")
     return account
 
 
@@ -215,6 +261,7 @@ def note_args(event):
 
 def run_begin(args, marker, operation):
     with CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+        refuse_competing_owner_markers()
         if marker.exists() or marker.is_symlink():
             validate_marker(read_marker(marker), args, operation)
             print("PRODUCT AUTHORITY ALREADY OWNED")
@@ -229,6 +276,9 @@ def run_finish(args, marker, operation):
         account = validate_marker(read_marker(marker), args, operation)
         if account["phase"] == "authority":
             entries = progress.journal_entries()
+            owned_chain = progress.product_authority_chain(
+                entries, account, len(entries), "the completed product-authority owner",
+            )
             ready_index = exact_ready(entries, account)
             successor_result = progress.in_pass_controller_successor(
                 entries,
@@ -240,6 +290,8 @@ def run_finish(args, marker, operation):
             if successor_result is None:
                 fail("the product-authority owner has no completed successor generation")
             successor, _ = successor_result
+            if successor["authorities"] != owned_chain:
+                fail("the product-authority successor omits or changes its complete owned chain")
             if progress.journal_line_proof(ready_index) not in successor["authorities"]:
                 fail("the product-authority successor belongs to another ready boundary")
             supersede_args = SimpleNamespace(
@@ -313,18 +365,29 @@ def release_terminal(entries, account, proof):
     index, entry = progress.journal_entry_from_proof(
         entries, proof, "the product-authority release terminal",
     )
-    if index <= int(account["state_proof"].split(":", 1)[0]) \
-            or entry.get("kind") != "ruling.applied":
-        fail("the product-authority release has no later ruling terminal")
+    if index <= int(account["state_proof"].split(":", 1)[0]):
+        fail("the product-authority release terminal predates its owner")
     data = progress.note_data(entry)
     owner = account["authority_owner"]
-    if owner.startswith("R"):
-        matches = data.get("ruling") == owner
+    if entry.get("kind") == "ruling.applied":
+        if owner.startswith("R"):
+            matches = data.get("ruling") == owner
+        else:
+            batch, decision = owner.split("/", 1)
+            matches = data.get("batch") == int(batch[1:]) and data.get("decision") == decision
+        if not matches or data.get("route") != "closed":
+            fail("the product-authority release terminal does not close its exact owner")
+    elif entry.get("kind") == "decision.conflict.ready":
+        if owner.startswith("R"):
+            current = progress.direct_ruling_state(owner)[1]
+        else:
+            batch, decision = owner.split("/", 1)
+            answer = progress.batch_state(entries, int(batch[1:]))["answers"].get(decision)
+            current = answer.get("route") if answer and answer.get("status") == "active" else None
+        if current in {None, "spec-in-place"}:
+            fail("the product-authority conflict terminal does not abandon its spec transition")
     else:
-        batch, decision = owner.split("/", 1)
-        matches = data.get("batch") == int(batch[1:]) and data.get("decision") == decision
-    if not matches or data.get("route") != "closed":
-        fail("the product-authority release terminal does not close its exact owner")
+        fail("the product-authority release has no exact failure or abandonment terminal")
     return index
 
 
@@ -336,7 +399,12 @@ def run_release(args, marker, operation):
         entries, opening_index, _, _, allocation = supersede.exact_current_allocation(
             args, allowed_marker=MARKER_NAME,
         )
-        release_terminal(entries, account, args.terminal)
+        terminal_index = release_terminal(entries, account, args.terminal)
+        owned_chain = progress.product_authority_chain(
+            entries, account, len(entries), "the released product-authority owner",
+        )
+        if not owned_chain or owned_chain[-1] != progress.journal_line_proof(terminal_index):
+            fail("the release terminal does not close the complete owned authority chain")
         if any(entry.get("kind") == "spec.committed"
                and progress.note_data(entry).get("ready_op") == account["ready_op"]
                for entry in entries):

@@ -851,6 +851,20 @@ One refutation stays yours: **refuting from the spec, with the citation.**
 must already prove that before this phase. `Carries:` preserves work provenance; it is not
 a product-answer compatibility check.
 
+Separate **preservation carries** from **unfulfilled routes** before selecting a
+successor. An active answer whose exact `ruling.applied route:"amendment"` terminal is
+already accepted remains under `Carries:` when code is still required. It does not select
+AMENDMENT again. An amendment answer without that exact current terminal remains an
+unfulfilled route. Process the lowest durable batch that owns such a route through its
+own grouped AMENDMENT generation. Every answer from another batch is a preservation
+constraint, never another member of that amendment. A current historical `sublot` route
+selects the sub-lot route and refuses every PRODUCT REVIEW AMENDMENT opening.
+
+`amendment.opened` freezes the exact current Correction Round allocation, the exact
+`reclassify` supersession, or exact null predecessor. Once that opening exists, no
+Correction Round or sub-lot allocation can enter the pass. The void consumes only the
+predecessor frozen by the opening. It never derives a later allocation from journal order.
+
 Build the actionable set before allocating anything. It is the union of:
 
 - the corrections confirmed in this pass;
@@ -1076,8 +1090,13 @@ sub-lot under a fresh ordinal, or delivers a lot twice:
 generation is the last such opening before the amendment line. The human already ordered
 the amendment, so this generation never resumes as an ordinary pass. Follow MODE
 AMENDMENT's void-resume boundary: no `pass.closed {"voided":true}` after the amendment
-opening means finish the idempotent void; the close present means continue to A2. Never
-wake or replace a lens from the generation being voided.
+opening means finish the idempotent void; the close present means continue to A2. A live
+Correction Round allocation resumes only through
+`<workspace>/prompts/construction/correction-round-void.sh <built lot>`. Generic
+`progress.py note` remains valid only with no correction predecessor, or after the exact
+`reclassify` supersession already moved both canonical artifacts. Never wake or replace
+a lens from the generation being voided. The opening itself owns that exact predecessor.
+Never allocate a Correction Round or sub-lot after it.
 
 **Decision batches have two roles. An unfinished route comes before the ordinary rows;
 carried correction input does not.** Read every batch whose `decision.batch.opened` has

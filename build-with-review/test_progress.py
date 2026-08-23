@@ -134,7 +134,8 @@ def reset():
                  os.path.join(WORKSPACE, "progress.jsonl"),
                  os.path.join(WORKSPACE, "progress.jsonl.lock"),
                  os.path.join(REPO, "fixture-code-review.txt"),
-                 os.path.join(REPO, "foreign.txt")):
+                 os.path.join(REPO, "foreign.txt"),
+                 os.path.join(REPO, "later-authority.txt")):
         if os.path.exists(path):
             os.remove(path)
     shutil.rmtree(os.path.join(WORKSPACE, "dashboard"), ignore_errors=True)
@@ -146,7 +147,7 @@ def reset():
         "amendment-commit-in-progress", "document-copy-in-progress", "attempt-in-flight",
         "amendment-sweep-preflight.json", "correction-allocation-supersede-in-progress",
         "correction-artifact-in-progress", "correction-round-open-in-progress",
-        "correction-product-authority-in-progress",
+        "correction-round-void-in-progress", "correction-product-authority-in-progress",
     ):
         path = os.path.join(WORKSPACE, marker)
         if os.path.lexists(path):
@@ -1047,6 +1048,328 @@ def seed_unopened_correction_allocation(token="correction-allocation"):
         "allocation_proof": allocation_proof,
         "confirmed_relative": confirmed_relative,
         "artifact_relative": artifact_relative,
+    }
+
+
+def seed_unopened_batch_correction(token="batch-correction-opening", *, batch_count=1):
+    commit, gate, _ = seed_task_gate("lot-1", token)
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening_index = len(journal_lines()) - 1
+    opening = journal_lines()[opening_index]["data"]
+    seed_review_receipts("lot-1", confirmed=0)
+    for batch in range(1, batch_count + 1):
+        seed_batch(
+            items=[{"id": "D1", "verdict": "confirmed"}],
+            answers=[{"id": "D1", "choice": "O1", "route": "implementation"}],
+            batch=batch,
+        )
+    carries = [f"B{batch}/D1" for batch in range(1, batch_count + 1)]
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": opening["generation_sha256"],
+            "commit": commit,
+            "gate": gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": journal_proof(opening_index),
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": [], "carries": carries}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The accepted answer requires one bounded implementation change.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The implementation answer remains inside the existing task boundary.",
+        },
+    }
+    allocated = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    allocation_index = len(journal_lines()) - 1
+    allocation_proof = journal_proof(allocation_index)
+    confirmed_relative = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    confirmed_sha = write_report(
+        confirmed_relative, f"## F1 · correction\nCarries: {', '.join(carries)}\n",
+    )
+    write_report(
+        "corrections/lot-1/round-1.md",
+        correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha),
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_index = len(journal_lines()) - 1
+    return {
+        "allocation": allocation,
+        "allocation_proof": allocation_proof,
+        "close_index": close_index,
+        "close": journal_lines()[close_index]["data"],
+        "close_proof": journal_proof(close_index),
+        "confirmed_sha": confirmed_sha,
+        "batch_count": batch_count,
+    }
+
+
+def seed_reclassified_correction_allocation(token="correction-reclassification"):
+    state = seed_unopened_correction_allocation(token)
+    successor, successor_gate, _, successor_generation = seed_in_pass_controller_successor(
+        state["opening_index"],
+    )
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-supersede.sh",
+    )
+    result = subprocess.run(
+        [
+            script, "lot-1", "1", state["allocation_proof"], "reclassify",
+            "The accepted product authority changes the required successor route.",
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(result.returncode == 0, result.stdout + result.stderr)
+    supersession_index = len(journal_lines()) - 1
+    state.update({
+        "successor": successor,
+        "successor_gate": successor_gate,
+        "successor_generation": successor_generation,
+        "supersession_index": supersession_index,
+        "supersession_proof": journal_proof(supersession_index),
+    })
+    return state
+
+
+def seed_opened_controller_successor_correction(token="historical-correction"):
+    commit, gate, _ = seed_task_gate("lot-1", token)
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening_index = len(journal_lines()) - 1
+    opening = journal_lines()[opening_index]["data"]
+    opening_proof = journal_proof(opening_index)
+    seed_review_receipts("lot-1", confirmed=1)
+    successor, successor_gate, _, successor_generation = seed_in_pass_controller_successor(
+        opening_index,
+    )
+    allocation = {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": successor_generation,
+            "commit": successor,
+            "gate": successor_gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": opening_proof,
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": ["unlooked/F1"], "carries": []}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The finding remains bounded under the accepted successor.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The accepted successor retains one bounded correction.",
+        },
+    }
+    allocated = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    confirmed_relative = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    confirmed_sha = write_report(
+        confirmed_relative, "## F1 · correction\nSources: unlooked/F1\n",
+    )
+    artifact_relative = "corrections/lot-1/round-1.md"
+    write_report(
+        artifact_relative,
+        correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha),
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_index = len(journal_lines()) - 1
+    close_data = journal_lines()[close_index]["data"]
+    opening_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    correction_opened = subprocess.run(
+        [opening_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(correction_opened.returncode == 0, correction_opened.stdout + correction_opened.stderr)
+    correction_opening_index = len(journal_lines()) - 1
+    return {
+        "close_index": close_index,
+        "close": close_data,
+        "opening_index": correction_opening_index,
+        "opening": journal_lines()[correction_opening_index]["data"],
+    }
+
+
+def correction_allocation_for_active_route(route, token):
+    commit, gate, _ = seed_task_gate("lot-1", token)
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_review_receipts("lot-1", confirmed=0)
+    seed_batch(
+        items=[{"id": "D1", "verdict": "confirmed"}],
+        answers=[{"id": "D1", "choice": "O1", "route": route}],
+    )
+    entries = journal_lines()
+    opening_index = next(index for index, entry in enumerate(entries)
+                         if entry.get("kind") == "pass.opened")
+    opening = entries[opening_index]["data"]
+    return {
+        "schema": 2,
+        "built": "lot-1",
+        "round": 1,
+        "predecessor_supersession": None,
+        "parent": {
+            "position": 0,
+            "generation_sha256": opening["generation_sha256"],
+            "commit": commit,
+            "gate": gate,
+        },
+        "pass": {
+            "ordinal": 1,
+            "opening": journal_proof(opening_index),
+            "commit": commit,
+            "gate": gate,
+        },
+        "items": [{"id": "F1", "sources": [], "carries": ["B1/D1"]}],
+        "refuted": [],
+        "admission": {
+            "items": [{
+                "id": "F1",
+                "classification": "implementation-correction",
+                "reason": "The item is presented as one bounded correction.",
+            }],
+            "spec": "current-and-settled",
+            "human_decisions": "settled",
+            "controller_contract": "preserved",
+            "ownership": "preserved",
+            "decomposition": "preserved",
+            "coordination": "bounded",
+            "repetition": "independent",
+            "reason": "The proposed route must match every active carried answer.",
+        },
+    }
+
+
+def seed_completed_grouped_amendment_successor(token):
+    seed_batch(
+        items=[{"id": "D1", "verdict": "confirmed"}],
+        answers=[{"id": "D1", "choice": "O1", "route": "amendment"}],
+    )
+    opening = grouped_open_data()
+    amendment_commit = seed_clean_amendment_landing(
+        opening, "apply B1/D1; return to the fresh PRODUCT REVIEW",
+    )
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "B1/D1", "batch": 1, "decision": "D1",
+            "route": "amendment", "amendment": 1, "sha": amendment_commit,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    first_opening = next(entry for entry in journal_lines()
+                         if entry.get("kind") == "pass.opened")
+    gate = seed_baseline_gate(
+        f"amendment/1/{amendment_commit}", amendment_commit,
+        first_opening["data"]["commit"],
+    )
+    successor = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({
+            "built": "lot-1", "commit": amendment_commit, "gate": gate,
+        }),
+    )
+    check(successor.returncode == 0, successor.stdout + successor.stderr)
+    seed_review_receipts("lot-1", confirmed=1)
+    entries = journal_lines()
+    opening_index = max(index for index, entry in enumerate(entries)
+                        if entry.get("kind") == "pass.opened")
+    current = entries[opening_index]["data"]
+    return {
+        "commit": amendment_commit,
+        "gate": gate,
+        "opening_index": opening_index,
+        "opening": current,
+        "allocation": {
+            "schema": 2,
+            "built": "lot-1",
+            "round": 1,
+            "predecessor_supersession": None,
+            "parent": {
+                "position": current["position"],
+                "generation_sha256": current["generation_sha256"],
+                "commit": amendment_commit,
+                "gate": gate,
+            },
+            "pass": {
+                "ordinal": current["pass"],
+                "opening": journal_proof(opening_index),
+                "commit": amendment_commit,
+                "gate": gate,
+            },
+            "items": [{
+                "id": "F1", "sources": ["unlooked/F1"], "carries": ["B1/D1"],
+            }],
+            "refuted": [],
+            "admission": {
+                "items": [{
+                    "id": "F1",
+                    "classification": "implementation-correction",
+                    "reason": f"{token} remains bounded implementation work.",
+                }],
+                "spec": "current-and-settled",
+                "human_decisions": "settled",
+                "controller_contract": "preserved",
+                "ownership": "preserved",
+                "decomposition": "preserved",
+                "coordination": "bounded",
+                "repetition": "independent",
+                "reason": f"{token} has one bounded successor.",
+            },
+        },
     }
 
 
@@ -5251,6 +5574,220 @@ def implementation_batch_closes_through_one_exact_correction_fulfillment():
 
 
 @test
+def correction_allocation_refuses_a_carried_sublot_route():
+    allocation = correction_allocation_for_active_route(
+        "sublot", "correction-carried-sublot",
+    )
+    before = len(journal_lines())
+    result = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(result.returncode != 0 and len(journal_lines()) == before
+          and "incompatible carried product route" in result.stdout + result.stderr,
+          "a carried sub-lot answer entered a Correction Round")
+
+    allocated = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps({
+            "built": "lot-1",
+            "items": allocation["items"],
+            "refuted": [],
+        }),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    confirmed = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    write_report(confirmed, "## F1 · correction\nCarries: B1/D1\n")
+    write_report(
+        "plans/lot-1.1-plan.md",
+        f"Covers: {confirmed}\n\n## Task 1 - Correct D1\n",
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    terminal = run_progress(
+        "note", "ruling.applied",
+        "--data", '{"answer":"B1/D1","batch":1,"decision":"D1",'
+                  '"route":"sublot","lot":"lot-1.1"}',
+    )
+    check(terminal.returncode == 0, terminal.stdout + terminal.stderr)
+    batch_closed = run_progress(
+        "note", "decision.batch.closed",
+        "--data", '{"batch":1,"outcome":"sublot","lot":"lot-1.1"}',
+    )
+    check(batch_closed.returncode == 0, batch_closed.stdout + batch_closed.stderr)
+
+
+@test
+def correction_allocation_refuses_a_carried_amendment_route():
+    allocation = correction_allocation_for_active_route(
+        "amendment", "correction-carried-amendment",
+    )
+    before = len(journal_lines())
+    result = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(result.returncode != 0 and len(journal_lines()) == before
+          and "incompatible carried product route" in result.stdout + result.stderr,
+          "a carried AMENDMENT answer entered a Correction Round")
+
+    generic = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "apply the product answer; return to this PRODUCT REVIEW",
+    )
+    check(generic.returncode != 0 and len(journal_lines()) == before,
+          "a generic AMENDMENT opening omitted its carried answer")
+    grouped = run_progress(
+        "note", "amendment.opened", "--data", json.dumps(grouped_open_data()),
+        "--text", "apply the product answer; return to this PRODUCT REVIEW",
+    )
+    check(grouped.returncode == 0, grouped.stdout + grouped.stderr)
+    amendment_proof = journal_proof(len(journal_lines()) - 1)
+    voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
+    check(voided.returncode == 0, voided.stdout + voided.stderr)
+    check(journal_lines()[-1]["data"] == {
+        "schema": 2,
+        "voided": True,
+        "route": "amendment",
+        "amendment": amendment_proof,
+        "correction_allocation": None,
+        "correction_supersession": None,
+    }, journal_lines()[-1])
+
+
+@test
+def completed_amendment_answer_is_a_carry_not_an_unfulfilled_route():
+    state = seed_completed_grouped_amendment_successor("completed-amendment-carry")
+    allocated = run_progress(
+        "note", "correction.round.allocated",
+        "--data", json.dumps(state["allocation"]),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+
+
+@test
+def completed_amendment_carry_does_not_join_a_new_batch_amendment():
+    seed_completed_grouped_amendment_successor("new-amendment-owner")
+    seed_batch(
+        batch=2,
+        items=[{"id": "D1", "verdict": "confirmed"}],
+        answers=[{"id": "D1", "choice": "O1", "route": "amendment"}],
+    )
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", json.dumps(grouped_open_data(amendment=2, batch=2)),
+        "--text", "apply B2/D1 while preserving the completed B1/D1 answer",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    data = journal_lines()[-1]["data"]
+    check(data["batch"] == 2 and data["members"] == ["B2/D1"],
+          "the new grouped AMENDMENT acquired a completed external answer")
+
+
+@test
+def carried_sublot_route_refuses_a_product_review_amendment():
+    correction_allocation_for_active_route("sublot", "sublot-before-amendment")
+    before = len(journal_lines())
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "do not acquire the historical sub-lot route",
+    )
+    check(opened.returncode != 0 and len(journal_lines()) == before
+          and "carried sub-lot route" in opened.stdout + opened.stderr,
+          "a product-review AMENDMENT acquired a carried sub-lot route")
+
+
+@test
+def product_review_amendment_freezes_a_null_correction_predecessor():
+    allocation = correction_allocation_for_active_route(
+        "implementation", "amendment-before-correction",
+    )
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "freeze the absent correction predecessor",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening = journal_lines()[-1]["data"]
+    check(opening.get("schema") == 2
+          and opening.get("correction_allocation") is None
+          and opening.get("correction_supersession") is None,
+          "the AMENDMENT opening did not freeze its null correction predecessor")
+    before = len(journal_lines())
+    allocated = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(allocation),
+    )
+    check(allocated.returncode != 0 and len(journal_lines()) == before,
+          "a Correction Round allocation followed an exclusive AMENDMENT opening")
+
+
+@test
+def structural_fresh_work_carries_an_implementation_answer_into_its_sublot():
+    commit, gate, _ = seed_task_gate("lot-1", "implementation-through-sublot")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_review_receipts("lot-1", confirmed=1)
+    seed_batch(
+        items=[{"id": "D1", "verdict": "confirmed"}],
+        answers=[{"id": "D1", "choice": "O1", "route": "implementation"}],
+    )
+    items = [{
+        "id": "F1",
+        "sources": ["unlooked/F1"],
+        "carries": ["B1/D1"],
+    }]
+    allocated = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps({"built": "lot-1", "items": items, "refuted": []}),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    allocation_proof = journal_proof(len(journal_lines()) - 1)
+    confirmed = "reports/product-review/lot-1/lot-1-c0-p1-confirmed.md"
+    write_report(
+        confirmed,
+        "## F1 · correction\nSources: unlooked/F1\nCarries: B1/D1\n",
+    )
+    write_report(
+        "plans/lot-1.1-plan.md",
+        f"Covers: {confirmed}\n\n## Task 1 - Correct F1\n",
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_proof = journal_proof(len(journal_lines()) - 1)
+
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "B1/D1",
+            "batch": 1,
+            "decision": "D1",
+            "route": "implementation",
+            "fulfillment": "sublot",
+            "lot": "lot-1.1",
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    check(journal_lines()[-1]["data"] == {
+        "schema": 2,
+        "answer": "B1/D1",
+        "batch": 1,
+        "decision": "D1",
+        "route": "implementation",
+        "fulfillment": "sublot",
+        "lot": "lot-1.1",
+        "allocation": allocation_proof,
+        "pass_close": close_proof,
+    }, journal_lines()[-1])
+    batch_closed = run_progress(
+        "note", "decision.batch.closed",
+        "--data", '{"batch":1,"outcome":"sublot","lot":"lot-1.1"}',
+    )
+    check(batch_closed.returncode == 0, batch_closed.stdout + batch_closed.stderr)
+
+
+@test
 def correction_allocation_self_review_can_select_the_exact_sublot_exit():
     commit, gate, _ = seed_task_gate("lot-1", "correction-supersession")
     opened = run_progress(
@@ -5380,6 +5917,15 @@ def correction_allocation_self_review_can_select_the_exact_sublot_exit():
     )), "the completed supersession retained its pending owner")
 
     before = len(journal_lines())
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode != 0 and len(journal_lines()) == before
+          and "structural supersession" in amendment.stdout + amendment.stderr,
+          "a structural sub-lot supersession admitted an AMENDMENT successor")
+
     replacement = json.loads(json.dumps(allocation))
     replacement["predecessor_supersession"] = journal_proof(before - 1)
     refused = run_progress(
@@ -5406,6 +5952,639 @@ def correction_allocation_self_review_can_select_the_exact_sublot_exit():
         "items": allocation["items"],
         "refuted": [],
     }, journal_lines()[-1])
+    write_report(
+        "plans/lot-1.1-plan.md",
+        f"Covers: {confirmed_relative}\n\n## Task 1 - Correct F1\n",
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    check(journal_lines()[-1]["data"] == {"confirmed": 1}, journal_lines()[-1])
+
+
+@test
+def reclassification_supersession_can_select_one_exact_sublot_successor():
+    state = seed_reclassified_correction_allocation("reclassify-to-sublot")
+    allocated = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps({
+            "built": "lot-1",
+            "items": state["allocation"]["items"],
+            "refuted": [],
+        }),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    check(journal_lines()[-1]["data"]["correction_supersession"]
+          == state["supersession_proof"], journal_lines()[-1])
+
+    before = len(journal_lines())
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode != 0 and len(journal_lines()) == before
+          and "allocated sub-lot" in amendment.stdout + amendment.stderr,
+          "one reclassification supersession acquired two successor consumers")
+
+    confirmed_sha = write_report(
+        state["confirmed_relative"], "## F1 · correction\nSources: unlooked/F1\n",
+    )
+    check(bool(confirmed_sha), "the current confirmed artifact was not published")
+    write_report(
+        "plans/lot-1.1-plan.md",
+        f"Covers: {state['confirmed_relative']}\n\n## Task 1 - Correct F1\n",
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    before = len(journal_lines())
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode != 0 and len(journal_lines()) == before,
+          "a closed sub-lot route admitted a second AMENDMENT successor")
+
+
+@test
+def reclassification_supersession_can_select_one_exact_amendment_void():
+    state = seed_reclassified_correction_allocation("reclassify-to-amendment")
+    supersession = journal_lines()[state["supersession_index"]]["data"]
+    moved_confirmed = pathlib.Path(WORKSPACE) / supersession["confirmed_moved_to"]
+    moved_artifact = pathlib.Path(WORKSPACE) / supersession["artifact_moved_to"]
+    moved_hashes = (file_sha256(supersession["confirmed_moved_to"]),
+                    file_sha256(supersession["artifact_moved_to"]))
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    amendment_proof = journal_proof(len(journal_lines()) - 1)
+    amendment_data = journal_lines()[-1]["data"]
+    check(amendment_data.get("schema") == 2
+          and amendment_data.get("correction_allocation") is None
+          and amendment_data.get("correction_supersession") == state["supersession_proof"],
+          "the AMENDMENT opening did not freeze its reclassification predecessor")
+    replacement = json.loads(json.dumps(state["allocation"]))
+    replacement["predecessor_supersession"] = state["supersession_proof"]
+    replacement["parent"] = {
+        "position": state["opening"]["position"],
+        "generation_sha256": state["successor_generation"],
+        "commit": state["successor"],
+        "gate": state["successor_gate"],
+    }
+    before = len(journal_lines())
+    refused_replacement = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(replacement),
+    )
+    check(refused_replacement.returncode != 0 and len(journal_lines()) == before,
+          "a replacement Correction Round allocation followed its AMENDMENT successor")
+    sublot = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps({
+            "built": "lot-1",
+            "items": state["allocation"]["items"],
+            "refuted": [],
+        }),
+    )
+    check(sublot.returncode != 0 and len(journal_lines()) == before,
+          "one reclassification supersession acquired AMENDMENT and sub-lot consumers")
+    changed = {
+        "schema": 2,
+        "voided": True,
+        "route": "amendment",
+        "amendment": amendment_proof,
+        "correction_allocation": None,
+        "correction_supersession": state["opening_proof"],
+    }
+    refused = run_progress(
+        "note", "pass.closed", "--data", json.dumps(changed),
+    )
+    check(refused.returncode != 0 and len(journal_lines()) == before,
+          "an AMENDMENT void changed its reclassification authority")
+    voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
+    check(voided.returncode == 0, voided.stdout + voided.stderr)
+    check(journal_lines()[-1]["data"] == {
+        "schema": 2,
+        "voided": True,
+        "route": "amendment",
+        "amendment": amendment_proof,
+        "correction_allocation": None,
+        "correction_supersession": state["supersession_proof"],
+    }, journal_lines()[-1])
+    check(moved_confirmed.is_file() and moved_artifact.is_file()
+          and moved_hashes == (
+              file_sha256(supersession["confirmed_moved_to"]),
+              file_sha256(supersession["artifact_moved_to"]),
+          ) and not os.path.lexists(
+              os.path.join(WORKSPACE, "corrections/lot-1/round-1-voided-p1.md"),
+          ), "the AMENDMENT void moved an already superseded artifact twice")
+
+    before = len(journal_lines())
+    sublot = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps({
+            "built": "lot-1",
+            "items": state["allocation"]["items"],
+            "refuted": [],
+        }),
+    )
+    check(sublot.returncode != 0 and len(journal_lines()) == before,
+          "a voided AMENDMENT route admitted a second sub-lot successor")
+
+
+@test
+def current_correction_allocation_can_select_one_exact_amendment_void():
+    state = seed_unopened_correction_allocation("current-correction-to-amendment")
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    amendment_proof = journal_proof(len(journal_lines()) - 1)
+    amendment_data = journal_lines()[-1]["data"]
+    check(amendment_data.get("schema") == 2
+          and amendment_data.get("correction_allocation") == state["allocation_proof"]
+          and amendment_data.get("correction_supersession") is None,
+          "the AMENDMENT opening did not freeze its live correction predecessor")
+    before = len(journal_lines())
+    voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
+    check(voided.returncode != 0 and len(journal_lines()) == before,
+          "a generic pass close bypassed the current allocation's physical void owner")
+    helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_round_void.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_round_void_direct_terminal", helper_path,
+    )
+    helper = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(helper)
+    helper_args = SimpleNamespace(built="lot-1")
+    exact_event = helper.derive_account(
+        helper_args, helper.operation_identity(helper_args),
+    )["event"]
+    direct = run_progress(
+        "note", "pass.closed", "--data", json.dumps(exact_event),
+    )
+    check(direct.returncode != 0 and len(journal_lines()) == before,
+          "a generic note published the exact helper-owned void terminal")
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-void.sh",
+    )
+    voided = subprocess.run(
+        [script, "lot-1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(voided.returncode == 0, voided.stdout + voided.stderr)
+    confirmed_destination = (
+        "reports/product-review/lot-1/"
+        f"lot-1-c0-p1-confirmed-superseded-{CALLER}.md"
+    )
+    artifact_destination = "corrections/lot-1/round-1-voided-p1.md"
+    check(not os.path.exists(os.path.join(WORKSPACE, state["confirmed_relative"]))
+          and os.path.isfile(os.path.join(WORKSPACE, confirmed_destination)),
+          "the void helper did not move the current confirmed artifact")
+    check(not os.path.exists(os.path.join(WORKSPACE, state["artifact_relative"]))
+          and os.path.isfile(os.path.join(WORKSPACE, artifact_destination)),
+          "the void helper did not move the current Correction Round artifact")
+    data = journal_lines()[-1]["data"]
+    check(data == {
+        "schema": 2,
+        "voided": True,
+        "route": "amendment",
+        "amendment": amendment_proof,
+        "correction_allocation": state["allocation_proof"],
+        "correction_supersession": None,
+        "correction_void": {
+            "schema": 1,
+            "producer": "correction-round-void",
+            "pass_opening": state["opening_proof"],
+            "allocation": state["allocation_proof"],
+            "confirmed": state["confirmed_relative"],
+            "confirmed_sha256": file_sha256(confirmed_destination),
+            "confirmed_moved_to": confirmed_destination,
+            "artifact": state["artifact_relative"],
+            "artifact_sha256": file_sha256(artifact_destination),
+            "artifact_moved_to": artifact_destination,
+        },
+    }, data)
+
+
+@test
+def amendment_predecessor_history_rejects_a_self_consistent_swap():
+    state = seed_unopened_correction_allocation("amendment-predecessor-history")
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "freeze the current correction predecessor",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    entries = journal_lines()
+    amendment_index = len(entries) - 1
+    amendment = entries[amendment_index]
+    amendment["data"]["correction_allocation"] = None
+    amendment["data"].pop("opening_sha256")
+    payload = {
+        "data": amendment["data"],
+        "text": amendment.get("text"),
+    }
+    amendment["data"]["opening_sha256"] = hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in entries:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    before = len(entries)
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-void.sh",
+    )
+    refused_void = subprocess.run(
+        [script, "lot-1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(refused_void.returncode != 0 and len(journal_lines()) == before
+          and os.path.isfile(os.path.join(WORKSPACE, state["confirmed_relative"]))
+          and os.path.isfile(os.path.join(WORKSPACE, state["artifact_relative"]))
+          and not os.path.lexists(os.path.join(WORKSPACE, "correction-round-void-in-progress")),
+          "a changed AMENDMENT predecessor moved or published correction authority")
+
+
+@test
+def correction_successor_route_contract_separates_carries_and_owners():
+    with open(os.path.join(PRODUCT_PROMPTS, "MODE.md"), encoding="utf-8") as source:
+        product = " ".join(source.read().split())
+    with open(os.path.join(AMENDMENT_PROMPTS, "MODE.md"), encoding="utf-8") as source:
+        amendment = " ".join(source.read().split())
+    with open(os.path.join(COMMON_PROMPTS, "progress-rules.md"), encoding="utf-8") as source:
+        rules = " ".join(source.read().split())
+    for phrase in (
+        "Separate **preservation carries** from **unfulfilled routes**",
+        "It does not select AMENDMENT again",
+        "Every answer from another batch is a preservation constraint",
+        "No later allocation can replace that predecessor",
+        "No later allocation can compete with it",
+    ):
+        check(phrase in " ".join((product, amendment, rules)),
+              f"the successor-route contract omits: {phrase}")
+    check(not os.path.exists(os.path.join(WORKSPACE, "correction-round-void-in-progress")),
+          "the completed void retained its owner marker")
+
+
+@test
+def correction_round_void_resumes_every_durable_file_and_terminal_prefix():
+    for cut in ("marker", "confirmed", "both", "terminal"):
+        reset()
+        seed_unopened_correction_allocation(f"correction-void-{cut}")
+        amendment = run_progress(
+            "note", "amendment.opened",
+            "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+            "--text", "change product authority; return to this PRODUCT REVIEW",
+        )
+        check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+        helper_path = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction_round_void.py",
+        )
+        specification = importlib.util.spec_from_file_location(
+            f"correction_round_void_{cut}", helper_path,
+        )
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        args = SimpleNamespace(built="lot-1")
+        operation = helper.operation_identity(args)
+        account = helper.derive_account(args, operation)
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+            helper.atomic_marker(marker, account)
+        physical = account["event"]["correction_void"]
+        if cut in {"confirmed", "both", "terminal"}:
+            os.replace(
+                pathlib.Path(WORKSPACE) / physical["confirmed"],
+                pathlib.Path(WORKSPACE) / physical["confirmed_moved_to"],
+            )
+        if cut in {"both", "terminal"}:
+            os.replace(
+                pathlib.Path(WORKSPACE) / physical["artifact"],
+                pathlib.Path(WORKSPACE) / physical["artifact_moved_to"],
+            )
+        if cut == "terminal":
+            note = helper.note_args(account["event"])
+            with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+                helper.progress.cmd_note_with_lease(
+                    note, lease, operation, owner_marker=helper.MARKER_NAME,
+                )
+
+        script = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction-round-void.sh",
+        )
+        resumed = subprocess.run(
+            [script, "lot-1"], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        check(resumed.returncode == 0, f"{cut}: {resumed.stdout}{resumed.stderr}")
+        terminals = [entry for entry in journal_lines()
+                     if entry.get("kind") == "pass.closed"]
+        check(len(terminals) == 1 and terminals[0]["data"] == account["event"],
+              f"{cut}: recovery did not preserve one exact void terminal")
+        check(not marker.exists(), f"{cut}: recovery retained its void owner")
+
+
+@test
+def correction_round_void_binds_absence_and_refuses_occupied_destinations():
+    state = seed_unopened_correction_allocation("correction-void-absence")
+    os.remove(os.path.join(WORKSPACE, state["artifact_relative"]))
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-void.sh",
+    )
+    completed = subprocess.run(
+        [script, "lot-1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(completed.returncode == 0, completed.stdout + completed.stderr)
+    physical = journal_lines()[-1]["data"]["correction_void"]
+    check(physical["artifact_sha256"] is None and physical["artifact_moved_to"] is None,
+          "the void helper fabricated an absent Correction Round artifact")
+
+    reset()
+    state = seed_unopened_correction_allocation("correction-void-occupied")
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    occupied = os.path.join(WORKSPACE, "corrections/lot-1/round-1-voided-p1.md")
+    pathlib.Path(occupied).write_text("foreign bytes\n", encoding="utf-8")
+    before = len(journal_lines())
+    refused = subprocess.run(
+        [script, "lot-1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(refused.returncode != 0 and len(journal_lines()) == before,
+          "the void helper overwrote an occupied destination")
+    check(pathlib.Path(occupied).read_text(encoding="utf-8") == "foreign bytes\n"
+          and os.path.isfile(os.path.join(WORKSPACE, state["artifact_relative"])),
+          "the refused void changed an occupied destination or its source")
+
+
+@test
+def correction_round_void_historical_consumer_reauthenticates_moved_bytes():
+    seed_unopened_correction_allocation("correction-void-history")
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-void.sh",
+    )
+    completed = subprocess.run(
+        [script, "lot-1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(completed.returncode == 0, completed.stdout + completed.stderr)
+    lines = journal_lines()
+    close_index = len(lines) - 1
+    close_data = lines[close_index]["data"]
+    artifact = pathlib.Path(WORKSPACE) / close_data["correction_void"]["artifact_moved_to"]
+    original = artifact.read_bytes()
+    artifact.write_text("changed historical bytes\n", encoding="utf-8")
+    progress_module = load_common_module("progress")
+    try:
+        progress_module.validate_pass_close(
+            lines[:close_index], close_data, "the historical void", historical=True,
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("historical replay accepted changed voided artifact bytes")
+    artifact.write_bytes(original)
+    changed = json.loads(json.dumps(close_data))
+    changed["correction_void"]["allocation"] = state_proof = journal_proof(0)
+    check(state_proof != close_data["correction_void"]["allocation"],
+          "the historical proof mutation fixture did not change authority")
+    try:
+        progress_module.validate_pass_close(
+            lines[:close_index], changed, "the changed historical void", historical=True,
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("historical replay accepted a changed void allocation proof")
+
+
+@test
+def correction_round_void_marker_reauthenticates_every_owned_field():
+    seed_unopened_correction_allocation("correction-void-marker")
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_round_void.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_round_void_marker", helper_path,
+    )
+    helper = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(helper)
+    args = SimpleNamespace(built="lot-1")
+    operation = helper.operation_identity(args)
+    account = helper.derive_account(args, operation)
+
+    def scalar_paths(value, prefix=()):
+        paths = []
+        for key, item in value.items():
+            path = (*prefix, key)
+            if isinstance(item, dict):
+                paths.extend(scalar_paths(item, path))
+            else:
+                paths.append(path)
+        return paths
+
+    for path in scalar_paths(account):
+        changed = json.loads(json.dumps(account))
+        cursor = changed
+        for key in path[:-1]:
+            cursor = cursor[key]
+        current = cursor[path[-1]]
+        cursor[path[-1]] = 2 if current is None else f"changed-{current}"
+        try:
+            helper.validate_marker(changed, args, operation)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted changed Correction Round void marker field: {path}")
+        physical = account["event"]["correction_void"]
+        check(os.path.isfile(pathlib.Path(WORKSPACE) / physical["confirmed"])
+              and os.path.isfile(pathlib.Path(WORKSPACE) / physical["artifact"]),
+              f"marker validation moved bytes after changing {path}")
+
+
+@test
+def correction_round_void_recovery_refuses_intermediate_directory_aliases():
+    components = (
+        ("corrections",),
+        ("corrections", "lot-1"),
+        ("reports",),
+        ("reports", "product-review"),
+        ("reports", "product-review", "lot-1"),
+    )
+    for ordinal, parts in enumerate(components, 1):
+        reset()
+        seed_unopened_correction_allocation(f"correction-void-alias-{ordinal}")
+        amendment = run_progress(
+            "note", "amendment.opened",
+            "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+            "--text", "change product authority; return to this PRODUCT REVIEW",
+        )
+        check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+        helper_path = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction_round_void.py",
+        )
+        specification = importlib.util.spec_from_file_location(
+            f"correction_round_void_alias_{ordinal}", helper_path,
+        )
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        args = SimpleNamespace(built="lot-1")
+        operation = helper.operation_identity(args)
+        account = helper.derive_account(args, operation)
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+            helper.atomic_marker(marker, account)
+        aliased = pathlib.Path(WORKSPACE).joinpath(*parts)
+        backup, sentinel = replace_directory_with_alias(
+            aliased, f"correction-void-{ordinal}",
+        )
+        script = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction-round-void.sh",
+        )
+        try:
+            before = len(journal_lines())
+            refused = subprocess.run(
+                [script, "lot-1"], cwd=REPO, capture_output=True, text=True,
+                env=ENV, timeout=120,
+            )
+            check(refused.returncode != 0 and len(journal_lines()) == before
+                  and marker.is_file(),
+                  f"alias {parts} did not preserve the pending void owner")
+            check(sentinel.read_text(encoding="utf-8") == "unchanged sentinel\n",
+                  f"alias {parts} changed an unrelated destination")
+        finally:
+            if aliased.is_symlink():
+                aliased.unlink()
+            if backup.exists():
+                backup.rename(aliased)
+
+
+@test
+def correction_round_void_and_product_authority_markers_are_mutually_exclusive():
+    state = seed_unopened_correction_allocation("void-before-product-authority")
+    seed_direct_ruling(ruling="R1", route="spec-in-place")
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    void_helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_round_void.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_round_void_before_product", void_helper_path,
+    )
+    void_helper = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(void_helper)
+    void_args = SimpleNamespace(built="lot-1")
+    void_operation = void_helper.operation_identity(void_args)
+    void_account = void_helper.derive_account(void_args, void_operation)
+    void_marker = pathlib.Path(WORKSPACE) / void_helper.MARKER_NAME
+    with void_helper.CorrectionAuthorityLease.acquire(WORKSPACE, void_operation):
+        void_helper.atomic_marker(void_marker, void_account)
+
+    product_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    product_args = [
+        "lot-1", "1", state["allocation_proof"], "R1", "ruling.ready", "R1",
+        "ready-r1-during-void",
+    ]
+    before = len(journal_lines())
+    refused_product = subprocess.run(
+        [product_script, "begin", *product_args], cwd=REPO, capture_output=True,
+        text=True, env=ENV, timeout=120,
+    )
+    product_marker = pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress"
+    check(refused_product.returncode != 0 and len(journal_lines()) == before
+          and void_marker.is_file() and not product_marker.exists(),
+          "product authority published a second owner over the retained void marker")
+    physical = void_account["event"]["correction_void"]
+    check(os.path.isfile(pathlib.Path(WORKSPACE) / physical["confirmed"])
+          and os.path.isfile(pathlib.Path(WORKSPACE) / physical["artifact"]),
+          "the refused product-authority begin moved the voided artifacts")
+    void_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-void.sh",
+    )
+    resumed = subprocess.run(
+        [void_script, "lot-1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(resumed.returncode == 0 and not void_marker.exists(),
+          resumed.stdout + resumed.stderr)
+
+    reset()
+    state = seed_unopened_correction_allocation("product-authority-before-void")
+    seed_direct_ruling(ruling="R1", route="spec-in-place")
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    product_helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_product_authority.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_product_authority_before_void", product_helper_path,
+    )
+    product_helper = importlib.util.module_from_spec(specification)
+    construction_prompts = os.path.dirname(product_helper_path)
+    sys.path.insert(0, construction_prompts)
+    try:
+        specification.loader.exec_module(product_helper)
+    finally:
+        sys.path.remove(construction_prompts)
+    product_namespace = SimpleNamespace(
+        built="lot-1", round=1, allocation=state["allocation_proof"], owner="R1",
+        state_kind="ruling.ready", state_ref="R1", ready_op="ready-r1-before-void",
+    )
+    product_operation = product_helper.operation_identity(product_namespace)
+    product_account = product_helper.begin_account(product_namespace, product_operation)
+    product_marker = pathlib.Path(WORKSPACE) / product_helper.MARKER_NAME
+    with product_helper.CorrectionAuthorityLease.acquire(WORKSPACE, product_operation):
+        product_helper.atomic_write(product_marker, product_account, replace=False)
+    before = len(journal_lines())
+    refused_void = subprocess.run(
+        [void_script, "lot-1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(refused_void.returncode != 0 and len(journal_lines()) == before
+          and product_marker.is_file()
+          and not os.path.lexists(pathlib.Path(WORKSPACE) / void_helper.MARKER_NAME),
+          "void start published a second owner over live product authority")
+    check(os.path.isfile(os.path.join(WORKSPACE, state["confirmed_relative"]))
+          and os.path.isfile(os.path.join(WORKSPACE, state["artifact_relative"])),
+          "the refused void start moved product-authority-owned artifacts")
 
 
 @test
@@ -5661,7 +6840,7 @@ def product_authority_owner_blocks_competitors_and_finishes_reclassification():
 
 
 @test
-def rejected_product_authority_releases_its_owner_without_supersession():
+def closed_direct_route_cannot_start_a_product_authority_owner():
     state = seed_unopened_correction_allocation("product-authority-release")
     state_path = seed_direct_ruling(ruling="R1", route="closed")
     ready_op = "ready-r1-rejected"
@@ -5676,16 +6855,132 @@ def rejected_product_authority_releases_its_owner_without_supersession():
         [script, "begin", *base_command[1:]],
         cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
     )
+    check(begun.returncode != 0, "an already-closed direct route acquired a product-authority owner")
+    marker = pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress"
+    check(not marker.exists(), "a refused direct route published a product-authority marker")
+
+
+@test
+def accepted_recheck_cannot_start_a_second_product_authority_transition():
+    state = seed_unopened_correction_allocation("product-authority-recheck-terminal")
+    state_path = seed_direct_ruling(ruling="R1", route="spec-in-place")
+    commit_op = "edit-r1-already-rechecked"
+    commit_sha = "a" * 40
+    seed_bound_commit(
+        "R1", commit_op, commit_sha, state_kind="ruling.ready", state_ref="R1",
+        state_path=state_path,
+    )
+    report_path = "reports/answers/R1-already-rechecked.md"
+    report_sha = write_report(report_path, "The accepted edit is complete.\n")
+    rechecked = run_progress(
+        "note", "decision.recheck.completed", "--data", json.dumps(recheck_data(
+            "R1", commit_op, commit_sha,
+            [{"answer": "R1", "status": "active", "route": "spec-in-place"}],
+            artifact_sha=report_sha,
+        )), "--text", report_path,
+    )
+    check(rechecked.returncode == 0, rechecked.stdout + rechecked.stderr)
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    begun = subprocess.run(
+        [
+            script, "begin", "lot-1", "1", state["allocation_proof"], "R1",
+            "decision.recheck.completed", commit_op, "invented-next-ready",
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(begun.returncode != 0, "an accepted recheck acquired a second transition owner")
+    check(not (pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress").exists(),
+          "the refused recheck published a product-authority marker")
+
+
+@test
+def product_authority_marker_reauthenticates_its_frozen_initial_account():
+    state = seed_unopened_correction_allocation("product-authority-marker-account")
+    seed_direct_ruling(ruling="R1", route="spec-in-place")
+    ready_op = "ready-r1-marker-account"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    arguments = [
+        "lot-1", "1", state["allocation_proof"],
+        "R1", "ruling.ready", "R1", ready_op,
+    ]
+    begun = subprocess.run(
+        [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
     check(begun.returncode == 0, begun.stdout + begun.stderr)
     marker = pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress"
+    original = json.loads(marker.read_text(encoding="utf-8"))
+    mutations = {
+        "pass_opening": state["allocation_proof"],
+        "parent_generation_sha256": "f" * 64,
+        "parent_commit": "f" * 40,
+        "parent_gate": "foreign-gate",
+        "state_proof": state["allocation_proof"],
+        "state_artifact_sha256": "f" * 64,
+        "owner_session": "foreign-controller",
+    }
+    before = len(journal_lines())
+    for field, value in mutations.items():
+        changed = {**original, field: value}
+        marker.write_text(
+            json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        resumed = subprocess.run(
+            [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        check(resumed.returncode != 0 and len(journal_lines()) == before,
+              f"a changed product-authority marker field was accepted: {field}")
+    marker.write_text(
+        json.dumps(original, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    resumed = subprocess.run(
+        [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(resumed.returncode == 0 and "ALREADY OWNED" in resumed.stdout,
+          resumed.stdout + resumed.stderr)
 
+
+@test
+def active_product_authority_can_abandon_through_one_owned_conflict_terminal():
+    state = seed_unopened_correction_allocation("product-authority-abandon")
+    seed_direct_ruling(ruling="R1", route="spec-in-place")
+    ready_op = "ready-r1-abandoned"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    arguments = [
+        "lot-1", "1", state["allocation_proof"],
+        "R1", "ruling.ready", "R1", ready_op,
+    ]
+    begun = subprocess.run(
+        [script, "begin", *arguments],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+    marker = pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress"
+    check(marker.is_file(), "the active route has no product-authority owner")
+
+    ready_path, ready_sha = append_conflict_generation(
+        "R1", 1, ["R1"],
+        [{"id": "R1", "action": "qualify", "status": "active", "route": "closed"}],
+        [{"answer": "R1", "status": "active", "route": "closed"}],
+        state_kind="ruling.ready", state_ref="R1",
+    )
     terminal = {
         "answer": "R1",
         "ruling": "R1",
         "route": "closed",
-        "authority_kind": "ruling.ready",
-        "authority_ref": "R1",
-        "authority_sha256": file_sha256(state_path),
+        "authority_kind": "decision.conflict.ready",
+        "authority_ref": "R1/C1",
+        "authority_sha256": ready_sha,
     }
     applied = run_progress(
         "note", "ruling.applied", "--data", json.dumps(terminal),
@@ -5694,31 +6989,509 @@ def rejected_product_authority_releases_its_owner_without_supersession():
     terminal_proof = journal_proof(len(journal_lines()) - 1)
 
     foreign_release = subprocess.run(
-        [script, "release", *base_command[1:], state["allocation_proof"]],
+        [script, "release", *arguments, state["allocation_proof"]],
         cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
     )
     check(foreign_release.returncode != 0 and marker.is_file(),
           "a foreign terminal released the product-authority owner")
 
     released = subprocess.run(
-        [script, "release", *base_command[1:], terminal_proof],
+        [script, "release", *arguments, terminal_proof],
         cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
     )
     check(released.returncode == 0, released.stdout + released.stderr)
-    check(not marker.exists(), "the rejected product authority retained its pending owner")
+    check(not marker.exists(), "the abandoned product authority retained its pending owner")
+    check(os.path.isfile(os.path.join(WORKSPACE, *ready_path.split("/"))),
+          "the owned conflict authority artifact disappeared")
     check(not any(
         entry.get("kind") == "correction.round.allocation.superseded"
         for entry in journal_lines()
-    ), "the rejected product authority superseded the live allocation")
+    ), "the abandoned product authority superseded the live allocation")
 
     closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
     check(closed.returncode == 0, closed.stdout + closed.stderr)
     check(journal_lines()[-1]["data"]["allocation"] == state["allocation_proof"],
-          "the released authority changed the pass's Correction Round allocation")
+          "the abandoned authority changed the pass's Correction Round allocation")
 
 
 @test
-def rejected_batch_authority_releases_the_same_allocation():
+def product_authority_conflict_can_release_to_a_different_product_route():
+    state = seed_unopened_correction_allocation("product-authority-reroute")
+    seed_direct_ruling(ruling="R1", route="spec-in-place")
+    ready_op = "ready-r1-rerouted"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    arguments = [
+        "lot-1", "1", state["allocation_proof"],
+        "R1", "ruling.ready", "R1", ready_op,
+    ]
+    begun = subprocess.run(
+        [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+    ready_path, ready_sha = append_conflict_generation(
+        "R1", 1, ["R1"],
+        [{"id": "R1", "action": "replace", "status": "active", "route": "amendment"}],
+        [{"answer": "R1", "status": "active", "route": "amendment"}],
+        state_kind="ruling.ready", state_ref="R1",
+    )
+    terminal_proof = journal_proof(len(journal_lines()) - 1)
+    released = subprocess.run(
+        [script, "release", *arguments, terminal_proof],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(released.returncode == 0, released.stdout + released.stderr)
+    check(not (pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress").exists(),
+          "the rerouted product authority retained its pending owner")
+    check(os.path.isfile(os.path.join(WORKSPACE, *ready_path.split("/")))
+          and file_sha256(ready_path) == ready_sha,
+          "the reroute changed its conflict authority artifact")
+
+    seed_amendment_context()
+    opened = run_progress(
+        "note", "amendment.opened", "--data", json.dumps({
+            "amendment": 1, "origin": "product-review", "built": "lot-1",
+            "ruling": "R1", "authority_kind": "decision.conflict.ready",
+            "authority_ref": "R1/C1", "authority_sha256": ready_sha,
+        }), "--text", "apply R1 and return to product review",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+
+@test
+def product_authority_successor_binds_a_later_owned_conflict_generation():
+    state = seed_unopened_correction_allocation("product-authority-conflict-successor")
+    state_path = seed_direct_ruling(ruling="R1", route="spec-in-place")
+    ready_op = "ready-r1-first-successor"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    arguments = [
+        "lot-1", "1", state["allocation_proof"],
+        "R1", "ruling.ready", "R1", ready_op,
+    ]
+    begun = subprocess.run(
+        [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+
+    first_spec_relative = "docs/plans/r1-controller-successor.md"
+    first_ready = run_progress(
+        "note", "spec.edit.ready", "--data", json.dumps({
+            "op": ready_op, "owner": "R1", "status": "active",
+            "route": "spec-in-place", "state_kind": "ruling.ready",
+            "state_ref": "R1", "source_sha": state["opening"]["commit"],
+            "spec_path_sha256": hashlib.sha256(first_spec_relative.encode()).hexdigest(),
+            "artifact_sha256": file_sha256(state_path),
+        }), "--text", state_path,
+    )
+    check(first_ready.returncode == 0, first_ready.stdout + first_ready.stderr)
+
+    first, _, _, _ = complete_in_pass_controller_successor(
+        state["opening_index"], state_path, ready_op,
+    )
+    conflict_start = len(journal_lines())
+    conflict_path, conflict_sha = append_conflict_generation(
+        "R1", 1, ["R1"],
+        [{"id": "R1", "action": "qualify", "status": "active",
+          "route": "spec-in-place"}],
+        [{"answer": "R1", "status": "active", "route": "spec-in-place"}],
+        state_kind="decision.recheck.completed",
+        state_ref="edit-r1-controller-successor",
+    )
+    conflict_proofs = [journal_proof(index) for index in range(conflict_start, conflict_start + 4)]
+
+    second_ready_op = "ready-r1-second-successor"
+    spec_relative = "docs/plans/r1-controller-successor-2.md"
+    ready = run_progress(
+        "note", "spec.edit.ready", "--data", json.dumps({
+            "op": second_ready_op, "owner": "R1", "status": "active",
+            "route": "spec-in-place", "state_kind": "decision.conflict.ready",
+            "state_ref": "R1/C1", "source_sha": first,
+            "spec_path_sha256": hashlib.sha256(spec_relative.encode()).hexdigest(),
+            "artifact_sha256": conflict_sha,
+        }), "--text", conflict_path,
+    )
+    check(ready.returncode == 0, ready.stdout + ready.stderr)
+    write_project(spec_relative, "# Second accepted successor authority\n")
+    subprocess.run(["git", "-C", REPO, "add", "--", spec_relative], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-q",
+        "-m", "docs: accept second successor", "--", spec_relative,
+    ], check=True)
+    second = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    operation = "edit-r1-controller-successor-2"
+    committed = run_progress(
+        "note", "spec.committed", "--data", json.dumps({
+            "op": operation, "sha": second, "parent": first,
+            "ready_op": second_ready_op, "state_kind": "decision.conflict.ready",
+            "state_ref": "R1/C1", "artifact_sha256": conflict_sha, "ruling": "R1",
+        }),
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    report_path = "reports/answers/R1-controller-successor-2-recheck.md"
+    report_sha = write_report(report_path, "The second successor preserves the answer.\n")
+    rechecked = run_progress(
+        "note", "decision.recheck.completed", "--data", json.dumps(recheck_data(
+            "R1", operation, second,
+            [{"answer": "R1", "status": "active", "route": "spec-in-place"}],
+            artifact_sha=report_sha,
+        )), "--text", report_path,
+    )
+    check(rechecked.returncode == 0, rechecked.stdout + rechecked.stderr)
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "R1", "ruling": "R1", "route": "spec-in-place",
+            "sha": second, "recheck_op": operation,
+            "authority_kind": "decision.conflict.ready", "authority_ref": "R1/C1",
+            "authority_sha256": conflict_sha,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    opening = state["opening"]
+    gate_owner = (
+        f"product-review/lot-1/c{opening['position']}"
+        f"/controller-successor/{second}"
+    )
+    seed_baseline_gate(gate_owner, second, opening["commit"])
+
+    progress_module = load_common_module("progress")
+    account, _ = progress_module.in_pass_controller_successor(
+        progress_module.journal_entries(), state["opening_index"],
+        len(journal_lines()), "lot-1", "the product-authority regression",
+    )
+    check(all(proof in account["authorities"] for proof in conflict_proofs),
+          "the controller successor omitted its owned conflict generation")
+    check(account["authorities"] == sorted(
+        account["authorities"], key=lambda proof: int(proof.split(":", 1)[0])
+    ), "the controller successor changed product-authority chronology")
+
+    finished = subprocess.run(
+        [script, "finish", *arguments,
+         "The complete accepted authority chain changed the correction base."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+    check(not (pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress").exists(),
+          "the complete product-authority successor retained its owner")
+
+
+@test
+def product_authority_owner_carries_breach_recovery_into_its_successor():
+    state = seed_unopened_correction_allocation("product-authority-breach-successor")
+    state_path = seed_direct_ruling(ruling="R1", route="spec-in-place")
+    ready_op = "ready-r1-bad-proposal"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    arguments = [
+        "lot-1", "1", state["allocation_proof"],
+        "R1", "ruling.ready", "R1", ready_op,
+    ]
+    begun = subprocess.run(
+        [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+
+    bad_relative = "docs/plans/r1-bad-proposal.md"
+    ready = run_progress(
+        "note", "spec.edit.ready", "--data", json.dumps({
+            "op": ready_op, "owner": "R1", "status": "active",
+            "route": "spec-in-place", "state_kind": "ruling.ready", "state_ref": "R1",
+            "source_sha": state["opening"]["commit"],
+            "spec_path_sha256": hashlib.sha256(bad_relative.encode()).hexdigest(),
+            "artifact_sha256": file_sha256(state_path),
+        }), "--text", state_path,
+    )
+    check(ready.returncode == 0, ready.stdout + ready.stderr)
+    write_project(bad_relative, "# Bad proposal\n")
+    subprocess.run(["git", "-C", REPO, "add", "--", bad_relative], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-q",
+        "-m", "docs: record bad proposal", "--", bad_relative,
+    ], check=True)
+    bad_sha = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    bad_op = "edit-r1-bad-proposal"
+    committed = run_progress(
+        "note", "spec.committed", "--data", json.dumps({
+            "op": bad_op, "sha": bad_sha, "parent": state["opening"]["commit"],
+            "ready_op": ready_op, "state_kind": "ruling.ready", "state_ref": "R1",
+            "artifact_sha256": file_sha256(state_path), "ruling": "R1",
+        }),
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    adverse_path = "reports/answers/R1-bad-proposal-recheck.md"
+    adverse_sha = write_report(adverse_path, "The proposal erased an active authority.\n")
+    adverse = run_progress(
+        "note", "decision.recheck.completed", "--data", json.dumps(recheck_data(
+            "R1", bad_op, bad_sha,
+            [{"answer": "R1", "status": "active", "route": "spec-in-place"}],
+            artifact_sha=adverse_sha, accepted=False, missing=["B1/D1"],
+        )), "--text", adverse_path,
+    )
+    check(adverse.returncode == 0, adverse.stdout + adverse.stderr)
+
+    breach_start = len(journal_lines())
+    opening_data = {
+        "breach": 1, "owner": "R1", "answer": "R1", "bad_op": bad_op,
+        "bad_sha": bad_sha, "authorized_sha": state["opening"]["commit"],
+        "erased": ["B1/D1"],
+    }
+    opened = run_progress(
+        "note", "spec.breach.opened", "--data", json.dumps(opening_data),
+        "--text", "the bad proposal erased B1/D1",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    os.remove(os.path.join(REPO, *bad_relative.split("/")))
+    subprocess.run(["git", "-C", REPO, "add", "-u", "--", bad_relative], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-q",
+        "-m", "docs: restore authority baseline", "--", bad_relative,
+    ], check=True)
+    corrective_sha = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    repair_op = "repair-r1-breach-1"
+    corrected = run_progress(
+        "note", "spec.breach.corrected", "--data", json.dumps({
+            **opening_data, "sha": corrective_sha, "op": repair_op, "mark_moved": False,
+        }),
+    )
+    check(corrected.returncode == 0, corrected.stdout + corrected.stderr)
+    restored_path = "reports/answers/R1-breach-1-restored.md"
+    write_report(restored_path, "Every baseline authority is restored.\n")
+    restored_recheck = run_progress(
+        "note", "decision.recheck.completed", "--data", json.dumps({
+            "owner": "R1", "breach": 1, "basis_kind": "spec.breach.corrected",
+            "basis_ref": repair_op, "sha": corrective_sha,
+            "restored": True, "missing": [],
+        }), "--text", restored_path,
+    )
+    check(restored_recheck.returncode == 0, restored_recheck.stdout + restored_recheck.stderr)
+    restored = run_progress(
+        "note", "spec.breach.restored", "--data", json.dumps({
+            "breach": 1, "owner": "R1", "bad_op": bad_op,
+            "basis_kind": "spec.breach.corrected", "basis_ref": repair_op,
+            "sha": corrective_sha,
+        }),
+    )
+    check(restored.returncode == 0, restored.stdout + restored.stderr)
+
+    conflict_source = "reports/answers/R1-breach-1-conflict-source.md"
+    conflict_ready = "reports/answers/R1-breach-1-conflict-ready.md"
+    write_report(conflict_source, "Resume the original proposal from the restored baseline.\n")
+    conflict_sha = write_report(conflict_ready, "The qualified proposal remains spec-in-place.\n")
+    conflict_opened = run_progress(
+        "note", "decision.conflict.opened", "--data", json.dumps({
+            "owner": "R1", "conflict": 1, "state_kind": "spec.breach.restored",
+            "state_ref": 1, "breach": 1, "ids": ["R1"],
+        }),
+    )
+    check(conflict_opened.returncode == 0, conflict_opened.stdout + conflict_opened.stderr)
+    conflict_sourced = run_progress(
+        "note", "decision.conflict.sourced",
+        "--data", '{"owner":"R1","conflict":1}', "--text", conflict_source,
+    )
+    check(conflict_sourced.returncode == 0, conflict_sourced.stdout + conflict_sourced.stderr)
+    conflict_settled = run_progress(
+        "note", "decision.conflict.settled", "--data", json.dumps({
+            "owner": "R1", "conflict": 1,
+            "updates": [{"id": "R1", "action": "qualify", "status": "active",
+                         "route": "spec-in-place"}],
+        }), "--text", "preserve and qualify the proposal",
+    )
+    check(conflict_settled.returncode == 0, conflict_settled.stdout + conflict_settled.stderr)
+    conflict_done = run_progress(
+        "note", "decision.conflict.ready", "--data", json.dumps({
+            "owner": "R1", "conflict": 1,
+            "actions": [{"answer": "R1", "status": "active", "route": "spec-in-place"}],
+            "artifact_sha256": conflict_sha,
+        }), "--text", conflict_ready,
+    )
+    check(conflict_done.returncode == 0, conflict_done.stdout + conflict_done.stderr)
+
+    final_relative = "docs/plans/r1-recovered-proposal.md"
+    final_ready_op = "ready-r1-recovered-proposal"
+    final_ready = run_progress(
+        "note", "spec.edit.ready", "--data", json.dumps({
+            "op": final_ready_op, "owner": "R1", "status": "active",
+            "route": "spec-in-place", "state_kind": "decision.conflict.ready",
+            "state_ref": "R1/C1", "source_sha": corrective_sha,
+            "spec_path_sha256": hashlib.sha256(final_relative.encode()).hexdigest(),
+            "artifact_sha256": conflict_sha,
+        }), "--text", conflict_ready,
+    )
+    check(final_ready.returncode == 0, final_ready.stdout + final_ready.stderr)
+    write_project(final_relative, "# Recovered accepted proposal\n")
+    subprocess.run(["git", "-C", REPO, "add", "--", final_relative], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-q",
+        "-m", "docs: accept recovered proposal", "--", final_relative,
+    ], check=True)
+    final_sha = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    final_op = "edit-r1-recovered-proposal"
+    final_commit = run_progress(
+        "note", "spec.committed", "--data", json.dumps({
+            "op": final_op, "sha": final_sha, "parent": corrective_sha,
+            "ready_op": final_ready_op, "state_kind": "decision.conflict.ready",
+            "state_ref": "R1/C1", "artifact_sha256": conflict_sha, "ruling": "R1",
+        }),
+    )
+    check(final_commit.returncode == 0, final_commit.stdout + final_commit.stderr)
+    final_report = "reports/answers/R1-recovered-proposal-recheck.md"
+    final_report_sha = write_report(final_report, "The recovered proposal preserves all authority.\n")
+    final_recheck = run_progress(
+        "note", "decision.recheck.completed", "--data", json.dumps(recheck_data(
+            "R1", final_op, final_sha,
+            [{"answer": "R1", "status": "active", "route": "spec-in-place"}],
+            artifact_sha=final_report_sha,
+        )), "--text", final_report,
+    )
+    check(final_recheck.returncode == 0, final_recheck.stdout + final_recheck.stderr)
+    final_applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "R1", "ruling": "R1", "route": "spec-in-place",
+            "sha": final_sha, "recheck_op": final_op,
+            "authority_kind": "decision.conflict.ready", "authority_ref": "R1/C1",
+            "authority_sha256": conflict_sha,
+        }),
+    )
+    check(final_applied.returncode == 0, final_applied.stdout + final_applied.stderr)
+    gate_owner = (
+        f"product-review/lot-1/c{state['opening']['position']}"
+        f"/controller-successor/{final_sha}"
+    )
+    seed_baseline_gate(gate_owner, final_sha, state["opening"]["commit"])
+
+    entries = journal_lines()
+    progress_module = load_common_module("progress")
+    account, _ = progress_module.in_pass_controller_successor(
+        progress_module.journal_entries(), state["opening_index"], len(entries),
+        "lot-1", "the breach product-authority regression",
+    )
+    breach_proofs = [journal_proof(index) for index in range(breach_start, breach_start + 9)]
+    check(all(proof in account["authorities"] for proof in breach_proofs),
+          "the controller successor omitted its owned breach recovery")
+
+    finished = subprocess.run(
+        [script, "finish", *arguments,
+         "The recovered product authority changed the correction base."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+
+
+@test
+def batch_product_authority_successor_binds_its_owned_supplement():
+    state = seed_unopened_correction_allocation("product-authority-batch-supplement")
+    seed_batch(
+        items=[{"id": "D1", "verdict": "confirmed"},
+               {"id": "D2", "verdict": "refuted"}],
+        answers=[{"id": "D1", "choice": "O1", "route": "spec-in-place"}],
+    )
+    state_path = "reports/product-review/lot-1/lot-1-decision-batch-1-actions.md"
+    ready_op = "ready-b1-d1-successor"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    arguments = [
+        "lot-1", "1", state["allocation_proof"],
+        "B1/D1", "decision.batch.ready", "B1", ready_op,
+    ]
+    begun = subprocess.run(
+        [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+    spec_relative = "docs/plans/b1-d1-controller-successor.md"
+    ready = run_progress(
+        "note", "spec.edit.ready", "--data", json.dumps({
+            "op": ready_op, "owner": "B1/D1", "status": "active",
+            "route": "spec-in-place", "state_kind": "decision.batch.ready",
+            "state_ref": "B1", "source_sha": state["opening"]["commit"],
+            "spec_path_sha256": hashlib.sha256(spec_relative.encode()).hexdigest(),
+            "artifact_sha256": file_sha256(state_path),
+        }), "--text", state_path,
+    )
+    check(ready.returncode == 0, ready.stdout + ready.stderr)
+    write_project(spec_relative, "# Batch successor\n")
+    subprocess.run(["git", "-C", REPO, "add", "--", spec_relative], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-q",
+        "-m", "docs: accept batch successor", "--", spec_relative,
+    ], check=True)
+    successor = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    operation = "edit-b1-d1-controller-successor"
+    committed = run_progress(
+        "note", "spec.committed", "--data", json.dumps({
+            "op": operation, "sha": successor, "parent": state["opening"]["commit"],
+            "ready_op": ready_op, "state_kind": "decision.batch.ready",
+            "state_ref": "B1", "artifact_sha256": file_sha256(state_path),
+            "batch": 1, "decision": "D1",
+        }),
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    report_path = "reports/answers/B1-D1-controller-successor-recheck.md"
+    report_sha = write_report(report_path, "The batch successor confirms D2.\n")
+    rechecked = run_progress(
+        "note", "decision.recheck.completed", "--data", json.dumps(recheck_data(
+            "B1/D1", operation, successor,
+            [{"answer": "B1/D1", "status": "active", "route": "spec-in-place"}],
+            artifact_sha=report_sha, batch=1, decision="D1",
+            items=[{"id": "D1", "verdict": "confirmed"},
+                   {"id": "D2", "verdict": "confirmed"}],
+        )), "--text", report_path,
+    )
+    check(rechecked.returncode == 0, rechecked.stdout + rechecked.stderr)
+    supplemented = run_progress(
+        "note", "decision.batch.supplemented", "--data", json.dumps({
+            "batch": 1, "after_op": operation,
+            "answers": [{"id": "D2", "choice": "O2", "route": "closed"}],
+        }),
+    )
+    check(supplemented.returncode == 0, supplemented.stdout + supplemented.stderr)
+    supplement_proof = journal_proof(len(journal_lines()) - 1)
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "B1/D1", "batch": 1, "decision": "D1",
+            "route": "spec-in-place", "sha": successor, "recheck_op": operation,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    gate_owner = (
+        f"product-review/lot-1/c{state['opening']['position']}"
+        f"/controller-successor/{successor}"
+    )
+    seed_baseline_gate(gate_owner, successor, state["opening"]["commit"])
+    progress_module = load_common_module("progress")
+    account, _ = progress_module.in_pass_controller_successor(
+        progress_module.journal_entries(), state["opening_index"],
+        len(journal_lines()), "lot-1", "the batch supplement regression",
+    )
+    check(supplement_proof in account["authorities"],
+          "the controller successor omitted its owned batch supplement")
+    finished = subprocess.run(
+        [script, "finish", *arguments,
+         "The supplemented product authority changed the correction base."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+
+
+@test
+def closed_batch_route_cannot_start_a_product_authority_owner():
     state = seed_unopened_correction_allocation("batch-authority-release")
     seed_batch(
         items=[{"id": "D1", "verdict": "confirmed"}],
@@ -5735,25 +7508,9 @@ def rejected_batch_authority_releases_the_same_allocation():
         [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
         env=ENV, timeout=120,
     )
-    check(begun.returncode == 0, begun.stdout + begun.stderr)
-
-    applied = run_progress(
-        "note", "ruling.applied",
-        "--data", '{"answer":"B1/D1","batch":1,"decision":"D1","route":"closed"}',
-    )
-    check(applied.returncode == 0, applied.stdout + applied.stderr)
-    terminal_proof = journal_proof(len(journal_lines()) - 1)
-    released = subprocess.run(
-        [script, "release", *arguments, terminal_proof],
-        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
-    )
-    check(released.returncode == 0, released.stdout + released.stderr)
+    check(begun.returncode != 0, "an already-closed batch route acquired a product-authority owner")
     check(not (pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress").exists(),
-          "the closed batch authority retained its pending owner")
-    check(not any(
-        entry.get("kind") == "correction.round.allocation.superseded"
-        for entry in journal_lines()
-    ), "the closed batch authority superseded the live allocation")
+          "a refused batch route published a product-authority marker")
 
 
 @test
@@ -5931,6 +7688,167 @@ def correction_round_opening_resumes_marker_ref_and_event_prefixes():
 
 
 @test
+def correction_round_opening_requires_complete_ordered_batch_tails():
+    state = seed_unopened_batch_correction("opening-batch-tails")
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    marker = os.path.join(WORKSPACE, "correction-round-open-in-progress")
+    reference = "refs/bwr/test-run/lot-1/correction-1/task-0"
+
+    def require_refused_opening(label):
+        before = len(journal_lines())
+        result = subprocess.run(
+            [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        ref = subprocess.run(
+            ["git", "-C", REPO, "show-ref", "--verify", "--quiet", reference],
+        )
+        check(result.returncode != 0 and len(journal_lines()) == before,
+              f"{label}: an incomplete batch tail opened the Correction Round")
+        check(ref.returncode != 0 and not os.path.lexists(marker),
+              f"{label}: an incomplete batch tail published opening authority")
+
+    require_refused_opening("pass close only")
+    premature_batch_close = run_progress(
+        "note", "decision.batch.closed",
+        "--data", '{"batch":1,"outcome":"correction","built":"lot-1","round":1}',
+    )
+    check(premature_batch_close.returncode != 0,
+          "the batch close preceded its route-specific ruling terminal")
+
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "B1/D1",
+            "batch": 1,
+            "decision": "D1",
+            "route": "implementation",
+            "fulfillment": "correction",
+            "built": "lot-1",
+            "round": 1,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    require_refused_opening("ruling without batch close")
+
+    batch_closed = run_progress(
+        "note", "decision.batch.closed",
+        "--data", '{"batch":1,"outcome":"correction","built":"lot-1","round":1}',
+    )
+    check(batch_closed.returncode == 0, batch_closed.stdout + batch_closed.stderr)
+    opened = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    lines = journal_lines()
+    opening_index = next(index for index, entry in enumerate(lines)
+                         if entry.get("kind") == "correction.round.opened")
+    opening = lines[opening_index]["data"]
+    progress_module = load_common_module("progress")
+    historical = progress_module.normalize_correction_round_opening(
+        lines[:opening_index], opening,
+        "the historical batch-tail Correction Round opening", historical=True,
+    )
+    check(historical == opening, historical)
+    changed = json.loads(json.dumps(lines[:opening_index]))
+    changed_close = next(entry for entry in changed
+                         if entry.get("kind") == "decision.batch.closed")
+    changed_close["data"]["confirmed_sha256"] = "0" * 64
+    try:
+        progress_module.normalize_correction_round_opening(
+            changed, opening,
+            "the changed historical batch-tail Correction Round opening", historical=True,
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("historical opening accepted a changed batch terminal proof")
+    duplicated = json.loads(json.dumps(lines[:opening_index]))
+    batch_terminal_index = next(index for index, entry in enumerate(duplicated)
+                                if entry.get("kind") == "decision.batch.closed")
+    duplicated.insert(batch_terminal_index + 1, duplicated[batch_terminal_index])
+    try:
+        progress_module.normalize_correction_round_opening(
+            duplicated, opening,
+            "the duplicated historical batch-tail Correction Round opening", historical=True,
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("historical opening accepted a duplicate batch terminal")
+
+    reset()
+    state = seed_unopened_batch_correction("late-opening-batch-tail")
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps({
+            "answer": "B1/D1", "batch": 1, "decision": "D1",
+            "route": "implementation", "fulfillment": "correction",
+            "built": "lot-1", "round": 1,
+        }),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    close = state["close"]
+    append_note("correction.round.opened", {
+        "schema": 1,
+        "built": "lot-1",
+        "round": 1,
+        "parent_generation_sha256": close["base_generation_sha256"],
+        "allocation": close["allocation"],
+        "pass_close": state["close_proof"],
+        "artifact": close["artifact"],
+        "artifact_sha256": close["artifact_sha256"],
+        "artifact_object": close["artifact_object"],
+        "controller_sha256": close["controller_sha256"],
+        "manifest_sha256": close["manifest_sha256"],
+        "tasks": close["tasks"],
+        "base_commit": close["base_commit"],
+    })
+    before = len(journal_lines())
+    late = run_progress(
+        "note", "decision.batch.closed",
+        "--data", '{"batch":1,"outcome":"correction","built":"lot-1","round":1}',
+    )
+    check(late.returncode != 0 and len(journal_lines()) == before,
+          "a correction batch tail appended after its Correction Round opening")
+
+
+@test
+def correction_round_opening_rejects_reordered_batch_tails():
+    seed_unopened_batch_correction("reordered-opening-batches", batch_count=2)
+    for batch in (1, 2):
+        applied = run_progress(
+            "note", "ruling.applied", "--data", json.dumps({
+                "answer": f"B{batch}/D1", "batch": batch, "decision": "D1",
+                "route": "implementation", "fulfillment": "correction",
+                "built": "lot-1", "round": 1,
+            }),
+        )
+        check(applied.returncode == 0, applied.stdout + applied.stderr)
+    for batch in (2, 1):
+        closed = run_progress(
+            "note", "decision.batch.closed", "--data", json.dumps({
+                "batch": batch, "outcome": "correction", "built": "lot-1", "round": 1,
+            }),
+        )
+        check(closed.returncode == 0, closed.stdout + closed.stderr)
+    before = len(journal_lines())
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    opened = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode != 0 and len(journal_lines()) == before,
+          "a Correction Round opened after reordered batch terminals")
+    check(not os.path.lexists(os.path.join(WORKSPACE, "correction-round-open-in-progress")),
+          "reordered batch terminals published an opening marker")
+
+
+@test
 def correction_helper_owned_supersession_requires_its_complete_move():
     state = seed_unopened_correction_allocation("helper-owned-supersession")
     helper_path = os.path.join(
@@ -6066,6 +7984,511 @@ def replace_directory_with_alias(path, label):
     sentinel.write_text("unchanged sentinel\n", encoding="utf-8")
     path.symlink_to(foreign, target_is_directory=True)
     return backup, sentinel
+
+
+@test
+def correction_workspace_anchor_never_replaces_a_late_destination():
+    reset()
+    authority = load_common_module("correction_authority")
+    directory = pathlib.Path(WORKSPACE) / "corrections" / "anchor-race"
+    directory.mkdir(parents=True)
+
+    source_path = directory / "source.md"
+    destination_path = directory / "destination.md"
+    source_path.write_bytes(b"frozen authority\n")
+    with authority.WorkspaceFileAnchor(
+        WORKSPACE, "corrections/anchor-race/source.md", "the raced move source",
+    ) as source, authority.WorkspaceFileAnchor(
+        WORKSPACE, "corrections/anchor-race/destination.md", "the raced move destination",
+    ) as destination:
+        check(source.read_regular() == b"frozen authority\n",
+              "the raced move did not accept its exact source")
+        check(destination.status() is None, "the raced move destination was not absent")
+        destination_path.write_bytes(b"foreign destination\n")
+        try:
+            source.replace_to(destination)
+        except (OSError, ValueError):
+            pass
+        else:
+            raise AssertionError("the anchored move replaced a late destination")
+    check(source_path.read_bytes() == b"frozen authority\n",
+          "the refused anchored move removed or changed its source")
+    check(destination_path.read_bytes() == b"foreign destination\n",
+          "the refused anchored move changed the late destination")
+
+    publish_path = directory / "published.md"
+    with authority.WorkspaceFileAnchor(
+        WORKSPACE, "corrections/anchor-race/published.md", "the raced publication",
+    ) as target:
+        original_status = target.status
+        raced = False
+
+        def status_with_late_destination():
+            nonlocal raced
+            current = original_status()
+            if current is None and not raced:
+                raced = True
+                publish_path.write_bytes(b"foreign publication\n")
+            return current
+
+        target.status = status_with_late_destination
+        try:
+            target.publish(b"frozen publication\n")
+        except (OSError, ValueError):
+            pass
+        else:
+            raise AssertionError("the anchored publication replaced a late destination")
+    check(publish_path.read_bytes() == b"foreign publication\n",
+          "the refused anchored publication changed the late destination")
+    check(not list(directory.glob(".published.md.tmp-*")),
+          "the refused anchored publication retained its temporary file")
+
+
+@test
+def correction_workspace_anchor_binds_the_accepted_source_and_publication_inode():
+    reset()
+    authority = load_common_module("correction_authority")
+    directory = pathlib.Path(WORKSPACE) / "corrections" / "inode-race"
+    directory.mkdir(parents=True)
+
+    source_path = directory / "source.md"
+    destination_path = directory / "destination.md"
+    source_path.write_bytes(b"accepted authority\n")
+    with authority.WorkspaceFileAnchor(
+        WORKSPACE, "corrections/inode-race/source.md", "the accepted move source",
+    ) as source, authority.WorkspaceFileAnchor(
+        WORKSPACE, "corrections/inode-race/destination.md", "the accepted move destination",
+    ) as destination:
+        check(source.read_regular() == b"accepted authority\n",
+              "the move did not retain its accepted source")
+        replacement = directory / "replacement.md"
+        replacement.write_bytes(b"unexpected source\n")
+        os.replace(replacement, source_path)
+        try:
+            source.replace_to(destination)
+        except (OSError, ValueError):
+            pass
+        else:
+            raise AssertionError("the anchored move published a replacement source inode")
+    check(source_path.read_bytes() == b"unexpected source\n",
+          "the refused move did not preserve the replacement source")
+    check(not destination_path.exists(),
+          "the refused move published a destination from the replacement source")
+
+    publication_path = directory / "publication.md"
+    original_replace = authority.os.replace
+    injected = False
+
+    def replace_private_temporary(source, destination, *args, **kwargs):
+        nonlocal injected
+        if pathlib.PurePath(source).name.startswith(".publication.md.tmp-"):
+            injected = True
+            source_directory = kwargs.get("src_dir_fd")
+            os.unlink(source, dir_fd=source_directory)
+            descriptor = os.open(
+                source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444,
+                dir_fd=source_directory,
+            )
+            try:
+                os.write(descriptor, b"unexpected temporary inode\n")
+            finally:
+                os.close(descriptor)
+        return original_replace(source, destination, *args, **kwargs)
+
+    authority.os.replace = replace_private_temporary
+    refused = False
+    try:
+        with authority.WorkspaceFileAnchor(
+            WORKSPACE, "corrections/inode-race/publication.md", "the accepted publication",
+        ) as target:
+            try:
+                target.publish(b"accepted publication\n")
+            except OSError:
+                refused = True
+    finally:
+        authority.os.replace = original_replace
+    if refused:
+        check(not publication_path.exists(),
+              "a refused publication left unexpected canonical bytes")
+    else:
+        check(not injected and publication_path.read_bytes() == b"accepted publication\n",
+              "the publication used a replaceable private pathname")
+
+
+@test
+def correction_workspace_anchor_never_unlinks_a_replacement_source():
+    reset()
+    authority = load_common_module("correction_authority")
+    directory = pathlib.Path(WORKSPACE) / "corrections" / "retirement-race"
+    directory.mkdir(parents=True)
+    source_path = directory / "source.md"
+    destination_path = directory / "destination.md"
+    source_path.write_bytes(b"accepted authority\n")
+    original_rename = authority._rename_without_replace_at
+    injected = False
+
+    def replace_at_retirement(source_directory, source, target_directory, target):
+        nonlocal injected
+        result = original_rename(source_directory, source, target_directory, target)
+        if source == "source.md" and target == "destination.md" and not injected:
+            injected = True
+            source_path.write_bytes(b"replacement source\n")
+        return result
+
+    authority._rename_without_replace_at = replace_at_retirement
+    refused = False
+    try:
+        with authority.WorkspaceFileAnchor(
+            WORKSPACE, "corrections/retirement-race/source.md", "the retired move source",
+        ) as source, authority.WorkspaceFileAnchor(
+            WORKSPACE, "corrections/retirement-race/destination.md",
+            "the retired move destination",
+        ) as destination:
+            source.read_regular()
+            try:
+                source.replace_to(destination)
+            except (OSError, ValueError):
+                refused = True
+    finally:
+        authority._rename_without_replace_at = original_rename
+    check(refused and injected, "the source retirement did not detect its exact race")
+    check(source_path.read_bytes() == b"replacement source\n",
+          "the source retirement removed the replacement source")
+    check(destination_path.read_bytes() == b"accepted authority\n",
+          "the source retirement lost its accepted linked destination")
+
+
+@test
+def correction_workspace_anchor_retains_recovery_when_destination_changes():
+    reset()
+    authority = load_common_module("correction_authority")
+    directory = pathlib.Path(WORKSPACE) / "corrections" / "destination-race"
+    directory.mkdir(parents=True)
+    source_path = directory / "source.md"
+    destination_path = directory / "destination.md"
+    recovery_path = directory / ".source.md.correction-recovery"
+    source_path.write_bytes(b"accepted authority\n")
+    refused = False
+    with authority.WorkspaceFileAnchor(
+        WORKSPACE, "corrections/destination-race/source.md", "the destination-race source",
+    ) as source, authority.WorkspaceFileAnchor(
+        WORKSPACE, "corrections/destination-race/destination.md",
+        "the destination-race destination",
+    ) as destination:
+        source.read_regular()
+        original_status = source.status
+        injected = False
+
+        def status_with_changed_destination():
+            nonlocal injected
+            current = original_status()
+            if current is None and destination_path.exists() and not injected:
+                injected = True
+                destination_path.unlink()
+                destination_path.write_bytes(b"later destination\n")
+            return current
+
+        source.status = status_with_changed_destination
+        try:
+            source.replace_to(destination)
+        except (OSError, ValueError):
+            refused = True
+    check(refused and injected, "the move accepted a pre-return destination change")
+    check(not source_path.exists()
+          and destination_path.read_bytes() == b"later destination\n"
+          and recovery_path.read_bytes() == b"accepted authority\n",
+          "the move lost its accepted inode or changed the later destination")
+
+
+@test
+def correction_content_object_publication_uses_one_anonymous_accepted_inode():
+    reset()
+    authority = load_common_module("correction_authority")
+    payload = b"immutable correction authority\n"
+    digest = hashlib.sha256(payload).hexdigest()
+    observed = []
+    original_link = authority._link_descriptor_without_replace
+
+    def inspect_descriptor_publication(source_descriptor, target_directory, target):
+        object_directory = pathlib.Path(WORKSPACE) / "corrections" / "lot-1" / "objects"
+        check(not list(object_directory.glob(f".{target}.*.tmp")),
+              "the content-object publisher exposed a replaceable named temporary")
+        accepted = os.fstat(source_descriptor)
+        result = original_link(source_descriptor, target_directory, target)
+        observed.append((accepted.st_dev, accepted.st_ino))
+        return result
+
+    authority._link_descriptor_without_replace = inspect_descriptor_publication
+    try:
+        published = authority.publish_content_object(
+            WORKSPACE, "lot-1", payload, ".md",
+        )
+    finally:
+        authority._link_descriptor_without_replace = original_link
+    status = pathlib.Path(published).stat()
+    check(observed == [(status.st_dev, status.st_ino)],
+          "the content-object target does not use the accepted anonymous inode")
+    check(pathlib.Path(published).read_bytes() == payload
+          and pathlib.Path(published).name == f"sha256-{digest}.md",
+          "the content-object publisher changed its digest-named bytes")
+    repeated = authority.publish_content_object(WORKSPACE, "lot-1", payload, ".md")
+    check(repeated == published,
+          "the accepted content-object destination is not idempotent")
+
+
+@test
+def correction_helpers_preserve_late_destinations_and_resume_the_same_owner():
+    def load_helper(name, label):
+        path = os.path.join(WORKSPACE, "prompts", "construction", f"{name}.py")
+        specification = importlib.util.spec_from_file_location(label, path)
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        return helper
+
+    for target_index in range(2):
+        reset()
+        seed_unopened_correction_allocation(f"late-opening-{target_index}")
+        closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+        check(closed.returncode == 0, closed.stdout + closed.stderr)
+        helper = load_helper("correction_round_open", f"late_opening_{target_index}")
+        args = SimpleNamespace(built="lot-1", round=1)
+        _, event = helper.current_close(args)
+        operation = helper.operation_identity(args, event["pass_close"])
+        account = helper.derive_account(args, operation)
+        for restore in account["restores"]:
+            os.remove(pathlib.Path(WORKSPACE) / restore["target"])
+        selected = account["restores"][target_index]
+        selected_path = pathlib.Path(WORKSPACE) / selected["target"]
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        before = len(journal_lines())
+        original_publish = helper.WorkspaceFileAnchor.publish
+        injected = False
+
+        def raced_publish(anchor, payload, mode=0o444):
+            nonlocal injected
+            if anchor.relative.as_posix() == selected["target"] and not injected:
+                original_status = anchor.status
+
+                def status_with_late_destination():
+                    nonlocal injected
+                    current = original_status()
+                    if current is None and not injected:
+                        injected = True
+                        selected_path.write_bytes(b"foreign opening destination\n")
+                    return current
+
+                anchor.status = status_with_late_destination
+            return original_publish(anchor, payload, mode)
+
+        helper.WorkspaceFileAnchor.publish = raced_publish
+        refused = False
+        try:
+            helper.run(args)
+        except OSError:
+            refused = True
+        finally:
+            helper.WorkspaceFileAnchor.publish = original_publish
+        check(refused and marker.is_file() and len(journal_lines()) == before,
+              f"opening destination {target_index} did not retain one refused owner")
+        check(selected_path.read_bytes() == b"foreign opening destination\n",
+              f"opening destination {target_index} replaced late bytes")
+        check((pathlib.Path(WORKSPACE) / selected["object"]).is_file(),
+              f"opening destination {target_index} removed its immutable source")
+        selected_path.unlink()
+        helper.run(args)
+        check(not marker.exists() and len(journal_lines()) == before + 1,
+              f"opening destination {target_index} did not resume its exact owner")
+
+    for target_index in range(2):
+        reset()
+        state = seed_unopened_correction_allocation(f"late-supersession-{target_index}")
+        seed_in_pass_controller_successor(state["opening_index"])
+        helper = load_helper(
+            "correction_round_supersede", f"late_supersession_{target_index}",
+        )
+        args = SimpleNamespace(
+            built="lot-1", round=1, allocation=state["allocation_proof"],
+            outcome="reclassify",
+            reason="The accepted product authority changed the correction base.",
+        )
+        operation = helper.operation_identity(args)
+        account = helper.derive_account(args, operation)
+        pairs = [
+            (account["source"], account["destination"]),
+            (account["confirmed"], account["confirmed_destination"]),
+        ]
+        selected_source, selected_destination = pairs[target_index]
+        selected_source_path = pathlib.Path(WORKSPACE) / selected_source
+        selected_destination_path = pathlib.Path(WORKSPACE) / selected_destination
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        before = len(journal_lines())
+        original_replace = helper.WorkspaceFileAnchor.replace_to
+        injected = False
+
+        def raced_replace(source, destination):
+            nonlocal injected
+            if destination.relative.as_posix() == selected_destination and not injected:
+                injected = True
+                selected_destination_path.write_bytes(b"foreign supersession destination\n")
+            return original_replace(source, destination)
+
+        helper.WorkspaceFileAnchor.replace_to = raced_replace
+        refused = False
+        try:
+            helper.run(args)
+        except OSError:
+            refused = True
+        finally:
+            helper.WorkspaceFileAnchor.replace_to = original_replace
+        check(refused and marker.is_file() and len(journal_lines()) == before,
+              f"supersession destination {target_index} did not retain one refused owner")
+        check(selected_source_path.is_file()
+              and selected_destination_path.read_bytes() == b"foreign supersession destination\n",
+              f"supersession destination {target_index} changed source or late bytes")
+        selected_destination_path.unlink()
+        helper.run(args)
+        check(not marker.exists() and len(journal_lines()) == before + 1,
+              f"supersession destination {target_index} did not resume its exact owner")
+
+    for target_index in range(2):
+        reset()
+        seed_unopened_correction_allocation(f"late-void-{target_index}")
+        amendment = run_progress(
+            "note", "amendment.opened",
+            "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+            "--text", "change product authority; return to this PRODUCT REVIEW",
+        )
+        check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+        helper = load_helper("correction_round_void", f"late_void_{target_index}")
+        args = SimpleNamespace(built="lot-1")
+        operation = helper.operation_identity(args)
+        account = helper.derive_account(args, operation)
+        physical = account["event"]["correction_void"]
+        pairs = [
+            (physical["confirmed"], physical["confirmed_moved_to"]),
+            (physical["artifact"], physical["artifact_moved_to"]),
+        ]
+        selected_source, selected_destination = pairs[target_index]
+        selected_source_path = pathlib.Path(WORKSPACE) / selected_source
+        selected_destination_path = pathlib.Path(WORKSPACE) / selected_destination
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        before = len(journal_lines())
+        original_replace = helper.WorkspaceFileAnchor.replace_to
+        injected = False
+
+        def raced_replace(source, destination):
+            nonlocal injected
+            if destination.relative.as_posix() == selected_destination and not injected:
+                injected = True
+                selected_destination_path.write_bytes(b"foreign void destination\n")
+            return original_replace(source, destination)
+
+        helper.WorkspaceFileAnchor.replace_to = raced_replace
+        refused = False
+        try:
+            helper.run(args)
+        except OSError:
+            refused = True
+        finally:
+            helper.WorkspaceFileAnchor.replace_to = original_replace
+        check(refused and marker.is_file() and len(journal_lines()) == before,
+              f"void destination {target_index} did not retain one refused owner")
+        check(selected_source_path.is_file()
+              and selected_destination_path.read_bytes() == b"foreign void destination\n",
+              f"void destination {target_index} changed source or late bytes")
+        selected_destination_path.unlink()
+        helper.run(args)
+        check(not marker.exists() and len(journal_lines()) == before + 1,
+              f"void destination {target_index} did not resume its exact owner")
+
+
+@test
+def correction_move_helpers_reject_replaced_sources_and_resume_accepted_destinations():
+    def load_helper(name, label):
+        path = os.path.join(WORKSPACE, "prompts", "construction", f"{name}.py")
+        specification = importlib.util.spec_from_file_location(label, path)
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        return helper
+
+    for workflow, target_index in (
+        ("supersession", 0), ("supersession", 1), ("void", 0), ("void", 1),
+    ):
+        reset()
+        if workflow == "supersession":
+            state = seed_unopened_correction_allocation(f"source-race-{workflow}-{target_index}")
+            seed_in_pass_controller_successor(state["opening_index"])
+            helper = load_helper(
+                "correction_round_supersede", f"source_race_{workflow}_{target_index}",
+            )
+            args = SimpleNamespace(
+                built="lot-1", round=1, allocation=state["allocation_proof"],
+                outcome="reclassify",
+                reason="The accepted product authority changed the correction base.",
+            )
+            account = helper.derive_account(args, helper.operation_identity(args))
+            pairs = [
+                (account["source"], account["destination"]),
+                (account["confirmed"], account["confirmed_destination"]),
+            ]
+        else:
+            seed_unopened_correction_allocation(f"source-race-{workflow}-{target_index}")
+            amendment = run_progress(
+                "note", "amendment.opened",
+                "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+                "--text", "change product authority; return to this PRODUCT REVIEW",
+            )
+            check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+            helper = load_helper(
+                "correction_round_void", f"source_race_{workflow}_{target_index}",
+            )
+            args = SimpleNamespace(built="lot-1")
+            account = helper.derive_account(args, helper.operation_identity(args))
+            physical = account["event"]["correction_void"]
+            pairs = [
+                (physical["confirmed"], physical["confirmed_moved_to"]),
+                (physical["artifact"], physical["artifact_moved_to"]),
+            ]
+
+        selected_source, selected_destination = pairs[target_index]
+        source_path = pathlib.Path(WORKSPACE) / selected_source
+        destination_path = pathlib.Path(WORKSPACE) / selected_destination
+        accepted_payload = source_path.read_bytes()
+        recovery_path = pathlib.Path(WORKSPACE) / helper.recovery_relative_path(selected_source)
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        before = len(journal_lines())
+        original_replace = helper.WorkspaceFileAnchor.replace_to
+        replace_globals = original_replace.__globals__
+        original_rename = replace_globals["_rename_without_replace_at"]
+        injected = False
+
+        def replace_source_at_retirement(source_directory, source, target_directory, target):
+            nonlocal injected
+            result = original_rename(source_directory, source, target_directory, target)
+            if source == source_path.name and target == destination_path.name and not injected:
+                injected = True
+                source_path.write_bytes(b"unexpected replacement source\n")
+            return result
+
+        replace_globals["_rename_without_replace_at"] = replace_source_at_retirement
+        refused = False
+        try:
+            helper.run(args)
+        except (OSError, ValueError):
+            refused = True
+        finally:
+            replace_globals["_rename_without_replace_at"] = original_rename
+        check(refused and marker.is_file() and len(journal_lines()) == before,
+              f"{workflow} source {target_index} did not retain one refused owner")
+        check(source_path.read_bytes() == b"unexpected replacement source\n"
+              and destination_path.read_bytes() == accepted_payload
+              and recovery_path.read_bytes() == accepted_payload,
+              f"{workflow} source {target_index} published or removed unexpected bytes")
+        source_path.unlink()
+        helper.run(args)
+        check(not marker.exists() and not recovery_path.exists()
+              and len(journal_lines()) == before + 1,
+              f"{workflow} source {target_index} did not resume its exact owner")
 
 
 @test
@@ -6267,6 +8690,77 @@ def correction_round_opening_restores_only_exact_frozen_artifacts():
           "the opening adopted foreign canonical artifact bytes")
     check(not os.path.lexists(os.path.join(WORKSPACE, "correction-round-open-in-progress")),
           "a foreign artifact refusal left a pending opening owner")
+
+
+@test
+def historical_correction_opening_uses_only_frozen_authority_without_publication():
+    state = seed_opened_controller_successor_correction("historical-head")
+    write_project("later-authority.txt", "later accepted task bytes\n")
+    subprocess.run(["git", "-C", REPO, "add", "later-authority.txt"], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-qm",
+        "test: move beyond correction opening",
+    ], check=True)
+    progress_module = load_common_module("progress")
+    lines = journal_lines()
+    historical = progress_module.normalize_correction_round_opening(
+        lines[:state["opening_index"]], state["opening"],
+        "the historical Correction Round opening", historical=True,
+    )
+    check(historical == state["opening"], historical)
+
+    for path_key in ("confirmed_artifact", "artifact"):
+        os.remove(os.path.join(WORKSPACE, *state["close"][path_key].split("/")))
+    historical = progress_module.normalize_correction_round_opening(
+        lines[:state["opening_index"]], state["opening"],
+        "the historical Correction Round opening", historical=True,
+    )
+    check(historical == state["opening"], historical)
+    for path_key in ("confirmed_artifact", "artifact"):
+        check(not os.path.lexists(os.path.join(WORKSPACE, *state["close"][path_key].split("/"))),
+              f"historical validation recreated {path_key}")
+
+    reset()
+    state = seed_opened_controller_successor_correction("historical-object-loss")
+    missing = os.path.join(WORKSPACE, *state["close"]["artifact_object"].split("/"))
+    os.remove(missing)
+    progress_module = load_common_module("progress")
+    lines = journal_lines()
+    try:
+        progress_module.normalize_correction_round_opening(
+            lines[:state["opening_index"]], state["opening"],
+            "the historical Correction Round opening", historical=True,
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("historical validation accepted a missing immutable artifact object")
+    check(not os.path.lexists(missing),
+          "historical validation recreated a missing immutable artifact object")
+
+
+@test
+def historical_correction_amendment_replays_its_frozen_reclassification_predecessor():
+    state = seed_reclassified_correction_allocation("historical-amendment-predecessor")
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "change product authority; return to this PRODUCT REVIEW",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    amendment_data = journal_lines()[-1]["data"]
+    check(amendment_data.get("correction_allocation") is None
+          and amendment_data.get("correction_supersession") == state["supersession_proof"],
+          "the AMENDMENT opening did not freeze its reclassification predecessor")
+    write_project("later-authority.txt", "later accepted bytes\n")
+    subprocess.run(["git", "-C", REPO, "add", "later-authority.txt"], check=True)
+    subprocess.run([
+        "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-qm",
+        "test: move beyond amendment opening",
+    ], check=True)
+    historical = run_progress("amendment-state-check")
+    check(historical.returncode == 0 and "AMENDMENT STATE VALID" in historical.stdout,
+          historical.stdout + historical.stderr)
 
 
 @test
@@ -6731,7 +9225,7 @@ def baseline_pass_requires_the_exact_amendment_successor_owner():
                                if entry.get("kind") == "pass.opened")
     void_index = next(index for index, entry in enumerate(entries)
                       if entry.get("kind") == "pass.closed"
-                      and entry.get("data") == {"voided": True})
+                      and entry.get("data", {}).get("voided") is True)
     amendment_commit_index = next(index for index, entry in enumerate(entries)
                                   if entry.get("kind") == "amendment.committed")
     authority = load_common_module("correction_authority")
@@ -6859,7 +9353,7 @@ def amendment_successor_preserves_the_latest_in_pass_controller_generation():
     entries = journal_lines()
     void_index = next(index for index, entry in enumerate(entries)
                       if entry.get("kind") == "pass.closed"
-                      and entry.get("data") == {"voided": True})
+                      and entry.get("data", {}).get("voided") is True)
     amendment_commit_index = next(index for index, entry in enumerate(entries)
                                   if entry.get("kind") == "amendment.committed")
     account = {
@@ -7468,6 +9962,7 @@ def pass_close_rejects_malformed_shapes_and_preserves_amendment_void():
     check(opening.returncode == 0, opening.stdout + opening.stderr)
     voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
     check(voided.returncode == 0, voided.stdout + voided.stderr)
+    check(journal_lines()[-1]["data"] == {"voided": True}, journal_lines()[-1])
     duplicate = run_progress("note", "pass.closed", "--data", '{"voided":true}')
     check(duplicate.returncode != 0, "a duplicate amendment-owned void close was accepted")
 
@@ -9742,6 +12237,7 @@ def main():
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
             "construction_review.py", "correction_round.py",
             "correction_round_supersede.py", "correction-round-supersede.sh",
+            "correction_round_void.py", "correction-round-void.sh",
             "correction_round_open.py", "correction-round-open.sh",
             "correction_round_baseline.py", "correction-round-baseline.sh",
             "correction_product_authority.py", "correction-product-authority.sh",

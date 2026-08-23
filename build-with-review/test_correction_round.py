@@ -319,6 +319,101 @@ Keep the example inside this Design."""
 
 
 @test
+def correction_artifact_rejects_every_unowned_structural_interval():
+    module = load_module("correction_round_closed_structure", CONSTRUCTION / "correction_round.py")
+    original = valid_artifact()
+    reversed_sections = original.replace(
+        b"### Design\n[written at correction task Design - see below]\n\n"
+        b"### Disagreement\n[optional - same accepted alternative contract as an ordinary task]\n",
+        b"### Disagreement\n[optional - same accepted alternative contract as an ordinary task]\n\n"
+        b"### Design\n[written at correction task Design - see below]\n",
+    )
+    cases = (
+        original.replace(
+            b"F2: task 1\n\n---",
+            b"F2: task 1\n\n## Foreign account\nUnowned root bytes.\n\n---",
+        ),
+        original.replace(
+            b"### Disagreement",
+            b"### Foreign authority\nUnowned task bytes.\n\n### Disagreement",
+        ),
+        reversed_sections,
+    )
+    for raw in cases:
+        try:
+            module.parse_artifact_bytes(raw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted an unowned Correction Round structural interval")
+
+
+@test
+def correction_artifact_rejects_indented_commonmark_headings():
+    module = load_module(
+        "correction_round_indented_headings", CONSTRUCTION / "correction_round.py",
+    )
+    original = valid_artifact()
+    for spaces in (b" ", b"  ", b"   "):
+        cases = (
+            original.replace(
+                b"F2: task 1\n\n---",
+                b"F2: task 1\n\n" + spaces + b"## Foreign account\nUnowned root bytes.\n\n---",
+            ),
+            original.replace(
+                b"### Disagreement",
+                spaces + b"### Foreign authority\nUnowned task bytes.\n\n### Disagreement",
+            ),
+            original.replace(b"### Design", spaces + b"### Design"),
+            original.replace(b"### Disagreement", spaces + b"### Disagreement"),
+        )
+        for raw in cases:
+            try:
+                module.parse_artifact_bytes(raw)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(
+                    f"accepted a CommonMark heading indented by {len(spaces)} spaces",
+                )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        artifact = pathlib.Path(temporary) / "historical-round.md"
+        artifact.write_bytes(original.replace(
+            b"### Disagreement", b"  ### Disagreement",
+        ))
+        try:
+            module.parse_artifact(artifact)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("the file-backed parser accepted an indented historical section")
+
+
+@test
+def indented_headings_inside_both_commonmark_fences_remain_design_data():
+    module = load_module(
+        "correction_round_indented_fences", CONSTRUCTION / "correction_round.py",
+    )
+    design = """Use both CommonMark fence kinds.
+
+ ```markdown
+ ### Foreign backtick heading
+  ## Task 9 - Example only
+ ```
+
+  ~~~markdown
+ ### Foreign tilde heading
+   ### Disagreement
+  ~~~
+
+Keep every fenced heading inside this Design."""
+    state = module.parse_artifact_bytes(valid_artifact(design=design))
+    check(len(state["tasks"]) == 1, state)
+    check(state["tasks"][0]["design_sha256"], state)
+
+
+@test
 def malformed_coverage_dependencies_and_consumer_ids_refuse():
     module = load_module("correction_round_refusal", CONSTRUCTION / "correction_round.py")
     cases = (

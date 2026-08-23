@@ -21,12 +21,14 @@ from correction_authority import (  # noqa: E402
     CorrectionAuthorityLease,
     WorkspaceFileAnchor,
     normalize_allocation,
+    recovery_relative_path,
 )
 
 MARKER_NAME = "correction-allocation-supersede-in-progress"
 BLOCKING_MARKERS = {
     "correction-artifact-in-progress",
     "correction-round-open-in-progress",
+    "correction-round-void-in-progress",
     "correction-product-authority-in-progress",
 }
 
@@ -62,9 +64,17 @@ def read_real_file(path, subject):
 
 def frozen_member(source, destination, subject, *, allow_moved):
     with WorkspaceFileAnchor(WORKSPACE, source, f"{subject} source") as source_file, \
-            WorkspaceFileAnchor(WORKSPACE, destination, f"{subject} destination") as destination_file:
+            WorkspaceFileAnchor(WORKSPACE, destination, f"{subject} destination") as destination_file, \
+            WorkspaceFileAnchor(
+                WORKSPACE, recovery_relative_path(source), f"{subject} recovery",
+            ) as recovery_file:
         source_status = source_file.status()
         destination_status = destination_file.status()
+        recovery_status = recovery_file.status()
+        if recovery_status is not None:
+            if not allow_moved:
+                fail(f"{subject} recovery precedes its owner marker")
+            return recovery_file.read_regular()
         if source_status is not None and destination_status is not None:
             fail(f"both source and destination exist for {subject}")
         if not allow_moved and source_status is None:
@@ -304,37 +314,63 @@ def finish_move(account):
     # Open and validate every parent before the first move. A later member
     # cannot leave an earlier member moved after a component-alias refusal.
     with contextlib.ExitStack() as stack:
-        anchors = [
-            stack.enter_context(WorkspaceFileAnchor(
-                WORKSPACE, account["source"], "the allocation supersession source",
-            )),
-            stack.enter_context(WorkspaceFileAnchor(
-                WORKSPACE, account["destination"], "the allocation supersession destination",
-            )),
-            stack.enter_context(WorkspaceFileAnchor(
-                WORKSPACE, account["confirmed"], "the retained confirmed artifact",
-            )),
-        ]
+        source = stack.enter_context(WorkspaceFileAnchor(
+            WORKSPACE, account["source"], "the allocation supersession source",
+        ))
+        destination = stack.enter_context(WorkspaceFileAnchor(
+            WORKSPACE, account["destination"], "the allocation supersession destination",
+        ))
+        source_recovery = stack.enter_context(WorkspaceFileAnchor(
+            WORKSPACE, recovery_relative_path(account["source"]),
+            "the allocation supersession source recovery",
+        ))
+        confirmed = stack.enter_context(WorkspaceFileAnchor(
+            WORKSPACE, account["confirmed"], "the retained confirmed artifact",
+        ))
         confirmed_destination_value = account["confirmed_destination"]
+        confirmed_destination = None
+        confirmed_recovery = None
         if confirmed_destination_value is not None:
-            anchors.append(stack.enter_context(WorkspaceFileAnchor(
+            confirmed_destination = stack.enter_context(WorkspaceFileAnchor(
                 WORKSPACE, confirmed_destination_value,
                 "the allocation supersession confirmed destination",
-            )))
-        for anchor in anchors:
-            anchor.verify()
-        source, destination, confirmed = anchors[:3]
-        source_status = source.status()
-        destination_status = destination.status()
-        if source_status is not None and destination_status is not None:
-            fail("both source and destination exist for the allocation supersession")
-        if source_status is not None and sha256(source.read_regular()) != account["source_sha256"]:
-            fail("the allocation supersession source changed after marker publication")
-        if source_status is None and (
-            destination_status is None
-            or sha256(destination.read_regular()) != account["source_sha256"]
-        ):
-            fail("the allocation supersession destination does not contain the frozen artifact")
+            ))
+            confirmed_recovery = stack.enter_context(WorkspaceFileAnchor(
+                WORKSPACE, recovery_relative_path(account["confirmed"]),
+                "the allocation supersession confirmed recovery",
+            ))
+
+        def finish_member(member_source, member_destination, recovery, digest, subject):
+            for anchor in (member_source, member_destination, recovery):
+                anchor.verify()
+            source_status = member_source.status()
+            destination_status = member_destination.status()
+            recovery_status = recovery.status()
+            source_payload = member_source.read_regular() if source_status is not None else None
+            destination_payload = member_destination.read_regular() \
+                if destination_status is not None else None
+            recovery_payload = recovery.read_regular() if recovery_status is not None else None
+            if source_payload is not None and sha256(source_payload) != digest:
+                fail(f"{subject} source changed after marker publication")
+            if destination_payload is not None and sha256(destination_payload) != digest:
+                fail(f"{subject} destination changed after marker publication")
+            if recovery_payload is not None and sha256(recovery_payload) != digest:
+                fail(f"{subject} recovery changed after marker publication")
+            if source_status is not None and destination_status is not None:
+                fail(f"both source and destination exist for {subject}")
+            if source_status is not None:
+                member_source.replace_to(member_destination)
+            elif destination_status is None:
+                if recovery_status is None:
+                    fail(f"{subject} has no recoverable frozen artifact")
+                recovery.link_to(member_destination)
+            if sha256(member_destination.read_regular()) != digest:
+                fail(f"{subject} destination changed after its move")
+
+        finish_member(
+            source, destination, source_recovery, account["source_sha256"],
+            "the allocation supersession",
+        )
 
         confirmed_status = confirmed.status()
         if confirmed_destination_value is None:
@@ -342,30 +378,23 @@ def finish_move(account):
                     or sha256(confirmed.read_regular()) != account["confirmed_sha256"]:
                 fail("the retained confirmed artifact changed after marker publication")
         else:
-            confirmed_destination = anchors[3]
-            destination_status = confirmed_destination.status()
-            if confirmed_status is not None and destination_status is not None:
-                fail("both confirmed source and destination exist for the allocation supersession")
-            if confirmed_status is not None \
-                    and sha256(confirmed.read_regular()) != account["confirmed_sha256"]:
-                fail("the confirmed source changed after marker publication")
-            if confirmed_status is None and (
-                destination_status is None
-                or sha256(confirmed_destination.read_regular()) != account["confirmed_sha256"]
-            ):
-                fail("the confirmed destination does not contain the frozen artifact")
+            finish_member(
+                confirmed, confirmed_destination, confirmed_recovery,
+                account["confirmed_sha256"], "the confirmed allocation supersession",
+            )
 
-        for anchor in anchors:
-            anchor.verify()
-        if source_status is not None:
-            source.replace_to(destination)
-        if confirmed_destination_value is not None and confirmed_status is not None:
-            confirmed.replace_to(anchors[3])
-        if sha256(destination.read_regular()) != account["source_sha256"]:
-            fail("the allocation supersession destination changed after its move")
-        if confirmed_destination_value is not None \
-                and sha256(anchors[3].read_regular()) != account["confirmed_sha256"]:
-            fail("the confirmed destination changed after its move")
+
+def cleanup_recoveries(account):
+    members = [(account["source"], account["source_sha256"])]
+    if account["confirmed_destination"] is not None:
+        members.append((account["confirmed"], account["confirmed_sha256"]))
+    for source, digest in members:
+        with WorkspaceFileAnchor(
+            WORKSPACE, recovery_relative_path(source),
+            "the completed allocation supersession recovery",
+        ) as recovery:
+            if recovery.status() is not None:
+                recovery.remove_exact(digest)
 
 
 def note_args(event):
@@ -397,6 +426,7 @@ def run(args):
         entries = progress.journal_entries()
         if exact_terminal(entries, account["event"]):
             finish_move(account)
+            cleanup_recoveries(account)
             marker.unlink()
             print("SUPERSESSION ALREADY RECORDED")
             return
@@ -409,6 +439,7 @@ def run(args):
         progress.cmd_note_with_lease(
             note_args(account["event"]), lease, operation, owner_marker=MARKER_NAME,
         )
+        cleanup_recoveries(account)
         marker.unlink()
         print(f"SUPERSEDED {args.allocation} -> {args.outcome}")
 

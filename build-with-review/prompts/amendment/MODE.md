@@ -90,7 +90,23 @@ unclosed edits, and park the very reviewers whose job is to re-verify the change
   below. Move each report aside with the usual gesture, the suffix saying why
   (`-superseded`), and discard the verdicts of any verifier that was running: a
   subagent cannot be stopped alone, and its output belongs to the voided pass. **And
-  close the voided pass in the journal, in the same gestures**:
+  close the voided pass in the journal, in the same gestures.** The accepted
+  `amendment.opened` line freezes the exact current Correction Round allocation, exact
+  `reclassify` supersession, or exact null predecessor. No later allocation can replace
+  that predecessor. If the pass has one
+  current unopened Correction Round allocation, its two canonical artifacts are physical
+  authority. Use the void helper. It moves every present artifact to its exact
+  generation-aware void path and appends the close under one recoverable owner:
+
+  ```
+  <workspace>/prompts/construction/correction-round-void.sh <built lot>
+  ```
+
+  Do not move the canonical confirmed or Correction Round artifact manually. The helper
+  owns those two paths. The ordinary lens and partial-report cleanup above remains separate.
+  Do not append that current-allocation close through generic `progress.py note`. If the
+  pass has no correction predecessor, or its exact `reclassify` supersession already
+  moved both artifacts, close it normally:
 
   ```
   progress.py note pass.closed --data '{"voided":true}'

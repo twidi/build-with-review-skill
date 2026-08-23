@@ -10,7 +10,6 @@ import os
 import pathlib
 import re
 import stat
-import tempfile
 
 LOT_RE = re.compile(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -33,9 +32,13 @@ EMPTY_FINAL_CHECKER_SET = {"schema": 1, "entries": []}
 EMPTY_FINAL_CHECKER_SET_SHA256 = hashlib.sha256(
     json.dumps(EMPTY_FINAL_CHECKER_SET, sort_keys=True, separators=(",", ":")).encode(),
 ).hexdigest()
-AT_FDCWD = -100
 RENAME_NOREPLACE = 1
 CORRECTION_LOCK_NAME = "correction-authority.lock"
+
+
+def recovery_relative_path(relative):
+    relative = pathlib.PurePosixPath(relative)
+    return relative.with_name(f".{relative.name}.correction-recovery")
 
 
 class WorkspaceFileAnchor:
@@ -47,6 +50,9 @@ class WorkspaceFileAnchor:
         self.subject = subject
         self._descriptor = None
         self._identities = []
+        self._accepted_descriptor = None
+        self._accepted_identity = None
+        self._accepted_sha256 = None
         if not self.workspace.is_absolute():
             raise ValueError(f"{subject} workspace is not absolute")
         if self.relative.is_absolute() or not self.relative.parts or any(
@@ -122,6 +128,11 @@ class WorkspaceFileAnchor:
         self.close()
 
     def close(self):
+        if self._accepted_descriptor is not None:
+            os.close(self._accepted_descriptor)
+            self._accepted_descriptor = None
+            self._accepted_identity = None
+            self._accepted_sha256 = None
         if self._descriptor is not None:
             os.close(self._descriptor)
             self._descriptor = None
@@ -168,31 +179,116 @@ class WorkspaceFileAnchor:
                 if not chunk:
                     break
                 chunks.append(chunk)
+            payload = b"".join(chunks)
+            self.verify()
+            if self._accepted_descriptor is not None:
+                os.close(self._accepted_descriptor)
+            self._accepted_descriptor = descriptor
+            self._accepted_identity = (opened.st_dev, opened.st_ino)
+            self._accepted_sha256 = hashlib.sha256(payload).hexdigest()
+            descriptor = None
+            return payload
         finally:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _accepted_status(self):
+        if self._accepted_descriptor is None or self._accepted_identity is None:
+            raise ValueError(f"{self.subject} has no accepted source inode")
+        accepted = os.fstat(self._accepted_descriptor)
+        if (accepted.st_dev, accepted.st_ino) != self._accepted_identity \
+                or hashlib.sha256(_read_descriptor(self._accepted_descriptor)).hexdigest() \
+                != self._accepted_sha256:
+            raise ValueError(f"{self.subject} changed after its accepted read")
+        return accepted
+
+    def link_to(self, destination):
         self.verify()
-        return b"".join(chunks)
+        destination.verify()
+        accepted = self._accepted_status()
+        current = self.status()
+        if current is None or (current.st_dev, current.st_ino) != self._accepted_identity:
+            raise ValueError(f"{self.subject} source inode changed before linking")
+        _link_descriptor_without_replace(
+            self._accepted_descriptor, destination._descriptor, destination.name,
+        )
+        published = destination.status()
+        if published is None or (published.st_dev, published.st_ino) \
+                != (accepted.st_dev, accepted.st_ino):
+            raise ValueError(f"{self.subject} linked another source inode")
+
+    def remove_exact(self, digest):
+        payload = self.read_regular()
+        if hashlib.sha256(payload).hexdigest() != digest:
+            raise ValueError(f"{self.subject} changes its exact cleanup bytes")
+        accepted = self._accepted_status()
+        current = self.status()
+        if current is None or (current.st_dev, current.st_ino) \
+                != (accepted.st_dev, accepted.st_ino):
+            raise ValueError(f"{self.subject} changed before exact cleanup")
+        os.unlink(self.name, dir_fd=self._descriptor)
+        self.verify()
+        os.fsync(self._descriptor)
 
     def replace_to(self, destination):
         self.verify()
         destination.verify()
-        os.replace(
-            self.name, destination.name,
-            src_dir_fd=self._descriptor, dst_dir_fd=destination._descriptor,
+        accepted = self._accepted_status()
+        current = self.status()
+        if current is None or (current.st_dev, current.st_ino) != self._accepted_identity:
+            raise ValueError(f"{self.subject} source inode changed before publication")
+        with WorkspaceFileAnchor(
+            self.workspace, recovery_relative_path(self.relative),
+            f"{self.subject} recovery",
+        ) as recovery:
+            recovery_status = recovery.status()
+            if recovery_status is None:
+                _link_descriptor_without_replace(
+                    self._accepted_descriptor, recovery._descriptor, recovery.name,
+                )
+                recovery_status = recovery.status()
+            if recovery_status is None or (recovery_status.st_dev, recovery_status.st_ino) \
+                    != self._accepted_identity \
+                    or hashlib.sha256(recovery.read_regular()).hexdigest() \
+                    != self._accepted_sha256:
+                raise ValueError(f"{self.subject} has another recovery inode")
+        _rename_without_replace_at(
+            self._descriptor, self.name, destination._descriptor, destination.name,
         )
+        published = destination.status()
+        identity = (accepted.st_dev, accepted.st_ino)
+        if published is None or (published.st_dev, published.st_ino) != identity \
+                or hashlib.sha256(_read_descriptor(self._accepted_descriptor)).hexdigest() \
+                != self._accepted_sha256:
+            try:
+                _rename_without_replace_at(
+                    destination._descriptor, destination.name, self._descriptor, self.name,
+                )
+            except OSError as exc:
+                raise ValueError(
+                    f"{self.subject} moved a replacement inode and could not restore it",
+                ) from exc
+            raise ValueError(f"{self.subject} moved a replacement source inode")
+        if self.status() is not None:
+            raise ValueError(f"{self.subject} source pathname changed during retirement")
+        completed = destination.status()
+        if completed is None or (completed.st_dev, completed.st_ino) != identity \
+                or hashlib.sha256(_read_descriptor(self._accepted_descriptor)).hexdigest() \
+                != self._accepted_sha256:
+            raise ValueError(f"{self.subject} destination changed before move completion")
         self.verify()
         destination.verify()
+        os.fsync(self._descriptor)
+        if destination._descriptor != self._descriptor:
+            os.fsync(destination._descriptor)
 
     def publish(self, payload, mode=0o444):
         if self.status() is not None:
             raise ValueError(f"{self.subject} already exists")
-        temporary = f".{self.name}.tmp-{os.getpid()}-{id(self)}"
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            mode,
-            dir_fd=self._descriptor,
-        )
+        temporary_flag = getattr(os, "O_TMPFILE", None)
+        if temporary_flag is None:
+            raise OSError(errno.ENOSYS, "O_TMPFILE is unavailable")
+        descriptor = os.open(".", os.O_RDWR | temporary_flag, mode, dir_fd=self._descriptor)
         try:
             offset = 0
             while offset < len(payload):
@@ -200,22 +296,19 @@ class WorkspaceFileAnchor:
                 if written <= 0:
                     raise OSError("short anchored workspace file write")
                 offset += written
+            os.fchmod(descriptor, mode)
             os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        try:
             self.verify()
-            os.replace(
-                temporary, self.name,
-                src_dir_fd=self._descriptor, dst_dir_fd=self._descriptor,
-            )
+            _link_descriptor_without_replace(descriptor, self._descriptor, self.name)
+            published = self.status()
+            accepted = os.fstat(descriptor)
+            if published is None or (published.st_dev, published.st_ino) \
+                    != (accepted.st_dev, accepted.st_ino):
+                raise ValueError(f"{self.subject} publication changed its accepted inode")
             self.verify()
             os.fsync(self._descriptor)
         finally:
-            try:
-                os.unlink(temporary, dir_fd=self._descriptor)
-            except FileNotFoundError:
-                pass
+            os.close(descriptor)
 
 
 class CorrectionAuthorityLease:
@@ -624,7 +717,33 @@ def _ensure_real_directory(path, subject):
     _lstat_real_directory(path, subject)
 
 
-def _rename_without_replace(source, target):
+def _read_descriptor(descriptor):
+    position = os.lseek(descriptor, 0, os.SEEK_CUR)
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 65_536)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.lseek(descriptor, position, os.SEEK_SET)
+
+
+def _link_descriptor_without_replace(source_descriptor, target_directory, target):
+    source = f"/proc/self/fd/{source_descriptor}"
+    opened = os.fstat(source_descriptor)
+    try:
+        proc_status = os.stat(source)
+    except OSError as exc:
+        raise OSError(errno.ENOSYS, "descriptor publication is unavailable") from exc
+    if (opened.st_dev, opened.st_ino) != (proc_status.st_dev, proc_status.st_ino):
+        raise OSError(errno.ESTALE, "descriptor publication changed its source inode")
+    os.link(source, target, dst_dir_fd=target_directory, follow_symlinks=True)
+
+
+def _rename_without_replace_at(source_directory, source, target_directory, target):
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
@@ -632,7 +751,9 @@ def _rename_without_replace(source, target):
     renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        AT_FDCWD, os.fsencode(source), AT_FDCWD, os.fsencode(target), RENAME_NOREPLACE,
+        source_directory, os.fsencode(source),
+        target_directory, os.fsencode(target),
+        RENAME_NOREPLACE,
     )
     if result != 0:
         error = ctypes.get_errno()
@@ -650,36 +771,14 @@ def publish_content_object(workspace, built, payload, suffix):
     for component in ("corrections", built, "objects"):
         cursor = cursor / component
         _ensure_real_directory(cursor, "a correction authority parent")
-    if target.exists() or target.is_symlink():
-        return validate_content_object(workspace, built, digest, suffix)
-
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent,
-    )
-    temporary = pathlib.Path(temporary_name)
-    try:
-        offset = 0
-        while offset < len(payload):
-            written = os.write(descriptor, payload[offset:])
-            if written <= 0:
-                raise OSError("short correction authority object write")
-            offset += written
-        os.fsync(descriptor)
-        os.fchmod(descriptor, 0o444)
-        os.close(descriptor)
-        descriptor = -1
+    relative = target.relative_to(workspace).as_posix()
+    with WorkspaceFileAnchor(
+        workspace, relative, "the correction authority object publication",
+    ) as publication:
+        if publication.status() is not None:
+            return validate_content_object(workspace, built, digest, suffix)
         try:
-            _rename_without_replace(temporary, target)
+            publication.publish(payload, mode=0o444)
         except FileExistsError:
             return validate_content_object(workspace, built, digest, suffix)
-        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary.exists():
-            temporary.unlink()
     return validate_content_object(workspace, built, digest, suffix)

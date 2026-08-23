@@ -170,7 +170,15 @@ complete result permits no later call. An ordinary `pass.closed` consumes the la
 pass opening, five settled report receipts and their final completed verifier calls. A positive close also authenticates its allocation,
 confirmed artifact, plan and carried batch work. A clean close refuses any allocation or
 unfinished answer work. A voided close consumes one exact product-review amendment
-opening. `lot.delivered` consumes only the current clean close, its reviewed SHA, the
+opening. That opening separates completed preservation carries from unfulfilled route
+owners. A completed amendment answer remains a carry and never selects AMENDMENT again.
+The opening freezes the exact current Correction Round allocation, `reclassify`
+supersession, or null predecessor. No later allocation can compete with it. A current
+Correction Round allocation void is helper-owned: its recoverable
+owner moves every present canonical confirmed and correction artifact before appending
+the exact physical close account. A `reclassify` supersession reuses its authenticated
+moved account, and a null correction predecessor moves nothing. `lot.delivered` consumes
+only the current clean close, its reviewed SHA, the
 exact ordinary-pass count and every required batch-close tail.
 
 If it rejects yours, you have the wrong name — **look it up where the call was given to

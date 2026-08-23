@@ -36,6 +36,7 @@ BLOCKING_MARKERS = {
     "rewind-in-progress",
     "correction-allocation-supersede-in-progress",
     "correction-artifact-in-progress",
+    "correction-round-void-in-progress",
     "correction-product-authority-in-progress",
 }
 TERMINALS = {
@@ -118,6 +119,9 @@ def raw_close(args):
     allocation = normalize_allocation(progress.note_data(allocation_entry))
     if allocation["round"] != args.round:
         fail("the Correction Round opening names another round")
+    progress.validate_correction_opening_batch_tails(
+        entries, close_index, data, allocation, "the Correction Round opening",
+    )
     event = {
         "schema": 1,
         "built": built,

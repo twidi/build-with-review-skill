@@ -13,6 +13,7 @@ PROOF_RE = re.compile(r"0|[1-9][0-9]*:[0-9a-f]{64}")
 FINDING_RE = re.compile(r"F([1-9][0-9]*)")
 TASK_HEADING_RE = re.compile(r"## Task ([1-9][0-9]*) - (\S(?:.*\S)?)")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+|$)")
 MAX_ARTIFACT_BYTES = 1_048_576
 IDENTITY_FIELDS = (
     "Built unit",
@@ -84,6 +85,10 @@ def structural_markdown_lines(lines):
                 continue
         structural.add(index)
     return structural
+
+
+def is_commonmark_atx_heading(raw):
+    return ATX_HEADING_RE.match(raw.rstrip("\r\n")) is not None
 
 
 def nonblank(lines, start=0, end=None):
@@ -313,7 +318,7 @@ def exact_section(lines, structural, start, end, heading, *, required):
     section_end = next(
         (
             index for index in range(section_start + 1, end)
-            if index in structural and lines[index].startswith("### ")
+            if index in structural and is_commonmark_atx_heading(lines[index])
         ),
         end,
     )
@@ -330,6 +335,18 @@ def parse_task(lines, structural, start, end, expected_task):
     if not match or int(match.group(1)) != expected_task:
         raise ValueError("the task headings are not exact and sequential")
     title = match.group(2)
+    owned_headings = [
+        (index, lines[index].rstrip("\r\n"))
+        for index in range(start + 1, end)
+        if index in structural and is_commonmark_atx_heading(lines[index])
+    ]
+    expected_headings = ["### Design"]
+    if any(value == "### Disagreement" for _, value in owned_headings):
+        expected_headings.append("### Disagreement")
+    if [value for _, value in owned_headings] != expected_headings:
+        raise ValueError(
+            f"Task {expected_task} does not have the exact Design then optional Disagreement structure",
+        )
     design_range, design = exact_section(
         lines, structural, start + 1, end, "### Design", required=True,
     )
@@ -560,14 +577,26 @@ def parse_artifact_bytes(raw, *, expected_built=None, expected_round=None):
     if state == "escalating" and not coverage:
         raise ValueError("the escalating Correction Round artifact has no remaining finding")
     tasks = []
-    for position, start in enumerate(task_starts):
-        previous = start - 1
-        while previous >= cursor and not lines[previous].strip():
-            previous -= 1
-        if previous < cursor or lines[previous].rstrip("\n") != "---":
-            raise ValueError("a Correction Round task has no exact separator")
-        end = task_starts[position + 1] if position + 1 < len(task_starts) else len(lines)
-        tasks.append(parse_task(lines, structural, start, end, position + 1))
+    if task_starts:
+        separators = []
+        for start in task_starts:
+            previous = start - 1
+            while previous >= cursor and not lines[previous].strip():
+                previous -= 1
+            if previous < cursor or previous not in structural \
+                    or lines[previous].rstrip("\r\n") != "---":
+                raise ValueError("a Correction Round task has no exact separator")
+            separators.append(previous)
+        if nonblank(lines, cursor, task_starts[0]) != [separators[0]]:
+            raise ValueError("the Correction Round root has unowned bytes before its tasks")
+        for position, start in enumerate(task_starts):
+            if nonblank(lines, separators[position] + 1, start):
+                raise ValueError("a Correction Round task separator has trailing prose")
+            end = separators[position + 1] \
+                if position + 1 < len(separators) else len(lines)
+            tasks.append(parse_task(lines, structural, start, end, position + 1))
+    elif nonblank(lines, cursor):
+        raise ValueError("the Correction Round root has unowned trailing bytes")
     if state == "active":
         task_ids = {task["task"] for task in tasks}
         for finding, owners in coverage.items():
