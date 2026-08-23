@@ -52,6 +52,18 @@ The second is where the defect lives, because nothing links those places by a sh
 **Ask, at every place you reach: what was this for?** A thing whose purpose was the thing
 being removed is a place to handle, whatever it is called.
 
+Before admitting a place, ask one counterfactual question:
+
+> **Could changing at least one current amendment source change this place's truth,
+> trigger, purpose, consumed state, produced state, or required verification?**
+
+If the answer is no, the place is outside Reach. Same file, same section, same entity, a
+neighbouring branch, or the same user journey is insufficient. Adjacency is not dependency.
+
+A neighbouring error branch that consumes none of the changed state is not a place. Keep an
+older ruling that governs that branch in Evidence or Reason when useful. Do not turn it into
+an amendment source.
+
 ---
 
 ## How you advance: hop by hop, and you count
@@ -73,6 +85,9 @@ answer identities. It is
 not decoration: it says whether the whole amendment is bounded. One member whose frontier
 will not close sends the whole amendment through the exit door.
 
+For every transitive step, name the predecessor place and the exact dependency in Evidence.
+Do not write only that both places share a file, entity, screen, branch, or journey.
+
 ### Where the references are
 
 - **for a decision written in the spec** — in the spec's own prose, by meaning;
@@ -91,7 +106,7 @@ One of four, and you say which:
 
 | | |
 |---|---|
-| **kept** | it survives the change untouched. Say why it does. |
+| **kept** | it depends on the change and remains valid under the new construction. Say why. |
 | **moved** | it still holds, but somewhere else in the sequence, or under another trigger |
 | **removed** | it existed only for what is being removed |
 | **DECISION** | **the spec does not settle what becomes of it, and the answer changes what a user lives with** |
@@ -136,6 +151,8 @@ Write the completion block first to the path your parent gives you. Immediately 
 last item and ordinary blank spacing, write one `## Reach account`. Put no verdict, handoff
 or free prose between them. Use this exact machine-audited shape:
 
+Every completion line starts at column zero. Never indent that block as Markdown code.
+
 ```
 ## Reach account
 
@@ -173,6 +190,12 @@ account.
 
 **A place you classify `kept` still gets an entry.** An absent place and a place nobody
 looked at are indistinguishable to whoever reads you.
+
+`kept` means that the place depends on the amendment. A rule that remains valid because the
+amendment cannot affect it is outside Reach.
+
+Older active rulings are preservation constraints. Name them in Evidence or Reason when they
+limit the handling. They are not current amendment owners: never add them to `Sources`.
 
 After the complete place account, write every admitted finding with
 `reviewer-common.md`'s fixed `## <CLASS> F<N> — <title>` heading. A `DECISION` place has

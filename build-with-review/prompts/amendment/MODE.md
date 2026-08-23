@@ -554,6 +554,24 @@ exact `failed`, `cancelled` or `superseded` retirement, and move its fixed repor
 Only then record the replacement `session-started`. A replacement before that retirement,
 or after a `done` retirement, refuses. The same order applies with or without a marker.
 
+If the original and replacement both fail because the frozen Reach contract is defective,
+the stable `not-converging` boundary still stops the run. A reviewed general contract fix
+can authorize one exceptional new physical reviewer. First deploy the corrected frozen
+prompt and helper. Preserve both failed reports and every journal line. Then record:
+
+```
+progress.py note reach.recovery.authorized --round <K> \
+  --data '{"reason":"reviewed-contract-correction"}' \
+  --text "The reviewed Reach contract correction authorizes one new physical reviewer."
+```
+
+The helper binds the exact amendment, sweep, original owner, replacement owner, both
+unsuccessful retirements, stable blocker and corrected completion contract. Only then
+launch one fresh reviewer for the same logical sweep. Its `session-started` consumes this
+authority. The recovery spends no new logical sweep or report-repair allowance. It never
+restores or edits a failed report. It authorizes no fourth physical reviewer and is not a
+run-level `resumed` boundary.
+
 The fourth line goes in when the sweep's complete preflight checks out — **acceptance, never mere
 arrival**: a block still being repaired leaves the report the sweep's, and a resume
 that finds no `sweep.reported` treats it as absent, which it is. **On a genuine open

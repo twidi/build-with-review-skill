@@ -108,6 +108,12 @@ has no special meaning because no payload byte is shell source.
 
 Every kind of event has a name, and **the script refuses one it does not know**.
 
+`reach.recovery.authorized` is one scoped operational authority. It binds one reviewed
+Reach contract correction to one logical sweep after its original and replacement owners
+both retire unsuccessfully and `not-converging` is durable. It authorizes one later
+physical Reach owner. It is never `resumed`: it cannot release a run pause or cross an
+abort boundary.
+
 An identified direct `ruling` has a second closed vocabulary inside its data: exactly
 `closed`, `spec-in-place`, `amendment`, `spec-fixer`, or `amendment-fixer`. The script
 also authenticates every owner-linked fixer dispatch, direct amendment opening and

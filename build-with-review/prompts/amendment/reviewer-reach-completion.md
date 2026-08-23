@@ -3,14 +3,15 @@
 **6 items.** Your report opens with this block, above the hop counts and the findings, and
 you paste it verbatim into your `parent` message. How to fill it: `completion-rules.md`.
 
+**Every line below starts at column zero.** The visual document must not indent the block.
 
-    COMPLETION (6 items)
-    - [ ] hops walked — <N> hops, last one returning <M> new places
-    - [ ] places found — <N> total: <N> kept, <N> moved, <N> removed, <N> DECISION
-    - [ ] phrasings swept for every changed thing — active <B1/D1, R2>; <N> unique terms or hits
-    - [ ] places reached by purpose and not by name — <N>
-    - [ ] tests asserting any changed behaviour — <N> found, <N> still asserting it after the amendment
-    - [ ] frontier — closed at hop <N>
+COMPLETION (6 items)
+- [ ] hops walked — <N> hops, last one returning <M> new places
+- [ ] places found — <N> total: <N> kept, <N> moved, <N> removed, <N> DECISION
+- [ ] phrasings swept for every changed thing — active <B1/D1, R2>; <N> unique terms or hits
+- [ ] places reached by purpose and not by name — <N>
+- [ ] tests asserting any changed behaviour — <N> found, <N> still asserting it after the amendment
+- [ ] frontier — closed at hop <N>
 
 ## For this mandate
 

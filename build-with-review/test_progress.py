@@ -5682,6 +5682,314 @@ def amendment_sweep_preflight_audits_the_complete_live_report_journal_free():
 
 
 @test
+def amendment_sweep_preflight_reports_independent_completion_and_source_errors_together():
+    seed_written_amendment_for_reach()
+    session = "reach-aggregate-errors"
+    append_live_reach_session(1, session)
+    malformed = reach_report((1, 0), ("kept",)).replace(
+        "active A1/order; 1 unique terms or hits",
+        "active A1/order; 1 unique terms, 9 hits",
+        1,
+    ).replace("Sources: A1/order", "Sources: R2", 1)
+    write_report("reports/amendment/1/sweep-1.md", malformed)
+    before = list(journal_lines())
+    result = run_progress("amendment-sweep-check", "1")
+    check(result.returncode != 0, "the preflight accepted two mechanical errors")
+    check("completion block contains placeholder or malformed evidence" in result.stdout,
+          result.stdout + result.stderr)
+    check("P1 names a source outside the current amendment" in result.stdout,
+          result.stdout + result.stderr)
+    check(journal_lines() == before, "the aggregated refusal changed the journal")
+
+
+@test
+def amendment_sweep_preflight_reports_indented_completion_and_evidence_errors_together():
+    seed_written_amendment_for_reach()
+    session = "reach-indented-errors"
+    append_live_reach_session(1, session)
+    malformed = reach_report((1, 0), ("kept",)).replace(
+        "active A1/order; 1 unique terms or hits",
+        "active A1/order; 12 term families, 1312 matching lines",
+        1,
+    ).replace("Sources: A1/order", "Sources: R2", 1)
+    lines = malformed.splitlines()
+    malformed = "\n".join(
+        f"    {line}" if index < 7 else line for index, line in enumerate(lines)
+    ) + "\n"
+    write_report("reports/amendment/1/sweep-1.md", malformed)
+    result = run_progress("amendment-sweep-check", "1")
+    check(result.returncode != 0, "the preflight accepted an indented completion block")
+    check("completion block is indented" in result.stdout, result.stdout + result.stderr)
+    check("completion block contains placeholder or malformed evidence" in result.stdout,
+          result.stdout + result.stderr)
+    check("P1 names a source outside the current amendment" in result.stdout,
+          result.stdout + result.stderr)
+
+
+@test
+def reach_completion_template_has_one_literal_column_zero_shape():
+    path = os.path.join(
+        AMENDMENT_PROMPTS, "reviewer-reach-completion.md",
+    )
+    with open(path, encoding="utf-8") as source:
+        text = source.read()
+    lines = text.splitlines()
+    start = lines.index("COMPLETION (6 items)")
+    block = lines[start:start + 7]
+    check(len(block) == 7 and all(line and not line.startswith((" ", "\t")) for line in block),
+          block)
+    check(text.count("COMPLETION (6 items)") == 1, "the template has several block shapes")
+    check("Every line below starts at column zero" in text, "the literal byte rule is absent")
+
+
+@test
+def corrected_reach_contract_resume_authorizes_one_new_physical_reviewer():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "reach-original")
+    append_reach_retirement(1, "reach-original", "failed")
+    append_live_reach_session(1, "reach-replacement")
+    append_reach_retirement(1, "reach-replacement", "failed")
+    append_note(
+        "not-converging", text="both Reach producers failed the malformed completion contract",
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    configure_reach_session("reach-after-contract-fix", 1)
+    before_wrong_reason = len(journal_lines())
+    wrong_reason = run_progress(
+        "note", "reach.recovery.authorized", "--round", "1",
+        "--data", '{"reason":"reviewed-contract-correction"}',
+        "--text", "A different recovery reason.",
+    )
+    refused_after(wrong_reason, before_wrong_reason, "a changed Reach recovery reason")
+    before_wrong_scope = len(journal_lines())
+    wrong_scope = run_progress(
+        "note", "reach.recovery.authorized", "--round", "1", "--mandate", "reach",
+        "--data", '{"reason":"reviewed-contract-correction"}',
+        "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+    )
+    refused_after(wrong_scope, before_wrong_scope, "a mandate-scoped Reach recovery authority")
+    authorization = run_progress(
+        "note", "reach.recovery.authorized", "--round", "1",
+        "--data", '{"reason":"reviewed-contract-correction"}',
+        "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+    )
+    check(authorization.returncode == 0, authorization.stdout + authorization.stderr)
+    authority = journal_lines()[-1]
+    check(authority["kind"] == "reach.recovery.authorized", authority)
+    check(authority["data"]["owners"] == ["reach-original", "reach-replacement"], authority)
+    before_duplicate = len(journal_lines())
+    duplicate = run_progress(
+        "note", "reach.recovery.authorized", "--round", "1",
+        "--data", '{"reason":"reviewed-contract-correction"}',
+        "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+    )
+    refused_after(duplicate, before_duplicate, "a duplicate Reach recovery authority")
+
+    configure_reach_session("reach-original", 1)
+    before_reused_third = len(journal_lines())
+    reused_third = run_progress("session-started", "reach-original")
+    refused_after(
+        reused_third, before_reused_third,
+        "a recovery owner that reuses the original physical Reach owner",
+    )
+
+    configure_reach_session("reach-after-contract-fix", 1)
+    started = run_progress("session-started", "reach-after-contract-fix")
+    check(started.returncode == 0, started.stdout + started.stderr)
+    accepted = run_progress("amendment-sweep-check", "1")
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+
+    os.remove(os.path.join(WORKSPACE, "amendment-sweep-preflight.json"))
+    append_reach_retirement(1, "reach-after-contract-fix", "failed")
+    configure_reach_session("reach-unbounded-fourth", 1)
+    refused = run_progress("session-started", "reach-unbounded-fourth")
+    check(refused.returncode != 0, "one contract authority authorized several replacements")
+    check(not any(entry.get("session") == "reach-unbounded-fourth"
+                  for entry in journal_lines()),
+          "the refused fourth Reach owner entered durable history")
+
+
+@test
+def reach_stable_blocker_refuses_a_new_reviewer_without_its_resume():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "reach-original")
+    append_reach_retirement(1, "reach-original", "failed")
+    append_live_reach_session(1, "reach-replacement")
+    append_reach_retirement(1, "reach-replacement", "failed")
+    append_note(
+        "not-converging", text="both Reach producers failed the malformed completion contract",
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    append_live_reach_session(1, "reach-unauthorized-third")
+    result = run_progress("amendment-sweep-check", "1")
+    check(result.returncode != 0, "the stable blocker allowed an unauthorised third reviewer")
+
+
+@test
+def reach_recovery_requires_two_distinct_physical_owners():
+    seed_written_amendment_for_reach()
+    append_live_reach_session(1, "reach-reused-owner")
+    append_reach_retirement(1, "reach-reused-owner", "failed")
+    append_live_reach_session(1, "reach-reused-owner")
+    append_reach_retirement(1, "reach-reused-owner", "failed")
+    append_note(
+        "not-converging", text="one physical owner was incorrectly reused",
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    configure_reach_session("reach-after-contract-fix", 1)
+    before = len(journal_lines())
+    result = run_progress(
+        "note", "reach.recovery.authorized", "--round", "1",
+        "--data", '{"reason":"reviewed-contract-correction"}',
+        "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+    )
+    refused_after(result, before, "a reused physical Reach owner")
+
+
+@test
+def reach_recovery_history_reauthenticates_its_stable_blocker():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "reach-original")
+    append_reach_retirement(1, "reach-original", "failed")
+    append_live_reach_session(1, "reach-replacement")
+    append_reach_retirement(1, "reach-replacement", "failed")
+    append_note(
+        "not-converging", text="both Reach producers failed the malformed completion contract",
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    configure_reach_session("reach-after-contract-fix", 1)
+    authorization = run_progress(
+        "note", "reach.recovery.authorized", "--round", "1",
+        "--data", '{"reason":"reviewed-contract-correction"}',
+        "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+    )
+    check(authorization.returncode == 0, authorization.stdout + authorization.stderr)
+    append_live_reach_session(1, "reach-after-contract-fix")
+
+    lines = journal_lines()
+    authority = next(entry for entry in lines if entry.get("kind") == "reach.recovery.authorized")
+    authority["data"]["blocker"] = "0:" + "0" * 64
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in lines:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    result = run_progress("amendment-sweep-check", "1")
+    check(result.returncode != 0, "historical Reach recovery accepted a changed blocker proof")
+
+
+@test
+def reach_recovery_authorization_obeys_pause_resume_and_abort():
+    def seed_stable_blocker():
+        seed_written_amendment_for_reach()
+        append_live_reach_session(1, "reach-original")
+        append_reach_retirement(1, "reach-original", "failed")
+        append_live_reach_session(1, "reach-replacement")
+        append_reach_retirement(1, "reach-replacement", "failed")
+        append_note(
+            "not-converging", text="both Reach producers failed the completion contract",
+            mode="amendment", lot="lot-1", job="controller",
+        )
+        configure_reach_session("reach-after-contract-fix", 1)
+
+    def authorize():
+        return run_progress(
+            "note", "reach.recovery.authorized", "--round", "1",
+            "--data", '{"reason":"reviewed-contract-correction"}',
+            "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+        )
+
+    seed_stable_blocker()
+    paused = run_progress("note", "paused", "--text", "pause before recovery")
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    refused_after(authorize(), len(journal_lines()), "Reach recovery during a current pause")
+
+    reset()
+    seed_stable_blocker()
+    paused = run_progress("note", "paused", "--text", "pause before recovery")
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    resumed = run_progress("note", "resumed", "--text", "resume before recovery")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    accepted = authorize()
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+
+    reset()
+    seed_stable_blocker()
+    aborted = run_progress("note", "aborted", "--text", "abort before recovery")
+    check(aborted.returncode == 0, aborted.stdout + aborted.stderr)
+    refused_after(authorize(), len(journal_lines()), "Reach recovery after abort")
+
+
+@test
+def reach_recovery_third_owner_rechecks_a_later_run_stop():
+    seed_written_amendment_for_reach()
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    append_live_reach_session(1, "reach-original")
+    append_reach_retirement(1, "reach-original", "failed")
+    append_live_reach_session(1, "reach-replacement")
+    append_reach_retirement(1, "reach-replacement", "failed")
+    append_note(
+        "not-converging", text="both Reach producers failed the completion contract",
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    configure_reach_session("reach-after-contract-fix", 1)
+    authorization = run_progress(
+        "note", "reach.recovery.authorized", "--round", "1",
+        "--data", '{"reason":"reviewed-contract-correction"}',
+        "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+    )
+    check(authorization.returncode == 0, authorization.stdout + authorization.stderr)
+
+    paused = run_progress("note", "paused", "--text", "pause after authorization")
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    refused = run_progress("session-started", "reach-after-contract-fix")
+    check(refused.returncode != 0, "a current pause allowed the third Reach owner")
+
+    append_live_reach_session(1, "reach-after-contract-fix")
+    historical = run_progress("amendment-sweep-check", "1")
+    check(historical.returncode != 0,
+          "historical Reach validation ignored a stop before the third owner")
+
+
+@test
+def reach_recovery_third_owner_obeys_stops_after_authorization():
+    def seed_authorization():
+        seed_written_amendment_for_reach()
+        append_live_reach_session(1, "reach-original")
+        append_reach_retirement(1, "reach-original", "failed")
+        append_live_reach_session(1, "reach-replacement")
+        append_reach_retirement(1, "reach-replacement", "failed")
+        append_note(
+            "not-converging", text="both Reach producers failed the completion contract",
+            mode="amendment", lot="lot-1", job="controller",
+        )
+        configure_reach_session("reach-after-contract-fix", 1)
+        authorization = run_progress(
+            "note", "reach.recovery.authorized", "--round", "1",
+            "--data", '{"reason":"reviewed-contract-correction"}',
+            "--text", "The reviewed Reach contract correction authorizes one new physical reviewer.",
+        )
+        check(authorization.returncode == 0, authorization.stdout + authorization.stderr)
+
+    seed_authorization()
+    paused = run_progress("note", "paused", "--text", "pause after authorization")
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    resumed = run_progress("note", "resumed", "--text", "resume after authorization")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    started = run_progress("session-started", "reach-after-contract-fix")
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+    reset()
+    seed_authorization()
+    aborted = run_progress("note", "aborted", "--text", "abort after authorization")
+    check(aborted.returncode == 0, aborted.stdout + aborted.stderr)
+    refused = run_progress("session-started", "reach-after-contract-fix")
+    check(refused.returncode != 0, "an abort after authorization allowed the third Reach owner")
+
+
+@test
 def amendment_sweep_preflight_requires_one_live_reviewer_generation():
     seed_written_amendment_for_reach()
     write_report("reports/amendment/1/sweep-1.md", reach_report())
@@ -6344,6 +6652,24 @@ def amendment_reach_contract_preflights_before_retirement_and_owns_its_handoff()
           in " ".join(reviewer.split())
           and "Its place count records handled coverage and can be positive" in normalized_mode,
           "AMENDMENT still treats handled place count as actionable work or cleanliness")
+    normalized_reviewer = " ".join(reviewer.split())
+    check("Could changing at least one current amendment source change this place's truth"
+          in normalized_reviewer
+          and "Same file, same section, same entity, a neighbouring branch, or the same user journey"
+          in normalized_reviewer,
+          "Reach still admits adjacency without one counterfactual dependency")
+    check("`kept` means that the place depends on the amendment" in normalized_reviewer
+          and "Older active rulings are preservation constraints" in normalized_reviewer
+          and "never add them to `Sources`" in normalized_reviewer,
+          "Reach still confuses a preserved authority with a current amendment source")
+    check("A neighbouring error branch that consumes none of the changed state is not a place"
+          in normalized_reviewer
+          and "name the predecessor place and the exact dependency" in normalized_reviewer,
+          "Reach has no direct negative or transitive-dependency instruction")
+    check("reach.recovery.authorized --round <K>" in mode
+          and "It authorizes no fourth physical reviewer" in normalized_mode
+          and "is not a run-level `resumed` boundary" in normalized_mode,
+          "AMENDMENT has no bounded post-contract-correction Reach recovery")
     check("The spec path is authority, not controller memory" in normalized_mode
           and "one structural root `Spec: <relative path>`" in normalized_mode
           and "exact committed plan reviewed by the amendment's voided pass" in normalized_mode,
@@ -8235,6 +8561,10 @@ def main():
         destination = os.path.join(WORKSPACE, "prompts", "amendment", "amendment-commit.sh")
         shutil.copyfile(os.path.join(AMENDMENT_PROMPTS, "amendment-commit.sh"), destination)
         os.chmod(destination, 0o755)
+        shutil.copyfile(
+            os.path.join(AMENDMENT_PROMPTS, "reviewer-reach-completion.md"),
+            os.path.join(WORKSPACE, "prompts", "amendment", "reviewer-reach-completion.md"),
+        )
         os.makedirs(os.path.join(WORKSPACE, "prompts", "construction"))
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",

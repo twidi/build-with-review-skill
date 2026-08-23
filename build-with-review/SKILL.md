@@ -1114,6 +1114,12 @@ reaches it through an implementer.
   recovery choices. **Not every
   role owes a completion block** — a role whose work is proved by running it owes
   none, and its mode file says so.
+  - **A reviewed Reach-contract correction has one distinct recovery authority.** After
+    both physical owners retire unsuccessfully and the stable `not-converging` line exists,
+    deploy the corrected frozen prompt and helper. Preserve both failed reports. Then use
+    the exact `reach.recovery.authorized` call in AMENDMENT mode. It authorizes one new
+    physical reviewer for the same logical sweep. It spends no logical sweep or repair,
+    permits no fourth reviewer, rewrites no history and never acts as run-level `resumed`.
   - **A `NOT DONE` whose reason you cannot lift is retried through one fresh reader at
     most** — its mode says how the retry happens there. The same reason coming back
     honest from fresh eyes is a stable blocker, never a lapse of attention: stop

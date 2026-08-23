@@ -72,7 +72,8 @@ NOTE_KINDS = {
     "decision.conflict.ready",
     "spec.breach.opened", "spec.breach.corrected", "spec.breach.restored", "spec.edit.ready",
     "ruling.applied", "decision.batch.closed",
-    "not-converging", "sublot.oversized", "reach.not-closed", "bound.spent",
+    "not-converging", "sublot.oversized", "reach.not-closed", "reach.recovery.authorized",
+    "bound.spent",
     "rewind.done", "fixer.dispatched", "verdict.consumed", "design.review.resolved",
     "design.review.blocked",
     "code.review.resolved", "code.review.blocked",
@@ -103,6 +104,17 @@ AMENDMENT_REACH_LABELS = (
     "tests asserting any changed behaviour",
     "frontier",
 )
+AMENDMENT_REACH_COMPLETION_TEMPLATE = (
+    "COMPLETION (6 items)",
+    "- [ ] hops walked — <N> hops, last one returning <M> new places",
+    "- [ ] places found — <N> total: <N> kept, <N> moved, <N> removed, <N> DECISION",
+    "- [ ] phrasings swept for every changed thing — active <B1/D1, R2>; <N> unique terms or hits",
+    "- [ ] places reached by purpose and not by name — <N>",
+    "- [ ] tests asserting any changed behaviour — <N> found, <N> still asserting it after the amendment",
+    "- [ ] frontier — closed at hop <N>",
+)
+REACH_RECOVERY_REASON = "reviewed-contract-correction"
+REACH_RECOVERY_TEXT = "The reviewed Reach contract correction authorizes one new physical reviewer."
 CONSTRUCTION_CHECKERS = {"design": "design-checker", "code": "code-checker"}
 CONSTRUCTION_CHECKER_ROUNDS = {"design": 10, "code": 10}
 CONSTRUCTION_CLASSIFICATIONS = {"C3.9a", "C3.9b", "C3.9c", "C3.9d"}
@@ -1945,14 +1957,107 @@ def amendment_reach_sources(entries, opening_index, before, opening):
     return sources
 
 
-def parse_reach_sources(value, subject):
+def collect_reach_error(errors, what, detail=None):
+    if errors is None:
+        fail(what, detail)
+    errors.append((what, detail))
+
+
+def diagnostic_reach_sources(value, subject, errors):
     sources = value.split(", ")
     if not sources or any(
         not re.fullmatch(r"(?:R[1-9][0-9]*|B[1-9][0-9]*/D[1-9][0-9]*|A[1-9][0-9]*/order)", source)
         for source in sources
     ) or len(set(sources)) != len(sources):
-        fail(f"{subject} has an invalid place source account", value)
+        collect_reach_error(errors, f"{subject} has an invalid place source account", value)
+        return None
     return sources
+
+
+def reach_completion_evidence_is_well_formed(block):
+    if len(block) != len(AMENDMENT_REACH_LABELS):
+        return False
+    evidence = []
+    for line, label in zip(block, AMENDMENT_REACH_LABELS):
+        match = re.fullmatch(r"- \[x\] ([^—]+?) — (.+)", line)
+        if not match or match.group(1).strip() != label or not match.group(2).strip():
+            return False
+        evidence.append(match.group(2).strip())
+    return bool(
+        re.fullmatch(r"([0-9]+) hops, last one returning ([0-9]+) new places", evidence[0])
+        and re.fullmatch(
+            r"([0-9]+) total: ([0-9]+) kept, ([0-9]+) moved, ([0-9]+) removed, ([0-9]+) DECISION",
+            evidence[1],
+        )
+        and re.fullmatch(r"active (.+); ([0-9]+) unique terms or hits", evidence[2])
+        and re.fullmatch(r"([0-9]+)", evidence[3])
+        and (
+            re.fullmatch(
+                r"([0-9]+) found, ([0-9]+) still asserting it after the amendment", evidence[4],
+            )
+            or re.fullmatch(r"n/a; suites read: (\S.+)", evidence[4])
+        )
+        and (
+            re.fullmatch(r"closed at hop ([0-9]+)", evidence[5])
+            or re.fullmatch(
+                r"NOT CLOSED: ([0-9]+(?:, [0-9]+)*) new places by hop; "
+                r"next hop cannot be enumerated — "
+                r"(missing durable input|unbounded input): (\S.+)",
+                evidence[5],
+            )
+        )
+    )
+
+
+def diagnostic_indented_reach_prefix(text, subject, expected_sources):
+    physical, visible = markdown_structure_lines(text)
+    first = next_visible_line(visible, 0)
+    marker = f"COMPLETION ({len(AMENDMENT_REACH_LABELS)} items)"
+    if first is None or visible[first] == marker or visible[first].lstrip(" \t") != marker:
+        return []
+
+    errors = [(f"{subject}'s completion block is indented", None)]
+    block = [line.lstrip(" \t") for line in physical[first + 1:first + 7]]
+    if not reach_completion_evidence_is_well_formed(block):
+        errors.append((f"{subject}'s completion block contains placeholder or malformed evidence", None))
+    else:
+        phrasings = re.fullmatch(
+            r"- \[x\] phrasings swept for every changed thing — "
+            r"active (.+); ([0-9]+) unique terms or hits",
+            block[2],
+        )
+        completion_sources = diagnostic_reach_sources(phrasings.group(1), subject, errors)
+        if completion_sources is not None and completion_sources != expected_sources:
+            errors.append((
+                f"{subject}'s completion names sources outside the current amendment",
+                completion_sources,
+            ))
+
+    expected_source_set = set(expected_sources)
+    for index, line in enumerate(visible):
+        heading = re.fullmatch(r"## P([1-9][0-9]*) · .+", line or "")
+        if not heading:
+            continue
+        source_index = next_visible_line(visible, index + 1)
+        if source_index is None or not visible[source_index].startswith("Sources: "):
+            continue
+        sources = diagnostic_reach_sources(
+            visible[source_index].removeprefix("Sources: "), subject, errors,
+        )
+        if sources is not None and not set(sources).issubset(expected_source_set):
+            errors.append((
+                f"{subject}'s P{heading.group(1)} names a source outside the current amendment",
+                sources,
+            ))
+    return errors
+
+
+def fail_reach_errors(subject, errors):
+    detail = "\n    ".join(
+        f"{what}: {value}" if value is not None else what
+        for what, value in errors
+    )
+    fail(f"{subject} has {len(errors)} independent mechanical errors", detail)
 
 
 def nonempty_reach_body(physical, start, stop, subject):
@@ -1962,7 +2067,7 @@ def nonempty_reach_body(physical, start, stop, subject):
         fail(f"{subject} has empty mandatory evidence")
 
 
-def audit_reach_account(text, subject, expected_sources):
+def audit_reach_account(text, subject, expected_sources, errors=None):
     physical, visible = markdown_structure_lines(text)
     marker = "## Reach account"
     markers = [index for index, line in enumerate(visible) if line == marker]
@@ -2022,9 +2127,15 @@ def audit_reach_account(text, subject, expected_sources):
             if disposition_index is not None else None
         if source_index is None or not visible[source_index].startswith("Sources: "):
             fail(f"{subject}'s P{ordinal} block has no exact Sources field")
-        sources = parse_reach_sources(visible[source_index].removeprefix("Sources: "), subject)
-        if not set(sources).issubset(expected_source_set):
-            fail(f"{subject}'s P{ordinal} names a source outside the current amendment", sources)
+        sources = diagnostic_reach_sources(
+            visible[source_index].removeprefix("Sources: "), subject, errors,
+        )
+        if sources is not None and not set(sources).issubset(expected_source_set):
+            collect_reach_error(
+                errors,
+                f"{subject}'s P{ordinal} names a source outside the current amendment",
+                sources,
+            )
         if location_index is None or not re.fullmatch(r"Location: \S.+", visible[location_index]) \
                 or any(token in visible[location_index] for token in ("<", ">")):
             fail(f"{subject}'s P{ordinal} block has no exact Location field")
@@ -2064,7 +2175,9 @@ def audit_reach_account(text, subject, expected_sources):
     }, physical, visible, first
 
 
-def audit_reach_completion(physical, visible, start, subject, account, expected_sources):
+def audit_reach_completion(
+    physical, visible, start, subject, account, expected_sources, errors=None,
+):
     block = visible[start + 1:start + 1 + len(AMENDMENT_REACH_LABELS)]
     if len(block) != len(AMENDMENT_REACH_LABELS) or any(line is None for line in block):
         fail(f"{subject}'s completion block is truncated")
@@ -2091,14 +2204,24 @@ def audit_reach_completion(physical, visible, start, subject, account, expected_
     )
     if not all((hops, places, phrasings, purpose)) or not (tests or tests_na) \
             or not (frontier_closed or frontier_open):
-        fail(f"{subject}'s completion block contains placeholder or malformed evidence")
-    completion_sources = parse_reach_sources(phrasings.group(1), subject)
+        collect_reach_error(
+            errors, f"{subject}'s completion block contains placeholder or malformed evidence",
+        )
+        return False
+    completion_sources = diagnostic_reach_sources(phrasings.group(1), subject, errors)
+    if completion_sources is None:
+        return False
     disposition_counts = [account["dispositions"].count(value)
                           for value in ("kept", "moved", "removed", "DECISION")]
+    if completion_sources != expected_sources:
+        collect_reach_error(
+            errors,
+            f"{subject}'s completion names sources outside the current amendment",
+            completion_sources,
+        )
     if int(hops.group(1)) != account["hop"] or int(hops.group(2)) != account["hop_counts"][-1] \
             or int(places.group(1)) != account["places"] \
             or [int(places.group(index)) for index in range(2, 6)] != disposition_counts \
-            or completion_sources != expected_sources \
             or int(purpose.group(1)) > account["places"]:
         fail(f"{subject}'s completion facts do not match its exact Reach account")
     if tests and int(tests.group(2)) > int(tests.group(1)):
@@ -2122,12 +2245,17 @@ def audit_reach_report(payload, subject, expected_sources):
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         fail(f"{subject} is not valid UTF-8", exc)
+    errors = diagnostic_indented_reach_prefix(text, subject, expected_sources)
+    if errors:
+        fail_reach_errors(subject, errors)
     account, physical, visible, completion_start = audit_reach_account(
-        text, subject, expected_sources,
+        text, subject, expected_sources, errors,
     )
     done = audit_reach_completion(
-        physical, visible, completion_start, subject, account, expected_sources,
+        physical, visible, completion_start, subject, account, expected_sources, errors,
     )
+    if errors:
+        fail_reach_errors(subject, errors)
     finding_counts, _ = spec_report_findings(
         "\n".join(line if line is not None else "" for line in visible), subject,
     )
@@ -2149,7 +2277,146 @@ def reach_sweep_is_clean(audit):
     return audit["done"] is True and audit["closed"] is True and not reach_sweep_is_actionable(audit)
 
 
+def reach_completion_contract_sha256():
+    relative = "prompts/amendment/reviewer-reach-completion.md"
+    path = exact_real_file(WORKSPACE, relative, "the Reach completion contract")
+    with open(path, "rb") as source:
+        payload = source.read()
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        fail("the Reach completion contract is not valid UTF-8", exc)
+    matches = [
+        index for index in range(0, len(lines) - len(AMENDMENT_REACH_COMPLETION_TEMPLATE) + 1)
+        if tuple(lines[index:index + len(AMENDMENT_REACH_COMPLETION_TEMPLATE)])
+        == AMENDMENT_REACH_COMPLETION_TEMPLATE
+    ]
+    markers = [index for index, line in enumerate(lines)
+               if line == AMENDMENT_REACH_COMPLETION_TEMPLATE[0]]
+    if len(markers) != 1 or matches != markers:
+        fail("the Reach completion contract has no one exact column-zero template")
+    return sha256_bytes(payload)
+
+
+def validate_run_stop_precedence(entries, before, subject):
+    boundaries = [(index, entry) for index, entry in enumerate(entries[:before])
+                  if entry.get("event") == "note"
+                  and entry.get("kind") in {"paused", "resumed", "aborted"}]
+    aborted = [entry for _, entry in boundaries if entry.get("kind") == "aborted"]
+    if aborted:
+        fail(f"{subject} follows a completed run abort")
+    if boundaries and boundaries[-1][1].get("kind") == "paused":
+        fail(f"{subject} follows a run pause without its later resumed boundary")
+
+
+def reach_recovery_authorization_account(entries, sweep, text, subject):
+    validate_run_stop_precedence(entries, len(entries), subject)
+    openings = amendment_openings(entries)
+    if not openings:
+        fail(f"{subject} has no current amendment")
+    opening_index, opening = openings[-1]
+    number = note_data(opening).get("amendment")
+    amendment_written_entry(entries, opening_index, len(entries), subject)
+    validate_reach_sweep_owed(entries, opening_index, len(entries), sweep, subject)
+
+    sessions = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:], opening_index + 1,
+    ) if entry.get("event") == "session-started"
+        and entry.get("mode") == "amendment" and entry.get("mandate") == "reach"
+        and entry.get("round") == sweep]
+    if len(sessions) != 2:
+        fail(f"{subject} requires exactly the original and replacement Reach owners",
+             f"found {len(sessions)}")
+    validate_reach_replacement_order(entries, opening_index, len(entries), sweep, subject)
+
+    owner_proofs = []
+    last_retirement_index = None
+    for position, (started_index, started) in enumerate(sessions):
+        stop = sessions[position + 1][0] if position + 1 < len(sessions) else len(entries)
+        retirements = [(index, entry) for index, entry in enumerate(
+            entries[started_index + 1:stop], started_index + 1,
+        ) if entry.get("event") == "session-retired"
+            and entry.get("session") == started.get("session")
+            and entry.get("mode") == "amendment" and entry.get("mandate") == "reach"
+            and entry.get("round") == sweep]
+        if len(retirements) != 1 or retirements[0][1].get("status") not in {
+            "failed", "cancelled", "superseded",
+        }:
+            fail(f"{subject} requires two exact unsuccessful Reach retirements",
+                 started.get("session"))
+        retirement_index, retirement = retirements[0]
+        owner_proofs.append({
+            "session": started.get("session"),
+            "started": journal_line_proof(started_index),
+            "retired": journal_line_proof(retirement_index),
+            "status": retirement.get("status"),
+        })
+        last_retirement_index = retirement_index
+
+    blockers = [(index, entry) for index, entry in enumerate(
+        entries[last_retirement_index + 1:], last_retirement_index + 1,
+    ) if entry.get("event") == "note" and entry.get("kind") == "not-converging"
+        and entry.get("mode") == "amendment" and entry.get("job") == "controller"
+        and entry.get("lot") == opening.get("lot")]
+    if len(blockers) != 1 or not isinstance(blockers[0][1].get("text"), str) \
+            or not blockers[0][1]["text"].strip():
+        fail(f"{subject} requires one exact stable Reach blocker after both retirements")
+    if any(entry.get("kind") == "reach.recovery.authorized"
+           for entry in entries[opening_index + 1:]):
+        fail(f"{subject} repeats a Reach recovery authorization")
+    if text != REACH_RECOVERY_TEXT:
+        fail(f"{subject} requires the exact reviewed correction reason")
+    blocker_index, _ = blockers[0]
+    return {
+        "schema": 1,
+        "reason": REACH_RECOVERY_REASON,
+        "reason_sha256": sha256_bytes(text.encode("utf-8")),
+        "amendment": number,
+        "sweep": sweep,
+        "opening": journal_line_proof(opening_index),
+        "opening_sha256": note_data(opening).get("opening_sha256"),
+        "owners": [owner["session"] for owner in owner_proofs],
+        "owner_proofs": owner_proofs,
+        "blocker": journal_line_proof(blocker_index),
+        "completion_sha256": reach_completion_contract_sha256(),
+    }
+
+
+def normalize_reach_recovery_authorization(entries, data, text, round_number, context):
+    if data != {"reason": REACH_RECOVERY_REASON}:
+        fail("reach.recovery.authorized takes one exact reviewed correction reason", data)
+    if not isinstance(round_number, int):
+        fail("reach.recovery.authorized requires its exact --round")
+    openings = amendment_openings(entries)
+    opening = openings[-1][1] if openings else None
+    if context.get("mode") != "amendment" or context.get("job") != "controller" \
+            or context.get("mandate") is not None or context.get("task") is not None \
+            or opening is None or context.get("lot") != opening.get("lot"):
+        fail("reach.recovery.authorized requires its exact controller amendment context")
+    return reach_recovery_authorization_account(
+        entries, round_number, text, "reach.recovery.authorized",
+    )
+
+
+def validate_reach_recovery_authorization(entries, index, entry, sweep, subject):
+    if entry.get("event") != "note" or entry.get("kind") != "reach.recovery.authorized" \
+            or entry.get("mode") != "amendment" or entry.get("mandate") is not None \
+            or entry.get("task") is not None or entry.get("round") != sweep \
+            or entry.get("job") != "controller":
+        fail(f"{subject} has a malformed Reach recovery authority")
+    openings = amendment_openings(entries[:index])
+    if not openings or entry.get("lot") != openings[-1][1].get("lot"):
+        fail(f"{subject} has a Reach recovery authority for another lot")
+    expected = reach_recovery_authorization_account(
+        entries[:index], sweep, entry.get("text"), subject,
+    )
+    if note_data(entry) != expected:
+        fail(f"{subject} has changed Reach recovery authority", expected)
+    return expected
+
+
 def validate_reach_replacement_order(entries, opening_index, before, sweep, subject):
+    validate_run_stop_precedence(entries, before, subject)
     sessions = [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:before], opening_index + 1
     ) if entry.get("event") == "session-started"
@@ -2157,19 +2424,35 @@ def validate_reach_replacement_order(entries, opening_index, before, sweep, subj
         and entry.get("round") == sweep]
     for position in range(1, len(sessions)):
         prior_index, prior = sessions[position - 1]
-        replacement_index, _ = sessions[position]
-        retirements = [entry for entry in entries[prior_index + 1:replacement_index]
-                       if entry.get("event") == "session-retired"
-                       and entry.get("session") == prior.get("session")
-                       and entry.get("mode") == "amendment"
-                       and entry.get("mandate") == "reach"
-                       and entry.get("round") == sweep]
+        replacement_index, replacement = sessions[position]
+        previous_session_ids = {entry.get("session") for _, entry in sessions[:position]}
+        if replacement.get("session") in previous_session_ids:
+            fail(f"{subject} reuses a prior physical Reach owner", replacement.get("session"))
+        retirements = [(index, entry) for index, entry in enumerate(
+            entries[prior_index + 1:replacement_index], prior_index + 1,
+        ) if entry.get("event") == "session-retired"
+            and entry.get("session") == prior.get("session")
+            and entry.get("mode") == "amendment"
+            and entry.get("mandate") == "reach"
+            and entry.get("round") == sweep]
         if len(retirements) != 1:
             fail(f"{subject} has a Reach replacement before its prior owner retired",
                  prior.get("session"))
-        if retirements[0].get("status") not in {"failed", "cancelled", "superseded"}:
+        retirement_index, retirement = retirements[0]
+        if retirement.get("status") not in {"failed", "cancelled", "superseded"}:
             fail(f"{subject} has a Reach replacement after a successful owner",
                  prior.get("session"))
+        if position < 2:
+            continue
+        authorities = [(index, entry) for index, entry in enumerate(
+            entries[retirement_index + 1:replacement_index], retirement_index + 1,
+        ) if entry.get("kind") == "reach.recovery.authorized"]
+        if position != 2 or len(authorities) != 1:
+            fail(f"{subject} has a Reach replacement beyond its one reviewed recovery")
+        authority_index, authority = authorities[0]
+        validate_reach_recovery_authorization(
+            entries, authority_index, authority, sweep, subject,
+        )
 
 
 def exact_reach_session(entries, opening_index, before, sweep, subject):
@@ -7246,6 +7529,10 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         data = normalize_amendment_written(notes, data, text)
     elif kind == "sweep.reported":
         data = normalize_sweep_report(notes, data, round_number)
+    elif kind == "reach.recovery.authorized":
+        data = normalize_reach_recovery_authorization(
+            notes, data, text, round_number, context,
+        )
     elif kind == "bound.spent" and isinstance(text, str) \
             and text.startswith("consolidation round"):
         data = normalize_consolidation_spend(notes, data, text, round_number)
@@ -7713,8 +8000,26 @@ def refresh_dashboard():
 def cmd_session_started(args):
     me = whoami()
     target = created_session(args.session_id)
+    context = context_of(target)
+    if context.get("mode") == "amendment" and context.get("mandate") == "reach":
+        sweep = context.get("round")
+        entries = journal_entries()
+        openings = amendment_openings(entries)
+        if not openings or not isinstance(sweep, int) or isinstance(sweep, bool) or sweep < 1:
+            fail("the Reach reviewer start has no exact amendment and sweep")
+        opening_index, _ = openings[-1]
+        candidate = {
+            "event": "session-started", "session": args.session_id, **context,
+        }
+        validate_reach_sweep_owed(
+            entries, opening_index, len(entries), sweep, "the Reach reviewer start",
+        )
+        validate_reach_replacement_order(
+            entries + [candidate], opening_index, len(entries) + 1, sweep,
+            "the Reach reviewer start",
+        )
     append_event(me["session_id"], "session-started",
-                 session=args.session_id, **context_of(target))
+                 session=args.session_id, **context)
 
 
 def cmd_session_status(args):
