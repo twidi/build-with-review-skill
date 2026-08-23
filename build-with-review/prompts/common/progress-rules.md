@@ -144,6 +144,13 @@ completion block, exact report path, finding headings, verdict, counts and SHA-2
 account and resulting spec snapshot. The unbound spec close consumes only a clean full
 round and permits only its status-line delta.
 
+A run that starts directly in Construction has no `spec.written`. A Construction-origin
+`amendment.opened` freezes one schema-1 `construction_source` instead. It binds the exact
+Construction `run.started`, current lot origin, latest `plan.written`, committed plan and
+its one structural root `Spec:` source, plus both committed hashes. Append-time admission
+requires the live plan and spec to equal those committed bytes. Historical consumers use
+the frozen commit and objects without requiring it to remain current `HEAD`.
+
 An `owner:"spec-loop"` recheck is not an exception. It follows one exact shared close.
 It names every current pending `spec-fixer` authority, preserves the complete run-wide
 answer state, and consumes one fresh bracketed finding-verifier result per pending R.

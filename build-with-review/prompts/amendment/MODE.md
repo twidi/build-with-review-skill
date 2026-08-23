@@ -212,9 +212,13 @@ progress.py note amendment.opened \
   --text-file "$JOURNAL_TEXT_FILE"
 ```
 
-`origin` is exactly `construction` or `product-review`. A construction opening follows
-the validated SPEC close and cannot bypass an open product-review pass. A product-review
-opening consumes the exact current pass and its built lot.
+`origin` is exactly `construction` or `product-review`. A construction opening normally
+follows the validated SPEC close and cannot bypass an open product-review pass. A run
+whose one `run.started` begins directly in Construction has no `spec.written`. In that
+case, `progress.py` freezes `construction_source` from that run, the current lot's latest
+`plan.written`, the current committed canonical plan, its one structural root `Spec:`
+line, and both committed document hashes. Do not supply, edit or infer that account.
+A product-review opening consumes the exact current pass and its built lot.
 
 The line is the order's identity and return address. Its text is non-empty and contains
 the complete order plus the exact phase return. Once it exists, the ruling is not
@@ -775,10 +779,13 @@ task, the plan being written; the run resumes where it stood.
    the commit consumes.
 
    **The spec path is authority, not controller memory.** Use the exact `spec.written`
-   source when this run has one. A construction-only run has no such boundary: for a
+   source when this run has one. A construction-only run has no such boundary. For a
    PRODUCT REVIEW amendment, use the one structural root `Spec: <relative path>` in the
-   exact committed plan reviewed by the amendment's voided pass. A fenced example is not
-   that source. Never infer the path from the report, process cwd, or a remembered launch.
+   exact committed plan reviewed by the amendment's voided pass. For a Construction
+   amendment, use only the `construction_source.spec` path frozen by `amendment.opened`.
+   Its commit and hashes remain the historical source while the fixer changes the live
+   specification. A fenced example is not that source. Never infer the path from the
+   report, process cwd, current `HEAD`, or a remembered launch.
 
 4. **A subagent checks the consolidation** — bracket it:
 

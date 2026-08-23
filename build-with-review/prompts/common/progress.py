@@ -1483,6 +1483,172 @@ def amendment_openings(entries, before=None):
             if entry.get("kind") == "amendment.opened"]
 
 
+CONSTRUCTION_AMENDMENT_SOURCE_KEYS = {
+    "schema", "lot", "run", "origin", "plan_written", "commit",
+    "plan", "plan_sha256", "spec", "spec_sha256",
+}
+
+
+def committed_regular_payload(commit, relative, subject):
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        fail(f"{subject} has no exact commit")
+    if not isinstance(relative, str) or not relative:
+        fail(f"{subject} has no repository path")
+    parsed = PurePosixPath(relative)
+    if parsed.is_absolute() or parsed.as_posix() != relative or ".." in parsed.parts:
+        fail(f"{subject} has no exact repository-relative path", relative)
+    listed = subprocess.run(
+        ["git", "--literal-pathspecs", "-C", project_root(), "ls-tree", "-z",
+         commit, "--", relative],
+        capture_output=True,
+    )
+    raw = listed.stdout.removesuffix(b"\0")
+    fields = raw.split(b"\t", 1)
+    metadata = fields[0].split(b" ") if len(fields) == 2 else []
+    if listed.returncode != 0 or len(fields) != 2 or len(metadata) != 3 \
+            or metadata[0] not in {b"100644", b"100755"} \
+            or metadata[1] != b"blob" \
+            or fields[1] != relative.encode("utf-8"):
+        fail(f"{subject} is absent or not a regular file in its committed generation",
+             relative)
+    content = subprocess.run(
+        ["git", "-C", project_root(), "cat-file", "blob", metadata[2].decode("ascii")],
+        capture_output=True,
+    )
+    if content.returncode != 0:
+        fail(f"{subject} cannot read its committed bytes", relative)
+    return content.stdout
+
+
+def committed_plan_spec_account(commit, plan_relative, subject):
+    plan_payload = committed_regular_payload(commit, plan_relative, f"{subject}'s plan")
+    try:
+        plan_text = plan_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{subject}'s committed plan is not valid UTF-8", exc)
+    _, visible = markdown_structure_lines(plan_text)
+    task_headings = [
+        index for index, line in enumerate(visible)
+        if isinstance(line, str) and re.fullmatch(r"## Task [1-9][0-9]* - .+", line)
+    ]
+    spec_lines = [
+        (index, line[len("Spec: "):]) for index, line in enumerate(visible)
+        if isinstance(line, str) and line.startswith("Spec: ")
+    ]
+    if len(spec_lines) != 1 or not task_headings or spec_lines[0][0] >= task_headings[0]:
+        fail(f"{subject}'s committed plan has no one exact root Spec source")
+    spec_relative = spec_lines[0][1]
+    spec_payload = committed_regular_payload(
+        commit, spec_relative, f"{subject}'s specification",
+    )
+    return {
+        "commit": commit,
+        "plan": plan_relative,
+        "plan_sha256": sha256_bytes(plan_payload),
+        "spec": spec_relative,
+        "spec_sha256": sha256_bytes(spec_payload),
+    }
+
+
+def construction_run_and_plan(entries, before, lot, subject):
+    starts = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
+        entries[:before]
+    ) if candidate.get("kind") == "run.started"]
+    run = starts[0][1] if len(starts) == 1 else {}
+    run_data = note_data(run)
+    root_lot = lot.split(".", 1)[0]
+    if len(starts) != 1 or run.get("event") != "note" \
+            or run.get("mode") != "construction" or run.get("job") != "controller" \
+            or run.get("lot") != root_lot or not isinstance(run.get("text"), str) \
+            or not run["text"] or set(run_data) != {"cap"} \
+            or not isinstance(run_data.get("cap"), int) or isinstance(run_data.get("cap"), bool) \
+            or run_data["cap"] < 1:
+        fail(f"{subject} has no one exact Construction run opening")
+    plans = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
+        entries[:before]
+    ) if candidate.get("kind") == "plan.written" and candidate.get("lot") == lot]
+    if not plans:
+        fail(f"{subject} has no published plan for {lot}")
+    plan_index, plan = plans[-1]
+    plan_data = note_data(plan)
+    if plan.get("event") != "note" or plan.get("mode") != "construction" \
+            or plan.get("job") != "controller" \
+            or not isinstance(plan_data.get("tasks"), int) \
+            or isinstance(plan_data.get("tasks"), bool) \
+            or plan_data["tasks"] < 1 or not isinstance(plan_data.get("op"), str) \
+            or not plan_data["op"] or set(plan_data) != {"tasks", "op"}:
+        fail(f"{subject}'s latest plan publication is malformed")
+    return starts[0], (plan_index, plan)
+
+
+def current_construction_amendment_source(entries, context, subject):
+    lot = context.get("lot")
+    if not isinstance(lot, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
+    ):
+        fail(f"{subject} has no exact Construction lot")
+    (run_index, _), (plan_index, _) = construction_run_and_plan(
+        entries, len(entries), lot, subject,
+    )
+    commit_result = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", "HEAD^{commit}"],
+        capture_output=True, text=True,
+    )
+    if commit_result.returncode != 0:
+        fail(f"{subject} has no current committed tree", commit_result.stderr)
+    commit = commit_result.stdout.strip()
+    plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
+    committed = committed_plan_spec_account(commit, plan_relative, subject)
+    live_plan = exact_real_file(project_root(), plan_relative, f"{subject}'s current plan")
+    live_spec = exact_real_file(project_root(), committed["spec"], f"{subject}'s current spec")
+    with open(live_plan, "rb") as source:
+        live_plan_sha256 = sha256_bytes(source.read())
+    with open(live_spec, "rb") as source:
+        live_spec_sha256 = sha256_bytes(source.read())
+    if live_plan_sha256 != committed["plan_sha256"] \
+            or live_spec_sha256 != committed["spec_sha256"]:
+        fail(f"{subject} does not start from its exact committed plan and specification")
+    return {
+        "schema": 1,
+        "lot": lot,
+        "run": journal_line_proof(run_index),
+        "origin": validate_construction_lot_origin(entries, len(entries), lot, subject),
+        "plan_written": journal_line_proof(plan_index),
+        **committed,
+    }
+
+
+def validate_construction_amendment_source(entries, before, source, subject):
+    if not isinstance(source, dict) or set(source) != CONSTRUCTION_AMENDMENT_SOURCE_KEYS \
+            or source.get("schema") != 1:
+        fail(f"{subject} has no exact frozen Construction spec source")
+    lot = source.get("lot")
+    if not isinstance(lot, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
+    ):
+        fail(f"{subject} has a malformed Construction lot")
+    run_index, run = journal_entry_from_proof(entries, source.get("run"), subject)
+    plan_index, plan = journal_entry_from_proof(entries, source.get("plan_written"), subject)
+    expected_run, expected_plan = construction_run_and_plan(entries, before, lot, subject)
+    if not run_index < plan_index < before or run.get("kind") != "run.started" \
+            or run.get("event") != "note" or run.get("mode") != "construction" \
+            or plan.get("kind") != "plan.written" or plan.get("lot") != lot \
+            or expected_run[0] != run_index or expected_plan[0] != plan_index:
+        fail(f"{subject} does not bind its ordered Construction run and plan")
+    expected_origin = validate_construction_lot_origin(entries, before, lot, subject)
+    expected = {
+        "schema": 1,
+        "lot": lot,
+        "run": source["run"],
+        "origin": expected_origin,
+        "plan_written": source["plan_written"],
+        **committed_plan_spec_account(source.get("commit"), source.get("plan"), subject),
+    }
+    if source != expected:
+        fail(f"{subject} changes its frozen Construction spec source", expected)
+    return source
+
+
 def validate_amendment_opening_entry(entries, index, entry):
     data = note_data(entry)
     number = data.get("amendment")
@@ -1511,6 +1677,8 @@ def validate_amendment_opening_entry(entries, index, entry):
         validate_amendment_commit_entry(entries, commits[0][0], commits[0][1])
 
     if origin == "product-review":
+        if "construction_source" in data:
+            fail("a product-review amendment opening cannot claim a Construction spec source")
         built = data.get("built")
         if not isinstance(built, str) or not re.fullmatch(
             r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built
@@ -1527,10 +1695,22 @@ def validate_amendment_opening_entry(entries, index, entry):
     else:
         if "built" in data:
             fail("a construction amendment opening may not claim a product-review built lot")
-        _, written = spec_written(entries[:index])
-        validate_spec_written_history(written)
-        if not any(candidate.get("kind") == "spec.committed" for candidate in entries[:index]):
-            fail("a construction amendment opening precedes the validated specification close")
+        readiness = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
+            entries[:index]
+        ) if candidate.get("kind") == "spec.written"]
+        if readiness:
+            _, written = spec_written(entries[:index])
+            validate_spec_written_history(written)
+            if "construction_source" in data:
+                fail("a SPEC-backed amendment opening cannot claim a Construction spec source")
+            if not any(candidate.get("kind") == "spec.committed"
+                       for candidate in entries[:index]):
+                fail("a construction amendment opening precedes the validated specification close")
+        else:
+            validate_construction_amendment_source(
+                entries, index, data.get("construction_source"),
+                "a construction-only amendment opening",
+            )
         pass_events = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
             entries[:index]
         ) if candidate.get("kind") in {"pass.opened", "pass.closed"}]
@@ -1539,10 +1719,15 @@ def validate_amendment_opening_entry(entries, index, entry):
     return data
 
 
-def normalize_amendment_opened(entries, data, text):
+def normalize_amendment_opened(entries, data, text, context):
     if not isinstance(data, dict):
         fail("amendment.opened requires structured identity data")
     candidate_data = dict(data)
+    if candidate_data.get("origin") == "construction" \
+            and not any(entry.get("kind") == "spec.written" for entry in entries):
+        candidate_data["construction_source"] = current_construction_amendment_source(
+            entries, context, "a construction-only amendment opening",
+        )
     candidate = {"event": "note", "kind": "amendment.opened",
                  "data": candidate_data, "text": text}
     candidate_data["opening_sha256"] = amendment_opening_digest(candidate)
@@ -2324,8 +2509,13 @@ def amendment_spec_file(entries, before, opening_index, opening, subject):
     if readiness:
         _, spec_entry = spec_written(entries[:before])
         return spec_file_from_written(spec_entry)
-    if note_data(opening).get("origin") != "product-review":
-        spec_written(entries[:before])
+    if note_data(opening).get("origin") == "construction":
+        source = validate_construction_amendment_source(
+            entries, opening_index, note_data(opening).get("construction_source"), subject,
+        )
+        return exact_real_file(
+            project_root(), source["spec"], f"{subject}'s Construction specification",
+        )
     return product_review_amendment_spec_file(
         entries, opening_index, opening, subject,
     )
@@ -6999,7 +7189,7 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
     elif kind == "fixer.returned" and round_number is not None:
         data = normalize_fixer_return(notes, data, round_number)
     elif kind == "amendment.opened":
-        data = normalize_amendment_opened(notes, data, text)
+        data = normalize_amendment_opened(notes, data, text, context)
     elif kind == "amendment.written":
         data = normalize_amendment_written(notes, data, text)
     elif kind == "sweep.reported":

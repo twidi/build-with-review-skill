@@ -446,7 +446,11 @@ conflict changed R1 before application. Both bindings must hold.
 
 An `amendment` route gives MODE AMENDMENT this same global state and authority tuple;
 `amendment.opened` owns the dispatch, and A4 writes the matching terminal after its
-commit and consolidation proof.
+commit and consolidation proof. A run that began directly in Construction has no
+`spec.written`. Its Construction-origin opening freezes the exact `run.started`, lot
+origin, latest `plan.written`, committed canonical plan, structural root `Spec:` path and
+both document hashes. Later Amendment consumers reuse that frozen source without reading
+the spec path from controller memory or requiring its commit to remain current `HEAD`.
 
 A `spec-fixer` route writes an owner-linked dispatch **before** sending anything to the
 already-open SPEC fixer:

@@ -5875,6 +5875,155 @@ def amendment_construction_only_product_pass_authenticates_its_spec_for_consolid
 
 
 @test
+def construction_only_run_opens_a_construction_amendment_from_its_committed_plan_spec():
+    append_note(
+        "run.started", {"cap": 3}, "construction-only-feature",
+        mode="construction", lot="lot-1", job="controller",
+    )
+    spec_relative = "docs/plans/construction-only-direct-design.md"
+    plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-lot-1-plan.md"
+    write_project(spec_relative, spec_document())
+    write_project(
+        plan_relative,
+        "# Construction plan\n\n"
+        f"Spec: {spec_relative}\n\n"
+        "## Task 1 - Implement the product\n"
+        "Achieves: The product follows the committed specification.\n"
+        "To verify: The product result matches the specification.\n",
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "add", spec_relative, plan_relative], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "seed construction authority"], check=True,
+    )
+    append_note(
+        "plan.written", {"tasks": 1, "op": "construction-plan"},
+        mode="construction", lot="lot-1", job="controller",
+    )
+    state_path = seed_direct_ruling(ruling="R1", route="amendment")
+    order = "apply R1 and return to lot-1 task 1"
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", json.dumps({
+            "amendment": 1,
+            "origin": "construction",
+            "ruling": "R1",
+            "authority_kind": "ruling.ready",
+            "authority_ref": "R1",
+            "authority_sha256": file_sha256(state_path),
+        }),
+        "--text", order,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    source = journal_lines()[-1]["data"].get("construction_source")
+    check(
+        isinstance(source, dict)
+        and source.get("lot") == "lot-1"
+        and source.get("plan") == plan_relative
+        and source.get("spec") == spec_relative,
+        "the opening did not freeze its committed Construction spec source",
+    )
+    write_project("docs/later.txt", "later committed work\n")
+    subprocess.run(["git", "-C", REPO, "add", "docs/later.txt"], check=True)
+    subprocess.run(["git", "-C", REPO, "commit", "-qm", "advance head"], check=True)
+    write_report("amendments/1.md", amendment_document(1, order, ("R1",)))
+    os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "1"), exist_ok=True)
+    amendment_path = os.path.join(WORKSPACE, "amendments", "1.md")
+    written = run_progress(
+        "note", "amendment.written", "--data", '{"amendment":1}',
+        "--text", amendment_path,
+    )
+    check(written.returncode == 0, written.stdout + written.stderr)
+    accept_reach_sweep(1, reach_report(sources=("R1",)), "construction-direct-reach")
+    returned = run_progress(
+        "note", "fixer.returned", "--data", '{"applied":1,"declined":0}',
+    )
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    write_project(spec_relative, spec_document(status="amended"))
+    consolidation = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(consolidation.returncode == 0, consolidation.stdout + consolidation.stderr)
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1",
+        "--text", "consolidation round 1 of 3",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    ended = run_progress(
+        "subagent-ended", "consolidation", "--round", "1",
+        "--data", '{"exact":true}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    consumed = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"consolidation","outcome":"exact"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+    commit_script = os.path.join(
+        WORKSPACE, "prompts", "amendment", "amendment-commit.sh",
+    )
+    committed = subprocess.run(
+        [commit_script, "1", spec_relative, "docs: land Construction amendment", "-"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    state = run_progress("amendment-state-check")
+    check(state.returncode == 0, state.stdout + state.stderr)
+
+
+@test
+def construction_only_amendment_source_fails_closed_before_opening():
+    for label in ("dirty-spec", "duplicate-spec", "untracked-spec"):
+        reset()
+        append_note(
+            "run.started", {"cap": 3}, "construction-only-feature",
+            mode="construction", lot="lot-1", job="controller",
+        )
+        spec_relative = "docs/plans/construction-only-direct-design.md"
+        plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-lot-1-plan.md"
+        write_project(spec_relative, spec_document())
+        spec_lines = f"Spec: {spec_relative}\n"
+        if label == "duplicate-spec":
+            spec_lines += f"Spec: {spec_relative}\n"
+        write_project(
+            plan_relative,
+            "# Construction plan\n\n"
+            f"{spec_lines}\n"
+            "## Task 1 - Implement the product\n"
+            "Achieves: The product follows the committed specification.\n"
+            "To verify: The product result matches the specification.\n",
+        )
+        staged = [plan_relative]
+        if label != "untracked-spec":
+            staged.append(spec_relative)
+        subprocess.run(["git", "-C", REPO, "add", *staged], check=True)
+        subprocess.run(
+            ["git", "-C", REPO, "commit", "-qm", f"seed {label} authority"],
+            check=True,
+        )
+        append_note(
+            "plan.written", {"tasks": 1, "op": label},
+            mode="construction", lot="lot-1", job="controller",
+        )
+        if label == "dirty-spec":
+            write_project(spec_relative, spec_document(extra="\nUncommitted change.\n"))
+        state_path = seed_direct_ruling(ruling="R1", route="amendment")
+        before = len(journal_lines())
+        opened = run_progress(
+            "note", "amendment.opened",
+            "--data", json.dumps({
+                "amendment": 1,
+                "origin": "construction",
+                "ruling": "R1",
+                "authority_kind": "ruling.ready",
+                "authority_ref": "R1",
+                "authority_sha256": file_sha256(state_path),
+            }),
+            "--text", "apply R1 and return to lot-1 task 1",
+        )
+        refused_after(opened, before, f"the {label} Construction spec source")
+
+
+@test
 def amendment_construction_only_spec_source_fails_closed():
     cases = (
         ("missing", ()),
