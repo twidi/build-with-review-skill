@@ -2,6 +2,7 @@
 """Supersede one unopened Correction Round allocation under one authority lease."""
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -16,7 +17,11 @@ COMMON = WORKSPACE / "prompts" / "common"
 sys.path.insert(0, str(COMMON))
 
 import progress  # noqa: E402
-from correction_authority import CorrectionAuthorityLease, normalize_allocation  # noqa: E402
+from correction_authority import (  # noqa: E402
+    CorrectionAuthorityLease,
+    WorkspaceFileAnchor,
+    normalize_allocation,
+)
 
 MARKER_NAME = "correction-allocation-supersede-in-progress"
 BLOCKING_MARKERS = {
@@ -48,12 +53,29 @@ def operation_identity(args):
 
 def read_real_file(path, subject):
     try:
-        metadata = path.lstat()
-    except OSError as exc:
-        fail(f"{subject} is missing: {exc}")
-    if path.is_symlink() or not path.is_file() or metadata.st_nlink < 1:
-        fail(f"{subject} is not one real regular file")
-    return path.read_bytes()
+        relative = pathlib.Path(path).relative_to(WORKSPACE)
+    except ValueError:
+        fail(f"{subject} is outside the workspace")
+    with WorkspaceFileAnchor(WORKSPACE, relative, subject) as anchored:
+        return anchored.read_regular()
+
+
+def frozen_member(source, destination, subject, *, allow_moved):
+    with WorkspaceFileAnchor(WORKSPACE, source, f"{subject} source") as source_file, \
+            WorkspaceFileAnchor(WORKSPACE, destination, f"{subject} destination") as destination_file:
+        source_status = source_file.status()
+        destination_status = destination_file.status()
+        if source_status is not None and destination_status is not None:
+            fail(f"both source and destination exist for {subject}")
+        if not allow_moved and source_status is None:
+            fail(f"{subject} moved before its owner marker")
+        if not allow_moved and destination_status is not None:
+            fail(f"{subject} destination precedes its owner marker")
+        if source_status is not None:
+            return source_file.read_regular()
+        if allow_moved and destination_status is not None:
+            return destination_file.read_regular()
+        fail(f"{subject} is unavailable")
 
 
 def atomic_marker(path, account):
@@ -88,8 +110,10 @@ def read_marker(path):
     return account
 
 
-def exact_current_allocation(args, *, allowed_marker=None):
+def exact_current_allocation(args, *, allowed_marker=None, before=None):
     entries = progress.journal_entries()
+    if before is not None:
+        entries = entries[:before]
     opening_index, opening, built, _ = progress.current_pass_opening(
         entries, len(entries), "the allocation supersession",
     )
@@ -112,9 +136,9 @@ def exact_current_allocation(args, *, allowed_marker=None):
     return entries, opening_index, opening, allocation_index, allocation
 
 
-def derive_account(args, operation, *, allowed_marker=None):
+def derive_account(args, operation, *, allowed_marker=None, before=None):
     entries, opening_index, opening, allocation_index, allocation = exact_current_allocation(
-        args, allowed_marker=allowed_marker,
+        args, allowed_marker=allowed_marker, before=before,
     )
     opening_data = progress.note_data(opening)
     current = progress.current_product_generation(
@@ -129,26 +153,46 @@ def derive_account(args, operation, *, allowed_marker=None):
     confirmed_relative = progress.product_confirmed_path(
         args.built, opening_data["position"], opening_data["pass"],
     )
-    confirmed_path = pathlib.Path(progress.real_workspace_file(
-        confirmed_relative, "the allocation supersession confirmed artifact",
-    ))
-    confirmed_bytes = read_real_file(confirmed_path, "the allocation supersession confirmed artifact")
+    allocation_hash = args.allocation.split(":", 1)[1]
+    destination_relative = pathlib.PurePosixPath(
+        "corrections", args.built,
+        f"round-{args.round}-superseded-p{opening_data['pass']}-{allocation_hash}.md",
+    )
+    confirmed_destination = None
+    if args.outcome == "reclassify":
+        confirmed_name = pathlib.PurePosixPath(confirmed_relative).name
+        stem = confirmed_name.removesuffix(".md")
+        confirmed_destination = pathlib.PurePosixPath(
+            pathlib.PurePosixPath(confirmed_relative).parent,
+            f"{stem}-superseded-{allocation_hash}.md",
+        )
+    allow_moved = allowed_marker is not None
+    if confirmed_destination is None:
+        with WorkspaceFileAnchor(
+            WORKSPACE, confirmed_relative, "the allocation supersession confirmed artifact",
+        ) as confirmed_file:
+            confirmed_bytes = confirmed_file.read_regular()
+    else:
+        confirmed_bytes = frozen_member(
+            confirmed_relative, confirmed_destination,
+            "the allocation supersession confirmed artifact", allow_moved=allow_moved,
+        )
     expected_confirmed = {
         item["id"]: {"sources": item["sources"], "carries": item["carries"]}
         for item in allocation["items"]
     }
-    if progress.confirmed_account(
-        confirmed_path, "the allocation supersession confirmed artifact",
+    if progress.confirmed_account_bytes(
+        confirmed_bytes, "the allocation supersession confirmed artifact",
     ) != expected_confirmed:
         fail("the confirmed artifact changes its allocation")
 
     source_relative = pathlib.PurePosixPath(
         "corrections", args.built, f"round-{args.round}.md",
     )
-    source_path = pathlib.Path(progress.real_workspace_file(
-        source_relative, "the allocation supersession Correction Round artifact",
-    ))
-    artifact_bytes = read_real_file(source_path, "the allocation supersession artifact")
+    artifact_bytes = frozen_member(
+        source_relative, destination_relative, "the allocation supersession artifact",
+        allow_moved=allow_moved,
+    )
     parser = progress.load_correction_round_parser()
     artifact = parser.parse_artifact_bytes(
         artifact_bytes, expected_built=args.built, expected_round=args.round,
@@ -181,19 +225,6 @@ def derive_account(args, operation, *, allowed_marker=None):
             or list(artifact["source_finding_coverage"]) != list(expected_confirmed):
         fail("the Correction Round artifact changes its allocation authority")
 
-    allocation_hash = args.allocation.split(":", 1)[1]
-    destination_relative = pathlib.PurePosixPath(
-        "corrections", args.built,
-        f"round-{args.round}-superseded-p{opening_data['pass']}-{allocation_hash}.md",
-    )
-    confirmed_destination = None
-    if args.outcome == "reclassify":
-        confirmed_name = pathlib.PurePosixPath(confirmed_relative).name
-        stem = confirmed_name.removesuffix(".md")
-        confirmed_destination = pathlib.PurePosixPath(
-            pathlib.PurePosixPath(confirmed_relative).parent,
-            f"{stem}-superseded-{allocation_hash}.md",
-        )
     event = {
         "schema": 1,
         "built": args.built,
@@ -243,7 +274,21 @@ def validate_marker(account, args, operation):
     for key in ("source_sha256", "confirmed_sha256"):
         if not re.fullmatch(r"[0-9a-f]{64}", str(account.get(key))):
             fail("the pending allocation supersession has a malformed content identity")
-    return account
+    entries = progress.journal_entries()
+    terminals = [
+        index for index, entry in enumerate(entries)
+        if entry.get("kind") == "correction.round.allocation.superseded"
+        and progress.note_data(entry) == account.get("event")
+    ]
+    if len(terminals) > 1:
+        fail("the pending allocation supersession has duplicate terminals")
+    expected = derive_account(
+        args, operation, allowed_marker=MARKER_NAME,
+        before=terminals[0] if terminals else None,
+    )
+    if account != expected:
+        fail("the pending allocation supersession changed its complete frozen account")
+    return expected
 
 
 def exact_terminal(entries, event):
@@ -256,48 +301,71 @@ def exact_terminal(entries, event):
 
 
 def finish_move(account):
-    source = WORKSPACE / account["source"]
-    destination = WORKSPACE / account["destination"]
-    destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    source_exists = source.exists() and not source.is_symlink()
-    destination_exists = destination.exists() and not destination.is_symlink()
-    if source_exists and destination_exists:
-        fail("both source and destination exist for the allocation supersession")
-    if source_exists:
-        if sha256(read_real_file(source, "the allocation supersession source")) \
-                != account["source_sha256"]:
+    # Open and validate every parent before the first move. A later member
+    # cannot leave an earlier member moved after a component-alias refusal.
+    with contextlib.ExitStack() as stack:
+        anchors = [
+            stack.enter_context(WorkspaceFileAnchor(
+                WORKSPACE, account["source"], "the allocation supersession source",
+            )),
+            stack.enter_context(WorkspaceFileAnchor(
+                WORKSPACE, account["destination"], "the allocation supersession destination",
+            )),
+            stack.enter_context(WorkspaceFileAnchor(
+                WORKSPACE, account["confirmed"], "the retained confirmed artifact",
+            )),
+        ]
+        confirmed_destination_value = account["confirmed_destination"]
+        if confirmed_destination_value is not None:
+            anchors.append(stack.enter_context(WorkspaceFileAnchor(
+                WORKSPACE, confirmed_destination_value,
+                "the allocation supersession confirmed destination",
+            )))
+        for anchor in anchors:
+            anchor.verify()
+        source, destination, confirmed = anchors[:3]
+        source_status = source.status()
+        destination_status = destination.status()
+        if source_status is not None and destination_status is not None:
+            fail("both source and destination exist for the allocation supersession")
+        if source_status is not None and sha256(source.read_regular()) != account["source_sha256"]:
             fail("the allocation supersession source changed after marker publication")
-        os.replace(source, destination)
-        destination_exists = True
-    if not destination_exists or sha256(read_real_file(
-        destination, "the allocation supersession destination",
-    )) != account["source_sha256"]:
-        fail("the allocation supersession destination does not contain the frozen artifact")
-    confirmed = WORKSPACE / account["confirmed"]
-    confirmed_destination_value = account["confirmed_destination"]
-    if confirmed_destination_value is None:
-        if sha256(read_real_file(confirmed, "the retained confirmed artifact")) \
-                != account["confirmed_sha256"]:
-            fail("the retained confirmed artifact changed after marker publication")
-        return
-    confirmed_destination = WORKSPACE / confirmed_destination_value
-    confirmed_destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    confirmed_exists = confirmed.exists() and not confirmed.is_symlink()
-    confirmed_destination_exists = (
-        confirmed_destination.exists() and not confirmed_destination.is_symlink()
-    )
-    if confirmed_exists and confirmed_destination_exists:
-        fail("both confirmed source and destination exist for the allocation supersession")
-    if confirmed_exists:
-        if sha256(read_real_file(confirmed, "the allocation supersession confirmed source")) \
-                != account["confirmed_sha256"]:
-            fail("the confirmed source changed after marker publication")
-        os.replace(confirmed, confirmed_destination)
-        confirmed_destination_exists = True
-    if not confirmed_destination_exists or sha256(read_real_file(
-        confirmed_destination, "the allocation supersession confirmed destination",
-    )) != account["confirmed_sha256"]:
-        fail("the confirmed destination does not contain the frozen artifact")
+        if source_status is None and (
+            destination_status is None
+            or sha256(destination.read_regular()) != account["source_sha256"]
+        ):
+            fail("the allocation supersession destination does not contain the frozen artifact")
+
+        confirmed_status = confirmed.status()
+        if confirmed_destination_value is None:
+            if confirmed_status is None \
+                    or sha256(confirmed.read_regular()) != account["confirmed_sha256"]:
+                fail("the retained confirmed artifact changed after marker publication")
+        else:
+            confirmed_destination = anchors[3]
+            destination_status = confirmed_destination.status()
+            if confirmed_status is not None and destination_status is not None:
+                fail("both confirmed source and destination exist for the allocation supersession")
+            if confirmed_status is not None \
+                    and sha256(confirmed.read_regular()) != account["confirmed_sha256"]:
+                fail("the confirmed source changed after marker publication")
+            if confirmed_status is None and (
+                destination_status is None
+                or sha256(confirmed_destination.read_regular()) != account["confirmed_sha256"]
+            ):
+                fail("the confirmed destination does not contain the frozen artifact")
+
+        for anchor in anchors:
+            anchor.verify()
+        if source_status is not None:
+            source.replace_to(destination)
+        if confirmed_destination_value is not None and confirmed_status is not None:
+            confirmed.replace_to(anchors[3])
+        if sha256(destination.read_regular()) != account["source_sha256"]:
+            fail("the allocation supersession destination changed after its move")
+        if confirmed_destination_value is not None \
+                and sha256(anchors[3].read_regular()) != account["confirmed_sha256"]:
+            fail("the confirmed destination changed after its move")
 
 
 def note_args(event):
@@ -338,7 +406,9 @@ def run(args):
         progress.normalize_correction_allocation_supersession(
             progress.journal_entries(), account["event"], "the allocation supersession",
         )
-        progress.cmd_note_with_lease(note_args(account["event"]), lease, operation)
+        progress.cmd_note_with_lease(
+            note_args(account["event"]), lease, operation, owner_marker=MARKER_NAME,
+        )
         marker.unlink()
         print(f"SUPERSEDED {args.allocation} -> {args.outcome}")
 

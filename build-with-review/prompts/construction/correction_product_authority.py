@@ -265,6 +265,23 @@ def run_finish(args, marker, operation):
         supersession = account["supersession"]
         event = supersession["event"]
         entries = progress.journal_entries()
+        terminal_indices = [
+            index for index, entry in enumerate(entries)
+            if entry.get("kind") == "correction.round.allocation.superseded"
+            and progress.note_data(entry) == event
+        ]
+        if len(terminal_indices) > 1:
+            fail("the product-authority supersession terminal is duplicated")
+        expected_supersession = supersede.derive_account(
+            SimpleNamespace(
+                built=args.built, round=args.round, allocation=args.allocation,
+                outcome="reclassify", reason=args.reason,
+            ),
+            operation, allowed_marker=MARKER_NAME,
+            before=terminal_indices[0] if terminal_indices else None,
+        )
+        if supersession != expected_supersession:
+            fail("the product-authority marker changes its frozen supersession account")
         if supersede.exact_terminal(entries, event):
             supersede.finish_move(supersession)
             remove_marker(marker)
@@ -285,7 +302,9 @@ def run_finish(args, marker, operation):
         progress.normalize_correction_allocation_supersession(
             progress.journal_entries(), event, "the product-authority supersession",
         )
-        progress.cmd_note_with_lease(note_args(event), lease, operation)
+        progress.cmd_note_with_lease(
+            note_args(event), lease, operation, owner_marker=MARKER_NAME,
+        )
         remove_marker(marker)
         print(f"PRODUCT AUTHORITY RECLASSIFIED {args.allocation}")
 

@@ -5740,7 +5740,11 @@ def reclassification_supersession_resumes_every_durable_move_prefix():
         else:
             helper.finish_move(account)
         if cut == "event-appended":
-            append_note("correction.round.allocation.superseded", account["event"])
+            note = helper.note_args(account["event"])
+            with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+                helper.progress.cmd_note_with_lease(
+                    note, lease, operation, owner_marker=helper.MARKER_NAME,
+                )
 
         script = os.path.join(
             WORKSPACE, "prompts", "construction", "correction-round-supersede.sh",
@@ -5773,6 +5777,28 @@ def correction_round_opening_publishes_one_exact_task_zero_and_durable_event():
     script = os.path.join(
         WORKSPACE, "prompts", "construction", "correction-round-open.sh",
     )
+    helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_round_open.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_round_open_direct_terminal", helper_path,
+    )
+    helper = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(helper)
+    args = SimpleNamespace(built="lot-1", round=1)
+    _, expected_event = helper.current_close(args)
+    before = len(journal_lines())
+    direct = run_progress(
+        "note", "correction.round.opened", "--data", json.dumps(expected_event),
+    )
+    check(direct.returncode != 0 and len(journal_lines()) == before,
+          "generic note produced a helper-owned Correction Round opening")
+    ref = "refs/bwr/test-run/lot-1/correction-1/task-0"
+    missing_ref = subprocess.run(
+        ["git", "-C", REPO, "show-ref", "--verify", "--quiet", ref],
+    )
+    check(missing_ref.returncode != 0,
+          "a refused generic opening published the helper-owned task-0 ref")
     opened = subprocess.run(
         [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
         env=ENV, timeout=120,
@@ -5794,7 +5820,6 @@ def correction_round_opening_publishes_one_exact_task_zero_and_durable_event():
         "tasks": close_data["tasks"],
         "base_commit": close_data["base_commit"],
     }, event)
-    ref = "refs/bwr/test-run/lot-1/correction-1/task-0"
     target = subprocess.check_output(
         ["git", "-C", REPO, "rev-parse", ref], text=True,
     ).strip()
@@ -5835,7 +5860,11 @@ def correction_round_opening_resumes_marker_ref_and_event_prefixes():
         if cut in {"task-zero", "event"}:
             helper.publish_ref(account)
         if cut == "event":
-            append_note("correction.round.opened", account["event"])
+            note = helper.note_args(account["event"])
+            with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+                helper.progress.cmd_note_with_lease(
+                    note, lease, operation, owner_marker=helper.MARKER_NAME,
+                )
 
         script = os.path.join(
             WORKSPACE, "prompts", "construction", "correction-round-open.sh",
@@ -5850,6 +5879,270 @@ def correction_round_opening_resumes_marker_ref_and_event_prefixes():
         check(len(terminals) == 1 and terminals[0]["data"] == account["event"],
               f"{cut}: recovery did not preserve one exact opening")
         check(not marker.exists(), f"{cut}: recovery retained its opening owner")
+
+
+@test
+def correction_helper_owned_supersession_requires_its_complete_move():
+    state = seed_unopened_correction_allocation("helper-owned-supersession")
+    helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_round_supersede.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_round_supersede_direct_terminal", helper_path,
+    )
+    helper = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(helper)
+    args = SimpleNamespace(
+        built="lot-1", round=1, allocation=state["allocation_proof"],
+        outcome="sublot",
+        reason="The complete task graph requires structural decomposition.",
+    )
+    operation = helper.operation_identity(args)
+    account = helper.derive_account(args, operation)
+    before = len(journal_lines())
+    incomplete_event = json.loads(json.dumps(account["event"]))
+    incomplete_event["artifact_moved_to"] = None
+    direct = run_progress(
+        "note", "correction.round.allocation.superseded",
+        "--data", json.dumps(incomplete_event),
+    )
+    check(direct.returncode != 0 and len(journal_lines()) == before,
+          "generic note produced a helper-owned allocation supersession")
+    check(os.path.isfile(pathlib.Path(WORKSPACE) / account["source"])
+          and not os.path.lexists(pathlib.Path(WORKSPACE) / account["destination"]),
+          "a refused generic supersession changed the frozen artifact")
+
+
+@test
+def correction_supersession_marker_reauthenticates_every_owned_field():
+    state = seed_unopened_correction_allocation("supersession-marker-account")
+    seed_in_pass_controller_successor(state["opening_index"])
+    helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_round_supersede.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_round_supersede_marker_account", helper_path,
+    )
+    helper = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(helper)
+    args = SimpleNamespace(
+        built="lot-1", round=1, allocation=state["allocation_proof"],
+        outcome="reclassify",
+        reason="The accepted product authority changed the correction base.",
+    )
+    operation = helper.operation_identity(args)
+    account = helper.derive_account(args, operation)
+
+    def scalar_paths(value, prefix=()):
+        paths = []
+        for key, item in value.items():
+            path = (*prefix, key)
+            if isinstance(item, dict):
+                paths.extend(scalar_paths(item, path))
+            else:
+                paths.append(path)
+        return paths
+
+    for path in scalar_paths(account):
+        changed = json.loads(json.dumps(account))
+        cursor = changed
+        for key in path[:-1]:
+            cursor = cursor[key]
+        current = cursor[path[-1]]
+        cursor[path[-1]] = 2 if current is None else f"changed-{current}"
+        try:
+            helper.validate_marker(changed, args, operation)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted changed supersession marker field: {path}")
+        check(os.path.isfile(pathlib.Path(WORKSPACE) / account["source"])
+              and not os.path.lexists(pathlib.Path(WORKSPACE) / account["destination"]),
+              f"marker validation moved bytes after changing {path}")
+
+
+@test
+def correction_supersession_lineage_reauthenticates_its_complete_physical_account():
+    state = seed_unopened_correction_allocation("supersession-history")
+    successor, successor_gate, _, successor_generation = seed_in_pass_controller_successor(
+        state["opening_index"],
+    )
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-supersede.sh",
+    )
+    reason = "The accepted product authority changed the correction base."
+    completed = subprocess.run(
+        [
+            script, "lot-1", "1", state["allocation_proof"], "reclassify", reason,
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(completed.returncode == 0, completed.stdout + completed.stderr)
+    supersession_index = len(journal_lines()) - 1
+    lines = journal_lines()
+    lines[supersession_index]["data"]["artifact_moved_to"] = None
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in lines:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    replacement = json.loads(json.dumps(state["allocation"]))
+    replacement["predecessor_supersession"] = journal_proof(supersession_index)
+    replacement["parent"] = {
+        "position": 0,
+        "generation_sha256": successor_generation,
+        "commit": successor,
+        "gate": successor_gate,
+    }
+    replacement["admission"]["reason"] = (
+        "The successor authority still permits one bounded implementation correction."
+    )
+    replacement["admission"]["items"][0]["reason"] = (
+        "The finding remains bounded under the successor authority."
+    )
+    before = len(journal_lines())
+    refused_replacement = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(replacement),
+    )
+    check(refused_replacement.returncode != 0 and len(journal_lines()) == before,
+          "a replacement consumed an incomplete historical supersession")
+
+
+def replace_directory_with_alias(path, label):
+    path = pathlib.Path(path)
+    backup = path.with_name(f".{path.name}-{label}-real")
+    foreign = pathlib.Path(BASE) / f"{label}-foreign"
+    path.rename(backup)
+    foreign.mkdir(parents=True)
+    sentinel = foreign / "sentinel.txt"
+    sentinel.write_text("unchanged sentinel\n", encoding="utf-8")
+    path.symlink_to(foreign, target_is_directory=True)
+    return backup, sentinel
+
+
+@test
+def correction_supersession_recovery_refuses_every_intermediate_alias():
+    components = (
+        ("corrections",),
+        ("corrections", "lot-1"),
+        ("reports",),
+        ("reports", "product-review"),
+        ("reports", "product-review", "lot-1"),
+    )
+    for ordinal, parts in enumerate(components, 1):
+        reset()
+        state = seed_unopened_correction_allocation(f"supersession-alias-{ordinal}")
+        seed_in_pass_controller_successor(state["opening_index"])
+        helper_path = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction_round_supersede.py",
+        )
+        specification = importlib.util.spec_from_file_location(
+            f"correction_round_supersede_alias_{ordinal}", helper_path,
+        )
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        args = SimpleNamespace(
+            built="lot-1", round=1, allocation=state["allocation_proof"],
+            outcome="reclassify",
+            reason="The accepted product authority changed the correction base.",
+        )
+        operation = helper.operation_identity(args)
+        account = helper.derive_account(args, operation)
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+            helper.atomic_marker(marker, account)
+        aliased = pathlib.Path(WORKSPACE).joinpath(*parts)
+        backup, sentinel = replace_directory_with_alias(aliased, f"supersession-{ordinal}")
+        source_before = pathlib.Path(WORKSPACE) / account["source"]
+        destination = pathlib.Path(WORKSPACE) / account["destination"]
+        script = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction-round-supersede.sh",
+        )
+        try:
+            refused_resume = subprocess.run(
+                [
+                    script, "lot-1", "1", state["allocation_proof"], "reclassify",
+                    "The accepted product authority changed the correction base.",
+                ],
+                cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+            )
+            check(refused_resume.returncode != 0 and marker.is_file(),
+                  f"accepted supersession alias at {'/'.join(parts)}")
+            check(sentinel.read_text(encoding="utf-8") == "unchanged sentinel\n",
+                  f"changed unrelated bytes through {'/'.join(parts)}")
+        finally:
+            if aliased.is_symlink():
+                aliased.unlink()
+            if backup.exists():
+                backup.rename(aliased)
+        check(source_before.is_file(),
+              f"moved the source before refusing {'/'.join(parts)}")
+        check(not destination.exists(),
+              f"moved the artifact before refusing {'/'.join(parts)}")
+        recovered = subprocess.run(
+            [
+                script, "lot-1", "1", state["allocation_proof"], "reclassify",
+                "The accepted product authority changed the correction base.",
+            ],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(recovered.returncode == 0 and not marker.exists(),
+              f"did not recover supersession after restoring {'/'.join(parts)}")
+
+
+@test
+def correction_opening_recovery_refuses_every_intermediate_alias():
+    components = (
+        ("corrections",),
+        ("corrections", "lot-1"),
+        ("reports",),
+        ("reports", "product-review"),
+        ("reports", "product-review", "lot-1"),
+    )
+    for ordinal, parts in enumerate(components, 1):
+        reset()
+        seed_unopened_correction_allocation(f"opening-alias-{ordinal}")
+        closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+        check(closed.returncode == 0, closed.stdout + closed.stderr)
+        helper_path = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction_round_open.py",
+        )
+        specification = importlib.util.spec_from_file_location(
+            f"correction_round_open_alias_{ordinal}", helper_path,
+        )
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        args = SimpleNamespace(built="lot-1", round=1)
+        _, event = helper.current_close(args)
+        operation = helper.operation_identity(args, event["pass_close"])
+        account = helper.derive_account(args, operation)
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+            helper.atomic_marker(marker, account)
+        aliased = pathlib.Path(WORKSPACE).joinpath(*parts)
+        backup, sentinel = replace_directory_with_alias(aliased, f"opening-{ordinal}")
+        script = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+        )
+        try:
+            refused_resume = subprocess.run(
+                [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+                env=ENV, timeout=120,
+            )
+            check(refused_resume.returncode != 0 and marker.is_file(),
+                  f"accepted opening alias at {'/'.join(parts)}")
+            check(sentinel.read_text(encoding="utf-8") == "unchanged sentinel\n",
+                  f"changed unrelated bytes through {'/'.join(parts)}")
+        finally:
+            if aliased.is_symlink():
+                aliased.unlink()
+            if backup.exists():
+                backup.rename(aliased)
+        recovered = subprocess.run(
+            [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        check(recovered.returncode == 0 and not marker.exists(),
+              f"did not recover opening after restoring {'/'.join(parts)}")
 
 
 @test

@@ -38,6 +38,186 @@ RENAME_NOREPLACE = 1
 CORRECTION_LOCK_NAME = "correction-authority.lock"
 
 
+class WorkspaceFileAnchor:
+    """One workspace-relative file path anchored through real directory descriptors."""
+
+    def __init__(self, workspace, relative, subject, *, create_parents=False):
+        self.workspace = pathlib.Path(workspace)
+        self.relative = pathlib.PurePosixPath(relative)
+        self.subject = subject
+        self._descriptor = None
+        self._identities = []
+        if not self.workspace.is_absolute():
+            raise ValueError(f"{subject} workspace is not absolute")
+        if self.relative.is_absolute() or not self.relative.parts or any(
+            part in {"", ".", ".."} for part in self.relative.parts
+        ):
+            raise ValueError(f"{subject} path is not exact workspace-relative text")
+
+        descriptor = self._open_root()
+        cursor = self.workspace
+        try:
+            for component in self.relative.parts[:-1]:
+                cursor = cursor / component
+                try:
+                    child = os.open(
+                        component,
+                        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=descriptor,
+                    )
+                except FileNotFoundError:
+                    if not create_parents:
+                        raise ValueError(f"{subject} parent does not exist") from None
+                    os.mkdir(component, mode=0o755, dir_fd=descriptor)
+                    child = os.open(
+                        component,
+                        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=descriptor,
+                    )
+                except OSError as exc:
+                    raise ValueError(f"{subject} parent is not one real directory") from exc
+                opened = os.fstat(child)
+                current = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                if not stat.S_ISDIR(current.st_mode) or (
+                    opened.st_dev, opened.st_ino
+                ) != (current.st_dev, current.st_ino):
+                    os.close(child)
+                    raise ValueError(f"{subject} parent changed during anchoring")
+                self._identities.append((cursor, opened.st_dev, opened.st_ino))
+                os.close(descriptor)
+                descriptor = child
+            self._descriptor = descriptor
+            self.verify()
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _open_root(self):
+        _lstat_real_directory(self.workspace, f"{self.subject} workspace")
+        descriptor = os.open(
+            self.workspace,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(descriptor)
+        current = self.workspace.lstat()
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            os.close(descriptor)
+            raise ValueError(f"{self.subject} workspace changed during anchoring")
+        self._identities.append((self.workspace, opened.st_dev, opened.st_ino))
+        return descriptor
+
+    @property
+    def name(self):
+        return self.relative.name
+
+    @property
+    def path(self):
+        return self.workspace.joinpath(*self.relative.parts)
+
+    def __enter__(self):
+        self.verify()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        self.close()
+
+    def close(self):
+        if self._descriptor is not None:
+            os.close(self._descriptor)
+            self._descriptor = None
+
+    def verify(self):
+        if self._descriptor is None:
+            raise ValueError(f"{self.subject} path anchor is closed")
+        for path, device, inode in self._identities:
+            try:
+                current = path.lstat()
+            except OSError as exc:
+                raise ValueError(f"{self.subject} parent changed after anchoring") from exc
+            if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode) \
+                    or (current.st_dev, current.st_ino) != (device, inode):
+                raise ValueError(f"{self.subject} parent changed after anchoring")
+        opened = os.fstat(self._descriptor)
+        _, device, inode = self._identities[-1]
+        if (opened.st_dev, opened.st_ino) != (device, inode):
+            raise ValueError(f"{self.subject} path anchor changed")
+
+    def status(self):
+        self.verify()
+        try:
+            current = os.stat(self.name, dir_fd=self._descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        self.verify()
+        return current
+
+    def read_regular(self):
+        current = self.status()
+        if current is None or not stat.S_ISREG(current.st_mode) or current.st_nlink < 1:
+            raise ValueError(f"{self.subject} is not one real regular file")
+        descriptor = os.open(
+            self.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=self._descriptor,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise ValueError(f"{self.subject} changed during reading")
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 65_536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+        self.verify()
+        return b"".join(chunks)
+
+    def replace_to(self, destination):
+        self.verify()
+        destination.verify()
+        os.replace(
+            self.name, destination.name,
+            src_dir_fd=self._descriptor, dst_dir_fd=destination._descriptor,
+        )
+        self.verify()
+        destination.verify()
+
+    def publish(self, payload, mode=0o444):
+        if self.status() is not None:
+            raise ValueError(f"{self.subject} already exists")
+        temporary = f".{self.name}.tmp-{os.getpid()}-{id(self)}"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+            dir_fd=self._descriptor,
+        )
+        try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("short anchored workspace file write")
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            self.verify()
+            os.replace(
+                temporary, self.name,
+                src_dir_fd=self._descriptor, dst_dir_fd=self._descriptor,
+            )
+            self.verify()
+            os.fsync(self._descriptor)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=self._descriptor)
+            except FileNotFoundError:
+                pass
+
+
 class CorrectionAuthorityLease:
     """One non-serializable owner of the workspace Correction Round lock."""
 

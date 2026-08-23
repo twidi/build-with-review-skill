@@ -54,14 +54,15 @@ from authority_precedence import (
     validate_spec_loop_generation,
 )
 from correction_authority import (
-    CorrectionAuthorityLease,
     EMPTY_FINAL_CHECKER_SET_SHA256,
+    CorrectionAuthorityLease,
     generation_sha256,
     normalize_allocation,
     normalize_controller_successor,
     product_confirmed_path,
     product_report_path,
     publish_content_object,
+    validate_content_object,
 )
 
 # The two closed vocabularies. An unknown name is refused: a vocabulary that
@@ -187,6 +188,14 @@ CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS = {
     "spec.committed",
     "decision.recheck.completed",
     "ruling.applied",
+}
+
+HELPER_OWNED_CORRECTION_NOTE_MARKERS = {
+    "correction.round.opened": {"correction-round-open-in-progress"},
+    "correction.round.allocation.superseded": {
+        "correction-allocation-supersede-in-progress",
+        "correction-product-authority-in-progress",
+    },
 }
 
 
@@ -6780,21 +6789,34 @@ def correction_allocation_lineage(entries, opening_index, before, subject):
                 fail(f"{subject} supersedes no live Correction Round allocation")
             if note_data(entry).get("allocation") != journal_line_proof(current[0]):
                 fail(f"{subject}'s supersession names another allocation")
+            normalize_correction_allocation_supersession(
+                entries[:index], note_data(entry), subject,
+                _opening=(opening_index, entries[opening_index]), _current=current,
+            )
             supersession = (index, entry)
             current = None
     return current, supersession if seen else None
 
 
-def normalize_correction_allocation_supersession(entries, data, subject):
+def normalize_correction_allocation_supersession(
+    entries, data, subject, *, _opening=None, _current=None,
+):
     before = len(entries)
-    opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
-    if pass_closes(entries, opening_index, before):
-        fail(f"{subject} cannot follow a closed pass")
-    current, prior_supersession = correction_allocation_lineage(
-        entries, opening_index, before, subject,
-    )
-    if current is None or prior_supersession is not None:
-        fail(f"{subject} has no one exact live allocation")
+    if _opening is None:
+        opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
+        if pass_closes(entries, opening_index, before):
+            fail(f"{subject} cannot follow a closed pass")
+    else:
+        opening_index, opening = _opening
+        built = note_data(opening).get("built")
+    if _current is None:
+        current, prior_supersession = correction_allocation_lineage(
+            entries, opening_index, before, subject,
+        )
+        if current is None or prior_supersession is not None:
+            fail(f"{subject} has no one exact live allocation")
+    else:
+        current = _current
     allocation_index, allocation_entry = current
     try:
         allocation = normalize_allocation(note_data(allocation_entry))
@@ -6864,72 +6886,82 @@ def normalize_correction_allocation_supersession(entries, data, subject):
         "corrections", built,
         f"round-{allocation['round']}-superseded-p{opening_data['pass']}-{allocation_hash}.md",
     )
-    moved_path = os.path.join(WORKSPACE, *expected_moved.parts)
-    moved_exists = os.path.isfile(moved_path) and not os.path.islink(moved_path)
-    if data["artifact_moved_to"] != (str(expected_moved) if moved_exists else None):
+    if data["artifact_moved_to"] != str(expected_moved):
         fail(f"{subject} does not name its exact moved artifact")
-    if moved_exists:
-        with open(moved_path, "rb") as source:
-            artifact_bytes = source.read()
-        with open(confirmed_path, "rb") as source:
-            confirmed_sha256 = hashlib.sha256(source.read()).hexdigest()
-        parser = load_correction_round_parser()
-        try:
-            artifact = parser.parse_artifact_bytes(
-                artifact_bytes, expected_built=built, expected_round=allocation["round"],
-            )
-        except ValueError as exc:
-            fail(f"{subject}'s moved Correction Round artifact is invalid", exc)
-        if artifact["source_findings_path"] != str(confirmed_relative) \
-                or artifact["source_findings_sha256"] != confirmed_sha256 \
-                or list(artifact["source_finding_coverage"]) != [
-                    item["id"] for item in allocation["items"]
-                ]:
-            fail(f"{subject}'s moved artifact changes its allocated findings")
+    moved_path = real_workspace_file(expected_moved, f"{subject}'s moved Correction Round artifact")
+    with open(moved_path, "rb") as source:
+        artifact_bytes = source.read()
+    with open(confirmed_path, "rb") as source:
+        confirmed_sha256 = hashlib.sha256(source.read()).hexdigest()
+    parser = load_correction_round_parser()
+    try:
+        artifact = parser.parse_artifact_bytes(
+            artifact_bytes, expected_built=built, expected_round=allocation["round"],
+        )
+    except ValueError as exc:
+        fail(f"{subject}'s moved Correction Round artifact is invalid", exc)
+    if artifact["source_findings_path"] != str(confirmed_relative) \
+            or artifact["source_findings_sha256"] != confirmed_sha256 \
+            or list(artifact["source_finding_coverage"]) != [
+                item["id"] for item in allocation["items"]
+            ]:
+        fail(f"{subject}'s moved artifact changes its allocated findings")
     return data
 
 
-def confirmed_account(path, subject):
+def confirmed_account_lines(lines, subject):
     account = {}
     current = None
-    with open(path, encoding="utf-8") as source:
-        for raw in source:
-            heading = re.match(r"^## (F[1-9][0-9]*)\b", raw)
-            if heading:
-                current = heading.group(1)
-                if current in account:
-                    fail(f"{subject} repeats confirmed entry {current}")
-                account[current] = {"sources": None, "carries": None}
+    for raw in lines:
+        heading = re.match(r"^## (F[1-9][0-9]*)\b", raw)
+        if heading:
+            current = heading.group(1)
+            if current in account:
+                fail(f"{subject} repeats confirmed entry {current}")
+            account[current] = {"sources": None, "carries": None}
+            continue
+        if current is None:
+            continue
+        for field, prefix in (("sources", "Sources:"), ("carries", "Carries:")):
+            if not raw.startswith(prefix):
                 continue
-            if current is None:
-                continue
-            for field, prefix in (("sources", "Sources:"), ("carries", "Carries:")):
-                if not raw.startswith(prefix):
-                    continue
-                if account[current][field] is not None:
-                    fail(f"{subject}'s {current} repeats {prefix[:-1]}")
-                tokens = [token.strip() for token in raw.removeprefix(prefix).split(",")
-                          if token.strip()]
-                if field == "sources":
-                    if any(not re.fullmatch(
-                        rf"(?:{'|'.join(PRODUCT_REVIEW_MANDATES)})/F[1-9][0-9]*", token
-                    ) for token in tokens):
-                        fail(f"{subject}'s {current} has a malformed Sources line", tokens)
-                    account[current][field] = tokens
-                else:
-                    normalized = []
-                    for token in tokens:
-                        match = re.fullmatch(
-                            r"(?:batch\s+|B)([1-9][0-9]*)/([FD][1-9][0-9]*)", token,
-                        )
-                        if not match:
-                            fail(f"{subject}'s {current} has a malformed Carries line", token)
-                        normalized.append(f"B{match.group(1)}/{match.group(2)}")
-                    account[current][field] = normalized
+            if account[current][field] is not None:
+                fail(f"{subject}'s {current} repeats {prefix[:-1]}")
+            tokens = [token.strip() for token in raw.removeprefix(prefix).split(",")
+                      if token.strip()]
+            if field == "sources":
+                if any(not re.fullmatch(
+                    rf"(?:{'|'.join(PRODUCT_REVIEW_MANDATES)})/F[1-9][0-9]*", token
+                ) for token in tokens):
+                    fail(f"{subject}'s {current} has a malformed Sources line", tokens)
+                account[current][field] = tokens
+            else:
+                normalized = []
+                for token in tokens:
+                    match = re.fullmatch(
+                        r"(?:batch\s+|B)([1-9][0-9]*)/([FD][1-9][0-9]*)", token,
+                    )
+                    if not match:
+                        fail(f"{subject}'s {current} has a malformed Carries line", token)
+                    normalized.append(f"B{match.group(1)}/{match.group(2)}")
+                account[current][field] = normalized
     for item in account.values():
         item["sources"] = item["sources"] or []
         item["carries"] = item["carries"] or []
     return account
+
+
+def confirmed_account_bytes(payload, subject):
+    try:
+        text = payload.decode("utf-8")
+    except (AttributeError, UnicodeError) as exc:
+        fail(f"{subject} is not UTF-8 text", exc)
+    return confirmed_account_lines(text.splitlines(keepends=True), subject)
+
+
+def confirmed_account(path, subject):
+    with open(path, encoding="utf-8") as source:
+        return confirmed_account_lines(source, subject)
 
 
 def covers_values(plan):
@@ -7267,6 +7299,36 @@ def normalize_correction_round_opening(entries, data, subject, *, historical=Fal
         fail(f"{subject} changes its frozen close authority", {
             "expected": expected, "actual": data,
         })
+    reference = f"refs/bwr/{Path(WORKSPACE).name}/{built}/correction-{allocation['round']}/task-0"
+    ref_result = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", reference],
+        capture_output=True, text=True,
+    )
+    if ref_result.returncode != 0 or ref_result.stdout.strip() != close_data["base_commit"]:
+        fail(f"{subject} has no exact helper-published task-0 ref")
+    for object_key, digest_key, suffix in (
+        ("confirmed_object", "confirmed_sha256", ".md"),
+        ("artifact_object", "artifact_sha256", ".md"),
+    ):
+        try:
+            object_path = validate_content_object(
+                WORKSPACE, built, close_data[digest_key], suffix,
+            )
+        except ValueError as exc:
+            fail(f"{subject} has no exact immutable {object_key}", exc)
+        if str(object_path.relative_to(WORKSPACE)) != close_data[object_key]:
+            fail(f"{subject} changes its immutable {object_key} path")
+    if not historical:
+        for path_key, digest_key in (
+            ("confirmed_artifact", "confirmed_sha256"),
+            ("artifact", "artifact_sha256"),
+        ):
+            canonical = real_workspace_file(
+                close_data[path_key], f"{subject}'s restored {path_key}",
+            )
+            with open(canonical, "rb") as source:
+                if hashlib.sha256(source.read()).hexdigest() != close_data[digest_key]:
+                    fail(f"{subject}'s restored {path_key} changed")
     duplicates = [entry for entry in entries[close_index + 1:]
                   if entry.get("kind") == "correction.round.opened"
                   and note_data(entry).get("built") == built
@@ -8685,7 +8747,52 @@ def refuse_foreign_correction_pending_owner(operation, args, data, me):
             )
 
 
-def append_note(args, lease=None, lease_operation=None):
+def helper_owned_correction_event(kind, owner_marker, operation):
+    allowed = HELPER_OWNED_CORRECTION_NOTE_MARKERS.get(kind)
+    if allowed is None:
+        if owner_marker is not None:
+            fail("this correction note kind has no helper-owned terminal")
+        return None
+    if owner_marker not in allowed:
+        fail("a helper-owned correction terminal requires its exact official marker")
+    marker = os.path.join(WORKSPACE, owner_marker)
+    try:
+        metadata = os.lstat(marker)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            fail("the helper-owned correction marker is not one real file")
+        descriptor = os.open(marker, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                fail("the helper-owned correction marker changed during reading")
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 65_536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+        finally:
+            os.close(descriptor)
+        account = json.loads(raw)
+    except (OSError, UnicodeError, ValueError) as exc:
+        fail("the helper-owned correction marker is malformed", exc)
+    if json.dumps(account, sort_keys=True, separators=(",", ":")).encode() + b"\n" != raw \
+            or not isinstance(account, dict) or account.get("operation") != operation:
+        fail("the helper-owned correction marker belongs to another operation")
+    if owner_marker == "correction-product-authority-in-progress":
+        if account.get("phase") != "supersede" \
+                or not isinstance(account.get("supersession"), dict):
+            fail("the product-authority marker does not own one supersession terminal")
+        event = account["supersession"].get("event")
+    else:
+        event = account.get("event")
+    if not isinstance(event, dict):
+        fail("the helper-owned correction marker has no exact terminal payload")
+    return event
+
+
+def append_note(args, lease=None, lease_operation=None, owner_marker=None):
     if args.kind not in NOTE_KINDS:
         fail(f"unknown note kind `{args.kind}`",
              "Look the name up where the call was given to you — never invent a variant.")
@@ -8694,6 +8801,9 @@ def append_note(args, lease=None, lease_operation=None):
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
     operation = lease_operation or correction_note_operation(args)
+    helper_event = helper_owned_correction_event(args.kind, owner_marker, operation)
+    if helper_event is not None and (lease is None or data != helper_event):
+        fail("the helper-owned correction terminal changes its exact pending operation")
     if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS:
         refuse_foreign_correction_pending_owner(operation, args, data, me)
     if lease is not None:
@@ -8709,6 +8819,8 @@ def append_note(args, lease=None, lease_operation=None):
         args.kind, data, text, round_number=context.get("round"),
         mandate=context.get("mandate"), context=context,
     )
+    if helper_event is not None and data != helper_event:
+        fail("the helper-owned correction terminal changes after validation")
     if lease is not None:
         acquisition_generation = hashlib.sha256(json.dumps({
             "kind": args.kind,
@@ -8736,13 +8848,15 @@ def append_note(args, lease=None, lease_operation=None):
         remove_amendment_sweep_preflight(data, "sweep.reported", journaled=True)
 
 
-def cmd_note_with_lease(args, lease, operation=None):
+def cmd_note_with_lease(args, lease, operation=None, *, owner_marker=None):
     if args.kind not in CORRECTION_AUTHORITY_NOTE_KINDS:
         fail("an outer correction lease cannot append this note kind")
-    append_note(args, lease, operation)
+    append_note(args, lease, operation, owner_marker)
 
 
 def cmd_note(args):
+    if args.kind in HELPER_OWNED_CORRECTION_NOTE_MARKERS:
+        fail("this terminal is owned by its official Correction Round helper")
     if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS:
         operation = correction_note_operation(args)
         try:

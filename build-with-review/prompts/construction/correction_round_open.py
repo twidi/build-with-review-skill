@@ -2,6 +2,7 @@
 """Open one frozen Correction Round under one correction-authority lease."""
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -17,7 +18,11 @@ COMMON = WORKSPACE / "prompts" / "common"
 sys.path.insert(0, str(COMMON))
 
 import progress  # noqa: E402
-from correction_authority import CorrectionAuthorityLease, normalize_allocation  # noqa: E402
+from correction_authority import (  # noqa: E402
+    CorrectionAuthorityLease,
+    WorkspaceFileAnchor,
+    normalize_allocation,
+)
 
 MARKER_NAME = "correction-round-open-in-progress"
 BLOCKING_MARKERS = {
@@ -181,6 +186,29 @@ def ensure_no_foreign_owner():
             fail(f"another workflow owner is unfinished: {name}")
 
 
+def validate_restore_pair(restore, *, create_target_parents=False):
+    with contextlib.ExitStack() as stack:
+        source = stack.enter_context(WorkspaceFileAnchor(
+            WORKSPACE, restore["object"], "the immutable Correction Round authority object",
+        ))
+        target = stack.enter_context(WorkspaceFileAnchor(
+            WORKSPACE, restore["target"], "the canonical Correction Round artifact",
+            create_parents=create_target_parents,
+        ))
+        source_status = source.status()
+        if source_status is None or source_status.st_nlink != 1 \
+                or source_status.st_mode & 0o222:
+            fail("the Correction Round opening has no exact immutable authority object")
+        payload = source.read_regular()
+        if hashlib.sha256(payload).hexdigest() != restore["sha256"]:
+            fail("the immutable Correction Round authority object changed")
+        target_status = target.status()
+        if target_status is not None \
+                and hashlib.sha256(target.read_regular()).hexdigest() != restore["sha256"]:
+            fail("the canonical Correction Round artifact contains foreign bytes")
+        return payload
+
+
 def derive_account(args, operation):
     entries, event, restores = raw_close(args)
     matches = [entry for entry in entries if entry.get("kind") == "correction.round.opened"
@@ -201,15 +229,7 @@ def derive_account(args, operation):
         fail("HEAD is not the exact frozen correction base")
     inspect_refs(args, event["base_commit"])
     for restore in restores:
-        source = WORKSPACE / restore["object"]
-        if source.is_symlink() or not source.is_file() \
-                or hashlib.sha256(source.read_bytes()).hexdigest() != restore["sha256"]:
-            fail("the Correction Round opening has no exact immutable authority object")
-        target = WORKSPACE / restore["target"]
-        if target.exists() or target.is_symlink():
-            if target.is_symlink() or not target.is_file() \
-                    or hashlib.sha256(target.read_bytes()).hexdigest() != restore["sha256"]:
-                fail("the canonical Correction Round artifact contains foreign bytes")
+        validate_restore_pair(restore)
     return {
         "schema": 1,
         "operation": operation,
@@ -226,38 +246,39 @@ def validate_marker(account, args, operation):
             or account.get("schema") != 1 or account.get("operation") != operation \
             or account.get("ref") != ref_name(args):
         fail("the pending Correction Round opening belongs to another operation")
-    _, current, restores = raw_close(args)
-    if account["event"] != current or account["base_commit"] != current["base_commit"] \
-            or account["restores"] != restores:
+    expected = derive_account(args, operation)
+    if account != expected:
         fail("the pending Correction Round opening changes its frozen close")
-    return account
+    return expected
 
 
 def restore_artifacts(account):
-    for restore in account["restores"]:
-        source = WORKSPACE / restore["object"]
-        if source.is_symlink() or not source.is_file():
-            fail("the immutable Correction Round authority object is unavailable")
-        payload = source.read_bytes()
-        if hashlib.sha256(payload).hexdigest() != restore["sha256"]:
-            fail("the immutable Correction Round authority object changed")
-        target = WORKSPACE / restore["target"]
-        if target.exists() or target.is_symlink():
-            if target.is_symlink() or not target.is_file() \
-                    or hashlib.sha256(target.read_bytes()).hexdigest() != restore["sha256"]:
+    with contextlib.ExitStack() as stack:
+        prepared = []
+        for restore in account["restores"]:
+            source = stack.enter_context(WorkspaceFileAnchor(
+                WORKSPACE, restore["object"],
+                "the immutable Correction Round authority object",
+            ))
+            target = stack.enter_context(WorkspaceFileAnchor(
+                WORKSPACE, restore["target"], "the canonical Correction Round artifact",
+                create_parents=True,
+            ))
+            source_status = source.status()
+            if source_status is None or source_status.st_nlink != 1 \
+                    or source_status.st_mode & 0o222:
+                fail("the immutable Correction Round authority object is unavailable")
+            payload = source.read_regular()
+            if hashlib.sha256(payload).hexdigest() != restore["sha256"]:
+                fail("the immutable Correction Round authority object changed")
+            target_status = target.status()
+            if target_status is not None \
+                    and hashlib.sha256(target.read_regular()).hexdigest() != restore["sha256"]:
                 fail("the canonical Correction Round artifact contains foreign bytes")
-            continue
-        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(temporary, flags, 0o444)
-        try:
-            if os.write(descriptor, payload) != len(payload):
-                fail("the restored Correction Round artifact had a short write")
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, target)
+            prepared.append((target, payload, target_status is not None))
+        for target, payload, exists in prepared:
+            if not exists:
+                target.publish(payload)
 
 
 def publish_ref(account):
@@ -297,7 +318,12 @@ def run(args):
                 and progress.note_data(entry) == event]
     marker = WORKSPACE / MARKER_NAME
     if len(existing) == 1 and not marker.exists() and not marker.is_symlink():
-        inspect_refs(args, event["base_commit"])
+        if not inspect_refs(args, event["base_commit"]):
+            fail("the recorded Correction Round opening has no task-0 ref")
+        progress.normalize_correction_round_opening(
+            entries[:entries.index(existing[0])], event,
+            "the recorded Correction Round opening", historical=True,
+        )
         print("CORRECTION ROUND ALREADY OPEN")
         return
     with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
@@ -322,7 +348,9 @@ def run(args):
             progress.normalize_correction_round_opening(
                 entries, account["event"], "the Correction Round opening",
             )
-            progress.cmd_note_with_lease(note_args(account["event"]), lease, operation)
+            progress.cmd_note_with_lease(
+                note_args(account["event"]), lease, operation, owner_marker=MARKER_NAME,
+            )
         marker.unlink()
         print(f"CORRECTION ROUND OPEN {args.built} {args.round}")
 
