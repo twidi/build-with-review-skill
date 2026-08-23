@@ -116,6 +116,23 @@ def every_child_launch_has_an_explicit_workspace_input():
 
 
 @test
+def session_creation_visibility_keeps_one_exact_child_identity():
+    skill = " ".join(SKILL.read_text(encoding="utf-8").split())
+    product = " ".join(read("prompts/product-review/MODE.md").split())
+    journal = " ".join(read("prompts/common/progress-rules.md").split())
+
+    for subject, text in (
+        ("shared root", skill),
+        ("journal caller contract", journal),
+        ("PRODUCT lens launch", product),
+    ):
+        check("session-started" in text and "visibility" in text,
+              f"{subject} does not assign the post-creation visibility boundary")
+        check("returned id" in text and "replacement" in text,
+              f"{subject} does not preserve the exact created child identity")
+
+
+@test
 def shared_runtime_contract_forbids_a_working_directory_fallback():
     skill = SKILL.read_text(encoding="utf-8")
     worker = read("prompts/common/worker.md")

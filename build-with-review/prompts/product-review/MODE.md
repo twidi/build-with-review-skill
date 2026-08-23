@@ -128,7 +128,9 @@ For each lens, `mcp__twicc__create_session`, one call carrying everything:
   `bwr.feature=<feature>` · `bwr.lot=<lot>` · `bwr.mandate=<its slug from the table>` ·
   `bwr.status=working`
 
-Then, per lens: `progress.py session-started <id>`.
+Then, per lens: `progress.py session-started <id>`. That boundary owns the short
+post-creation visibility interval under the shared root rule. A visibility refusal keeps
+the returned id and permits only the same boundary later, never a replacement lens.
 
 The message gives it: **the workspace path**, the prompt to read first
 (`<workspace>/prompts/product-review/<its lens>.md`), **the path to the current spec**,

@@ -39,6 +39,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -163,6 +164,8 @@ REPO = str(Path(WORKSPACE).parent.parent.parent.resolve())
 # pointing at the instance that owns these sessions.
 TWICC = shlex.split(os.environ.get("TWICC_BIN") or "twicc")
 NEUTRAL_CWD = tempfile.gettempdir()
+SESSION_VISIBILITY_ATTEMPTS = 21
+SESSION_VISIBILITY_DELAY_SECONDS = 0.25
 
 # These journal transitions can select, replace, or consume one Correction
 # Round owner. They share one physical lease with the mutating shell helpers.
@@ -237,6 +240,38 @@ def run(args):
         return json.loads(out)
     except ValueError as exc:
         fail(f"`{' '.join(args)}` returned unreadable output", f"{exc} — first bytes: {out[:200]!r}")
+
+
+def created_session(session_id):
+    """Read a just-created session across the CLI's short visibility lag.
+
+    The creation result already supplied the authoritative id. Only the exact
+    not-found response is transient here. Every other CLI failure stays final.
+    """
+    command = ["session", session_id]
+    not_found = re.compile(
+        rf"^(?:Error:\s*)?session\s+['\"]{re.escape(session_id)}['\"]\s+not found\.?$",
+        re.IGNORECASE,
+    )
+    for read_number in range(SESSION_VISIBILITY_ATTEMPTS):
+        ok, out = attempt(command)
+        if ok:
+            try:
+                return json.loads(out)
+            except ValueError as exc:
+                fail(
+                    f"`{' '.join(command)}` returned unreadable output",
+                    f"{exc} — first bytes: {out[:200]!r}",
+                )
+        if not not_found.fullmatch(out.strip()):
+            fail(f"`{' '.join(['twicc'] + command)}` failed", out)
+        if read_number + 1 < SESSION_VISIBILITY_ATTEMPTS:
+            time.sleep(SESSION_VISIBILITY_DELAY_SECONDS)
+    fail(
+        f"`{' '.join(['twicc'] + command)}` stayed temporarily unavailable",
+        f"Keep created session id {session_id}. Create no replacement. "
+        "After the exact session is readable, retry only this session-started command.",
+    )
 
 
 def whoami():
@@ -8372,7 +8407,7 @@ def refresh_dashboard():
 
 def cmd_session_started(args):
     me = whoami()
-    target = run(["session", args.session_id])
+    target = created_session(args.session_id)
     append_event(me["session_id"], "session-started",
                  session=args.session_id, **context_of(target))
 

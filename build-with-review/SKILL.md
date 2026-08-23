@@ -1445,6 +1445,12 @@ true of a repository that is not this one.
 progress.py session-started <id>
 ```
 
+The command owns the short interval in which creation has returned an id but the exact
+session is not yet readable. It retries only that exact `session not found` result. If
+the command still refuses for that reason, keep the returned id, create no replacement,
+wait until that exact session is readable, then retry only the same `session-started`
+boundary. Nothing was journaled by the refused call.
+
 **A creation can land while its result is lost** — the call cut, timed out, or your
 turn gone before the id reached you. **Never retry on trust, and never write it off**:
 a blind retry seats a second owner on one assignment — two writers on one report path,
