@@ -443,7 +443,9 @@ continues, and the next full round's fresh reviewers cover what it names by
 construction — every mandate reads the whole document, every round. **Once, though — never forever**: the same reason returned by the next round's
 fresh reviewer is a stable blocker, not a lapse of attention. Stop opening rounds and
 take it to the human — `SKILL.md`'s audit duty carries the gesture and its journal
-line — and nothing runs until they answer.
+line. Before the widget, use `SKILL.md`'s **human-judgment presentation rule** with a
+workflow orientation. Name both full rounds, the repeated `NOT DONE` reason, the attempted
+lift, and the exact consequence of every available answer. Nothing runs until they answer.
 
 Never a reviewer simply writing READY. Expect three to five full rounds.
 
@@ -451,8 +453,11 @@ Never a reviewer simply writing READY. Expect three to five full rounds.
 verification while each pass closes findings. When the same defect survives several passes
 — the fixer's edits circling one spot — stop: the construction, or the requirement behind
 it, is wrong. Analyse it as *Recurring findings* requires, write the analysis to the human,
-then ask. **This is the one place where the loop may stop and wait**; everywhere else it
-runs unattended.
+then ask. Before the widget, use `SKILL.md`'s **human-judgment presentation rule**. Select
+the orientation only after the Recurring findings classification: a user-visible behaviour
+choice uses product orientation; a construction or workflow routing choice uses workflow
+orientation. Then give the repeated edit evidence, alternatives and next routes. **This
+is the one place where the loop may stop and wait**; everywhere else it runs unattended.
 
 ---
 
@@ -677,7 +682,8 @@ in `SKILL.md`. An escalated product answer receives its `R<N>`, `ruling` and com
 run-wide `ruling.ready` state there. Compare the proposed fixer assignment with every
 active product answer, including closed-batch answers. Resolve any conflict before the
 assignment. Before its widget, use `SKILL.md`'s **human-judgment presentation rule**:
-give the decision need, origin, evidence, timing and option trade-offs. One addition
+start with the product orientation, then give the decision need, origin, evidence,
+timing and option trade-offs. One addition
 here: **no fixer round starts while a DECISION or its global answer state is open.**
 
 ### Recurring findings, and rotating the fixer

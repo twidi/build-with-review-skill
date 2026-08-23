@@ -86,6 +86,10 @@ git status --porcelain
 their own work: commit it, stash it, or tell you to stop. **You never commit it, never
 stash it, and never reset it yourself.**
 
+Before the widget, use `SKILL.md`'s **human-judgment presentation rule** with a workflow
+orientation. Name the checkout, every reported path, the unknown ownership, and the
+effect of commit, stash, or stop. Do not invent a product surface.
+
 This is the phase's real precondition, and it is what makes the rest of the mode sound.
 **From here on, everything in the working tree belongs to this run** — which is the only
 reason `git add -A` is allowed to preserve a failed or paused attempt wholesale. Start on
@@ -110,6 +114,11 @@ fi
 as a proven-absent path: both `-e` and `-L` are false. A symlink, including a dangling
 one, directory, device or other occupant is foreign state. Stop and ask the human to
 classify it. Do not read, replace, remove or write through it.
+
+Before that widget, use `SKILL.md`'s **human-judgment presentation rule** with a workflow
+orientation. Name the exact path, observed occupant, expected regular-file or absent
+states, and the safe consequence of each available classification. Do not invent a
+product surface.
 
 If the real file exists, read it. If the path is proven absent, this is a first
 discovery — C0.4 and C0.5 apply.
@@ -249,9 +258,10 @@ until a changed command, materially changed concern, new concern or explicit hum
 revocation reasonably reopens it.
 
 This is a judgement question. Before its widget, use `SKILL.md`'s
-**human-judgment presentation rule**. Explain why the uncertainty survives, who found it,
-why it appears now, and the consequences, advantages and downsides of confirming or
-rejecting interference.
+**human-judgment presentation rule**. Start with the workflow orientation for these two
+commands and their possible shared resource. Then explain why the uncertainty survives,
+who found it, why it appears now, and the consequences, advantages and downsides of
+confirming or rejecting interference.
 
 Write the complete derived schedule draft to one real file. Publish it only through:
 
@@ -1383,6 +1393,11 @@ analysis — both earlier reports, the diagnostic's verdict, what the attempt af
 changed and what it did not — and take it to the human. Nothing is launched until they
 answer.
 
+Before the widget, use `SKILL.md`'s **human-judgment presentation rule** with a workflow
+orientation. Name the task, attempts, outside diagnostic, repeated failure, preserved
+state, and the exact continuation or stop consequence of each available answer. Do not
+invent a product surface.
+
 ```
 progress.py note not-converging --task <N> --text-file "$JOURNAL_TEXT_FILE"
 ```
@@ -1550,6 +1565,11 @@ route has run:**
 | the task's own ref already exists | **a validated ref never moves — and the script settles this first, before it requires the identity.** This closer has no journal note and no pending marker, so the ref is its only completion proof: **equal to the reported commit, the recording completed and only its output was lost** — the script answers `already recorded`, clears a matching stale identity, and what remains is yours: retire the implementer and advance, never rerun anything. A ref that differs refuses: the task number is wrong, or the report is — check which task you meant. A rebuilt task has no ref to collide with; the rewind took it out of the way. |
 | more than one commit since that mark | **the task broke *one task, one commit*** — a rewind reads any commit not at a task ref as the controller's and re-lands it, so half a task would come back from the dead. The attempt cannot repair this — a reset is not the implementer's to make. Route it as a failed attempt, classification `C3.9a` — its design was closed by its checker — `attempt-failed.sh` preserves the commits on the try ref and puts the branch back to the mark; the next attempt implements the design again, in one commit. |
 
+The **missing start marker** row is a non-routine human judgement. Before its widget, use
+`SKILL.md`'s **human-judgment presentation rule** with a workflow orientation. Name the
+task, session, observed branch and tree, absent identity boundary, attribution risk, and
+the consequence of every available answer. Do not infer or recreate the missing marker.
+
 **The dirty-tree row grants one return, and the grant is journaled as it is given** —
 `progress.py note bound.spent --task <N> --text "dirty Done sent back - attempt <K>"` —
 because after a compaction that note is the only thing that says the return was already
@@ -1678,8 +1698,9 @@ Read what it is asking, and answer in one of three ways:
   identified `R<N>` route and leave the session `blocked`. Publish the run-wide
   `ruling.ready` state and resolve any conflict with an earlier active answer before the
   spec edit or amendment route. Before the widget, use `SKILL.md`'s
-  **human-judgment presentation rule**. Set the implementer back to `working` only after
-  that route has put the effective answer in the spec, just before you send it down.
+  **human-judgment presentation rule** and start with the product orientation. Set the
+  implementer back to `working` only after that route has put the effective answer in
+  the spec, just before you send it down.
 
   ```
   progress.py session-status <id> blocked
@@ -1747,6 +1768,11 @@ route.
 |---|---|
 | **Pause** | preserve it on a ref, then step back. It is the one thing that would otherwise be built twice. |
 | **Abort** | the same preserve and step back — **and any unaccepted commit leaves the branch with it**: the try ref is the only record naming that code an abandoned attempt, and the refs' fate is the human's question at an abort's end. Then the clean removes what the task created. |
+
+Before the abort ref widget, use `SKILL.md`'s **human-judgment presentation rule** with a
+workflow orientation. Name the aborted attempt, preserved ref and commit, what cleanup
+already removes, and the future recovery or deletion consequence of each answer. Do not
+invent a product surface.
 
 **A task creates files as much as it changes them**, a new module, a new test, and a
 `reset --hard` leaves those where they are. The script removes them and lists what it

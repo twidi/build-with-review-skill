@@ -736,6 +736,14 @@ DECISION and every human checkpoint that needs a judgement. Before the widget, e
 the decision in ordinary prose so the human can answer without having followed the
 whole run:
 
+- **Every DECISION starts with an explicit product orientation.** Put it before
+  detection, evidence, timing, or options. In plain product language, state the feature
+  or product area and the exact screen or surface. State what the user does immediately
+  before the issue and what the user sees now. Define every project-specific object or
+  label before using it. Give one concrete start-to-finish example without implementation
+  details. A workflow-only judgement starts with an equivalent workflow orientation.
+  State the exact operation, current state and concrete sequence. Do not invent a product
+  screen or user action for a workflow-only question;
 - why the answer is necessary now, and what cannot continue without it;
 - who detected it, in which role and phase, and what evidence confirmed it;
 - why an earlier phase did not settle it. If the evidence shows that an earlier phase
@@ -745,9 +753,11 @@ whole run:
   its downsides and risks, and what the workflow does next if the human selects it.
 
 Use **one numbered context block per question** when several judgements are batched.
-Keep the same IDs and short labels in the widget, in the same order. Then send one widget
-call, up to its normal capacity. A short widget description may summarise the prose; it
-never replaces it.
+Start each block with the orientation required for that question. Keep the same IDs and
+short labels in the widget, in the same order. Then send one widget call, up to its normal
+capacity. Write each widget question so its subject, immediate user or workflow action,
+and required choice remain understandable when read without the preceding prose. A short
+widget description may summarise the prose; it never replaces it.
 
 **No fixed prose template.** Write the amount and structure the decision needs. This is
 presentation only: it creates no new artifact or schema and no mechanical validator
@@ -766,6 +776,11 @@ state that needs human judgement, explain that judgement through this rule.
 | **A lot is delivered**, its review pass clean | the same four, with *the next lot* in place of *what happens next* |
 | **An amendment opens** | provider for the **amendment fixer** · provider for the **reach sweep** |
 | **The feature is finished** | the workspace and the git refs: **keep them to read the run back, or clean up** |
+
+The feature-finished trace choice uses the **human-judgment presentation rule** with a
+workflow orientation. Name the completed feature, workspace, ref namespace, retained
+history, destructive cleanup order, and consequence of both choices. This does not make
+the routine provider and session-placement questions longer.
 
 - **The cap is asked once, at the first human checkpoint, for the whole feature.** Every later
   orchestrator is handed it rather than asking again.
@@ -1000,6 +1015,10 @@ read the run back afterwards, or clean up. Ask, and do nothing until they answer
 the trace of this run, both are private to it, and neither touches the repository's own
 history.
 
+Before that widget, use the **human-judgment presentation rule** with a workflow
+orientation. Name the aborted run, workspace, ref namespace, preserved attempt commits,
+read-back value, destructive cleanup order, and consequence of both choices.
+
 | | |
 |---|---|
 | **Keep** | leave the refs alone. A failed attempt's ref is the only handle on commits nothing else points at. |
@@ -1089,7 +1108,10 @@ reaches it through an implementer.
   silent child — stop its process, retire it `failed`, free its path, replace it —
   a fixer by its own recreation rule, anyone else by a fresh session on the same
   assignment. And once only: a replacement failing the same way is a stable blocker —
-  `not-converging`, the human, nothing relaunched before they answer. **Not every
+  `not-converging`, the human, nothing relaunched before they answer. Before that widget,
+  use this **human-judgment presentation rule** with a workflow orientation. Name the
+  role, assignment, original and replacement returns, malformed contract, and available
+  recovery choices. **Not every
   role owes a completion block** — a role whose work is proved by running it owes
   none, and its mode file says so.
   - **A `NOT DONE` whose reason you cannot lift is retried through one fresh reader at
@@ -1097,7 +1119,9 @@ reaches it through an implementer.
     honest from fresh eyes is a stable blocker, never a lapse of attention: stop
     retrying, record it — `progress.py note not-converging --text-file
     "$JOURNAL_TEXT_FILE"` — and take it to the human, with what you tried to lift.
-    Nothing re-runs until they answer.
+    Before that widget, use this **human-judgment presentation rule** with a workflow
+    orientation. Name both readers, the exact repeated reason, the attempted lift, and
+    the consequence of every available answer. Nothing re-runs until they answer.
 - **Spot-check a report that found nothing.** Pick two or three of its claimed checks at
   random and redo them. On a report carrying findings, check nothing — they carry it
   either way. Announcing which checks you redo publishes the exam.
@@ -1183,7 +1207,10 @@ name, directory contents or birthmark substitutes for that registration. Cleanup
 fallback; an unregistered directory is foreign state and remains untouched.
 
 **It also refuses to create anything if `.superpowers/` is not ignored by git**, and that
-one is a question for the human. **Ask, do what they answer, then run the script again.**
+one is a question for the human. Before the widget, use the **human-judgment presentation
+rule** with a workflow orientation. Name the repository, refused workspace operation,
+current ignore state, and the tracked or clone-local consequence of each choice. **Ask,
+do what they answer, then run the script again.**
 
 | | |
 |---|---|
@@ -1469,6 +1496,10 @@ the exact annotations, `--include-archived --include-hidden` — and route on th
 | **exactly one match** | the creation landed. Adopt that id, write its `session-started` line, continue as if the call had returned it. |
 | **no match** | it never landed. Create it now — this is not a retry. |
 | **several matches** | a duplicate already exists. Stop their processes and take it to the human: which one owns the assignment is not yours to guess — both may have written. |
+
+Before the duplicate-owner widget, use the **human-judgment presentation rule** with a
+workflow orientation. Name the assignment, every matching session, their visible state,
+the possible shared write target, and the ownership or cleanup consequence of each answer.
 
 **One creature mutates the very identity you would query: a transferred
 orchestrator.** It owns its `bwr.mode`, `bwr.lot` and `bwr.status` from its first

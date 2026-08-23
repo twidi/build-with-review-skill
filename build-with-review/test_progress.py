@@ -7675,6 +7675,25 @@ def human_judgment_context_precedes_every_choice_widget_without_a_new_schema():
     skill_flat = " ".join(skill.split())
     check("The widget is the last step, never the explanation" in skill_flat,
           "a human judgment must receive context before its widget")
+    check("Every DECISION starts with an explicit product orientation" in skill_flat,
+          "a product DECISION must start with a product orientation")
+    check("feature or product area" in skill_flat and "exact screen or surface" in skill_flat,
+          "the orientation must identify the product area and surface")
+    check("what the user does immediately before the issue" in skill_flat
+          and "what the user sees now" in skill_flat,
+          "the orientation must establish the user action and visible result")
+    check("Define every project-specific object or label" in skill_flat,
+          "the orientation must define project-specific language")
+    check("one concrete start-to-finish example" in skill_flat
+          and "without implementation details" in skill_flat,
+          "the orientation must include one concrete product example")
+    check("before detection, evidence, timing, or options" in skill_flat,
+          "product orientation must precede technical and workflow analysis")
+    check("understandable when read without the preceding prose" in skill_flat,
+          "the widget question must remain understandable on its own")
+    check("A workflow-only judgement starts with an equivalent workflow orientation" in skill_flat
+          and "Do not invent a product screen or user action" in skill_flat,
+          "a workflow judgment must orient the human without inventing product context")
     check("why the answer is necessary now" in skill_flat and "what cannot continue without it" in skill_flat,
           "the orchestrator must explain the decision need and blocker")
     check("who detected it" in skill_flat and "evidence confirmed it" in skill_flat,
@@ -7698,10 +7717,122 @@ def human_judgment_context_precedes_every_choice_widget_without_a_new_schema():
     for name, mode in modes.items():
         check("human-judgment presentation rule" in mode,
               f"{name} does not propagate the shared human-judgment presentation rule")
+    for name in ("SPEC", "PRODUCT REVIEW", "AMENDMENT"):
+        check("product orientation" in modes[name],
+              f"{name} does not preserve product orientation at its direct DECISION boundary")
+    check("workflow orientation" in modes["CONSTRUCTION"] and "product orientation" in modes["CONSTRUCTION"],
+          "CONSTRUCTION must distinguish workflow judgments from product DECISIONs")
     check(modes["PRODUCT REVIEW"].count("human-judgment presentation rule") >= 3,
           "PRODUCT REVIEW must propagate the rule to initial, supplemental and conflict questions")
+    check(modes["PRODUCT REVIEW"].count("product orientation") >= 3,
+          "PRODUCT REVIEW must preserve product orientation for initial, supplemental and conflict questions")
     check("discussion is free-form" in modes["AMENDMENT"] and "final bounded choice" in modes["AMENDMENT"],
           "AMENDMENT must preserve discussion while contextualising its final choice")
+
+    amendment_repeated_reach = modes["AMENDMENT"].split("And once only", 1)[1].split(
+        "A DECISION raised by the sweep", 1)[0]
+    check("human-judgment presentation rule" in amendment_repeated_reach
+          and "workflow orientation" in amendment_repeated_reach,
+          "a repeated unliftable Reach blocker must orient its human judgment")
+    amendment_exit = modes["AMENDMENT"].split("The exit door", 1)[1].split(
+        "The hand-back clause", 1)[0]
+    check("human-judgment presentation rule" in amendment_exit
+          and "workflow orientation" in amendment_exit,
+          "the Reach exit door must orient its human judgment")
+
+    construction_dirty = modes["CONSTRUCTION"].split(
+        "C0.1 · The working tree", 1)[1].split("C0.2 · Read the gate file", 1)[0]
+    check("human-judgment presentation rule" in construction_dirty
+          and "workflow orientation" in construction_dirty,
+          "a foreign dirty tree must orient its human judgment")
+    construction_gate_leaf = modes["CONSTRUCTION"].split(
+        "C0.2 · Read the gate file", 1)[1].split("C0.2a · Validate gate execution", 1)[0]
+    check("human-judgment presentation rule" in construction_gate_leaf
+          and "workflow orientation" in construction_gate_leaf,
+          "a foreign gate leaf must orient its human judgment")
+    construction_repeated_failure = modes["CONSTRUCTION"].split(
+        "And it runs once logically per task", 1)[1].split("C3.9 · Where the next attempt starts", 1)[0]
+    check("human-judgment presentation rule" in construction_repeated_failure
+          and "workflow orientation" in construction_repeated_failure,
+          "a repeated post-diagnostic failure must orient its human judgment")
+    construction_abort_refs = modes["CONSTRUCTION"].split(
+        "The code:", 1)[1].split("A task creates files", 1)[0]
+    check("human-judgment presentation rule" in construction_abort_refs
+          and "workflow orientation" in construction_abort_refs,
+          "abort ref retention must orient its human judgment")
+
+    product_structural_exits = modes["PRODUCT REVIEW"].split(
+        "Two numbers to report", 1)[1].split("The rule that governs every later pass", 1)[0]
+    check("human-judgment presentation rule" in product_structural_exits
+          and "workflow orientation" in product_structural_exits,
+          "oversized and repeated-area sub-lot exits must orient their human judgments")
+
+    audit_blockers = skill_flat.split("Audit what comes back", 1)[1].split(
+        "Spot-check a report", 1)[0]
+    check("human-judgment presentation rule" in audit_blockers
+          and "workflow orientation" in audit_blockers,
+          "shared malformed and NOT DONE blockers must orient their human judgments")
+    workspace_ignore = skill_flat.split(
+        "It also refuses to create anything if `.superpowers/` is not ignored", 1)[1].split(
+        "The subject is yours", 1)[0]
+    check("human-judgment presentation rule" in workspace_ignore
+          and "workflow orientation" in workspace_ignore,
+          "the workspace ignore choice must orient its human judgment")
+    abort_trace = skill_flat.split(
+        "The workspace and the git refs go together", 1)[1].split("The reports need no decision", 1)[0]
+    check("human-judgment presentation rule" in abort_trace
+          and "workflow orientation" in abort_trace,
+          "the abort keep-or-clean choice must orient its human judgment")
+    final_trace = skill_flat.split("The feature is finished", 1)[1].split(
+        "The cap is asked once", 1)[0]
+    check("human-judgment presentation rule" in final_trace
+          and "workflow orientation" in final_trace,
+          "the final-delivery keep-or-clean choice must orient its human judgment")
+
+    spec_not_done = modes["SPEC"].split("And no block of that closing round", 1)[1].split(
+        "Never a reviewer simply writing READY", 1)[0]
+    check("human-judgment presentation rule" in spec_not_done
+          and "workflow orientation" in spec_not_done,
+          "the second full-round NOT DONE must orient its human judgment")
+    product_replacement = modes["PRODUCT REVIEW"].split(
+        "And relaunch once", 1)[1].split("Then go to R2.1", 1)[0]
+    check("human-judgment presentation rule" in product_replacement
+          and "workflow orientation" in product_replacement,
+          "the replacement lens stable blocker must orient its human judgment")
+    construction_missing_start = modes["CONSTRUCTION"].split(
+        "Ten refusals, and each has its route", 1)[1].split("The dirty-tree row grants one return", 1)[0]
+    check("missing start marker" in construction_missing_start
+          and "human-judgment presentation rule" in construction_missing_start
+          and "workflow orientation" in construction_missing_start,
+          "a missing attempt-start marker must orient its human judgment")
+    amendment_reach_decision = modes["AMENDMENT"].split(
+        "A DECISION raised by the sweep", 1)[1].split("Before sending the answer to the fixer", 1)[0]
+    check("human-judgment presentation rule" in amendment_reach_decision
+          and "product orientation" in amendment_reach_decision,
+          "an amendment Reach DECISION must orient its product judgment")
+    product_final_trace = modes["PRODUCT REVIEW"].split(
+        "Only when the human says the whole feature is done", 1)[1].split(
+        "This line must land before the first cleanup gesture", 1)[0]
+    check("human-judgment presentation rule" in product_final_trace
+          and "workflow orientation" in product_final_trace,
+          "PRODUCT REVIEW must preserve final trace orientation")
+    duplicate_session = skill_flat.split("several matches", 1)[1].split(
+        "One creature mutates", 1)[0]
+    check("human-judgment presentation rule" in duplicate_session
+          and "workflow orientation" in duplicate_session,
+          "duplicate physical owners must orient their human judgment")
+    amendment_consolidation = modes["AMENDMENT"].split("Three rounds at most", 1)[1].split(
+        "You commit both files", 1)[0]
+    check("human-judgment presentation rule" in amendment_consolidation
+          and "workflow orientation" in amendment_consolidation,
+          "a non-converging amendment consolidation must orient its human judgment")
+    spec_scoped_nonconvergence = modes["SPEC"].split(
+        "A scoped chain that does not converge", 1)[1].split("Closing the spec", 1)[0]
+    check("human-judgment presentation rule" in spec_scoped_nonconvergence
+          and "product orientation" in spec_scoped_nonconvergence
+          and "workflow orientation" in spec_scoped_nonconvergence
+          and "after the Recurring findings classification" in spec_scoped_nonconvergence,
+          "a non-converging scoped SPEC chain must select orientation from its classification")
 
 
 @test
