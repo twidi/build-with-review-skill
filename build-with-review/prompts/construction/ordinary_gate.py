@@ -43,8 +43,9 @@ def marker_data(op):
         if not separator or not value or key in data:
             refuse("the gate-check marker is malformed")
         data[key] = value
-    if len(data) not in {11, 12} or data.get("op") != op or data.get("scope") != "review" \
-            or (len(data) == 12 and "execution" not in data):
+    if len(data) not in {11, 12, 13} or data.get("op") != op \
+            or data.get("scope") not in {"review", "correction-review"} \
+            or data.get("scope") == "correction-review" and "correction" not in data:
         refuse("the marker does not own this exact ordinary gate operation")
     return data
 

@@ -52,8 +52,8 @@ read_marker() {
     [ -f "$MARKER" ] && [ ! -L "$MARKER" ] \
         || die "the gate-check marker is not one real regular file: $MARKER"
     mapfile -t M_LINES < "$MARKER"
-    [ "${#M_LINES[@]}" -eq 11 ] || [ "${#M_LINES[@]}" -eq 12 ] \
-        || die "the gate-check marker has ${#M_LINES[@]} lines; expected 11 or 12"
+    [ "${#M_LINES[@]}" -ge 11 ] && [ "${#M_LINES[@]}" -le 13 ] \
+        || die "the gate-check marker has ${#M_LINES[@]} lines; expected 11 through 13"
     marker_value() {
         local wanted=$1 line found=()
         for line in "${M_LINES[@]}"; do
@@ -77,20 +77,27 @@ read_marker() {
     M_TREE=$(marker_value tree)
     M_GATE=$(marker_value gate)
     M_CODE=$(marker_value code)
+    M_CORRECTION=-
+    if printf '%s\n' "${M_LINES[@]}" | grep -q '^correction '; then
+        M_CORRECTION=$(marker_value correction)
+    fi
     M_EXECUTION=-
-    if [ "${#M_LINES[@]}" -eq 12 ]; then
+    if printf '%s\n' "${M_LINES[@]}" | grep -q '^execution '; then
         M_EXECUTION=$(marker_value execution)
     fi
     [[ $M_OP =~ ^[0-9a-f]{64}$ ]] || die "the gate-check marker has an invalid operation identity"
-    [[ $M_SCOPE =~ ^(task|baseline|review)$ ]] || die "the gate-check marker has an invalid scope"
+    [[ $M_SCOPE =~ ^(task|baseline|review|correction-task|correction-review)$ ]] \
+        || die "the gate-check marker has an invalid scope"
     [[ $M_OWNER =~ ^[A-Za-z0-9._:/-]+$ ]] || die "the gate-check marker has an invalid owner"
     [[ $M_LOT =~ ^(-|lot-[1-9][0-9]*(\.[1-9][0-9]*)?)$ ]] || die "the gate-check marker has an invalid lot"
     [[ $M_TASK =~ ^[0-9]+$ ]] && [[ $M_ATTEMPT =~ ^[0-9]+$ ]] \
         || die "the gate-check marker has an invalid task or attempt"
+    [[ $M_CORRECTION = - || $M_CORRECTION =~ ^[1-9][0-9]*$ ]] \
+        || die "the gate-check marker has an invalid correction round"
     for value in "$M_HEAD" "$M_BASE" "$M_TREE" "$M_GATE"; do
         [[ $value =~ ^[0-9a-f]{40,64}$ ]] || die "the gate-check marker has an invalid Git identity"
     done
-    if [ "$M_SCOPE" = task ]; then
+    if [ "$M_SCOPE" = task ] || [ "$M_SCOPE" = correction-task ]; then
         [[ $M_CODE =~ ^[0-9]+:[0-9a-f]{64}$ ]] \
             || die "the task gate-check marker has no valid final code-review proof"
     else
@@ -160,22 +167,26 @@ PY
 event_data() {
     local audit=${1:-} unusable=${2:-}
     python3 - "$M_OP" "$M_SCOPE" "$M_OWNER" "$M_LOT" "$M_TASK" "$M_ATTEMPT" \
-        "$M_HEAD" "$M_BASE" "$M_TREE" "$M_GATE" "$M_CODE" "$M_EXECUTION_HASH" \
+        "$M_HEAD" "$M_BASE" "$M_TREE" "$M_GATE" "$M_CODE" "$M_CORRECTION" "$M_EXECUTION_HASH" \
         "$audit" "$unusable" <<'PY'
 import json, sys
-keys = ("op", "scope", "owner", "lot", "task", "attempt", "head", "base", "tree", "gate", "code", "execution")
-values = sys.argv[1:13]
+keys = ("op", "scope", "owner", "lot", "task", "attempt", "head", "base", "tree", "gate", "code", "correction", "execution")
+values = sys.argv[1:14]
 data = dict(zip(keys, values))
 data["task"] = int(data["task"])
 data["attempt"] = int(data["attempt"])
+if data["correction"] == "-":
+    del data["correction"]
+else:
+    data["correction"] = int(data["correction"])
 if data["execution"] == "-":
     del data["execution"]
-if sys.argv[14]:
-    if sys.argv[14] not in {"error", "empty", "lost", "unusable"}:
+if sys.argv[15]:
+    if sys.argv[15] not in {"error", "empty", "lost", "unusable"}:
         raise SystemExit("the gate-runner unusable reason is invalid")
-    data["unusable"] = sys.argv[14]
-elif sys.argv[13]:
-    outcome = json.loads(sys.argv[13])
+    data["unusable"] = sys.argv[15]
+elif sys.argv[14]:
+    outcome = json.loads(sys.argv[14])
     if set(outcome) != {"green", "surface", "report", "report_sha256", "commands"}:
         raise SystemExit("the gate report audit has an invalid result shape")
     data.update(outcome)
@@ -238,8 +249,9 @@ PY
 }
 
 open_check() {
-    local scope=$1 owner=$2 lot=$3 task=$4 attempt=$5 base_arg=$6 code=-
-    [[ $scope =~ ^(task|baseline|review)$ ]] || die "gate-check open scope must be task, review or baseline"
+    local scope=$1 owner=$2 lot=$3 task=$4 attempt=$5 base_arg=$6 correction=${7:--} code=-
+    [[ $scope =~ ^(task|baseline|review|correction-task|correction-review)$ ]] \
+        || die "gate-check open scope is invalid"
     [[ $owner =~ ^[A-Za-z0-9._:/-]+$ ]] || die "the gate-check owner has invalid characters"
     validate_gate
     local head base tree op round marker_draft
@@ -247,29 +259,53 @@ open_check() {
     base=$(git rev-parse --verify "$base_arg^{commit}") \
         || die "$base_arg is not a commit"
     tree=$(candidate_tree)
-    if [ "$scope" = task ] || [ "$scope" = review ]; then
+    if [ "$scope" = task ] || [ "$scope" = review ] \
+            || [ "$scope" = correction-task ] || [ "$scope" = correction-review ]; then
         [[ $lot =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] \
             && [[ $task =~ ^[1-9][0-9]*$ ]] && [[ $attempt =~ ^[1-9][0-9]*$ ]] \
             || die "a task gate needs one valid lot, task and attempt"
         if [ "$scope" = task ]; then
             [ "$owner" = "$lot/task-$task/attempt-$attempt" ] \
                 || die "the task gate owner must be $lot/task-$task/attempt-$attempt"
-        else
+        elif [ "$scope" = review ]; then
             round=${owner#"$lot/task-$task/attempt-$attempt/code-round-"}
             [[ $round =~ ^[1-9][0-9]*$ ]] \
                 && [ "$owner" = "$lot/task-$task/attempt-$attempt/code-round-$round" ] \
                 || die "the review gate owner must identify one code round of this attempt"
+        elif [ "$scope" = correction-task ]; then
+            [[ $correction =~ ^[1-9][0-9]*$ ]] \
+                && [ "$owner" = "$lot/correction-$correction/task-$task/attempt-$attempt" ] \
+                || die "the correction task gate has an invalid owner"
+        else
+            [[ $correction =~ ^[1-9][0-9]*$ ]]
+            round=${owner#"$lot/correction-$correction/task-$task/attempt-$attempt/code-round-"}
+            [[ $round =~ ^[1-9][0-9]*$ ]] \
+                && [ "$owner" = "$lot/correction-$correction/task-$task/attempt-$attempt/code-round-$round" ] \
+                || die "the correction review gate has an invalid owner"
         fi
-        read -r f_lot f_task f_attempt < "$WORKSPACE/attempt-in-flight" 2>/dev/null \
-            || die "no readable attempt is in flight"
-        [ "$f_lot $f_task $f_attempt" = "$lot $task $attempt" ] \
-            || die "attempt-in-flight names $f_lot task $f_task attempt $f_attempt, not this gate owner"
-        if [ "$scope" = task ]; then
+        if [[ $scope = correction-* ]]; then
+            python3 - "$WORKSPACE/attempt-in-flight" "$lot" "$correction" "$task" "$attempt" <<'PY' \
+                || die "attempt-in-flight does not name this correction gate owner"
+import json, pathlib, sys
+path, built, correction, task, attempt = sys.argv[1:]
+value = json.loads(pathlib.Path(path).read_text())
+expected = {"kind":"correction","built":built,"round":int(correction)}
+if value.get("schema") != 2 or value.get("unit") != expected \
+        or value.get("task") != int(task) or value.get("attempt") != int(attempt):
+    raise SystemExit(1)
+PY
+        else
+            read -r f_lot f_task f_attempt < "$WORKSPACE/attempt-in-flight" 2>/dev/null \
+                || die "no readable attempt is in flight"
+            [ "$f_lot $f_task $f_attempt" = "$lot $task $attempt" ] \
+                || die "attempt-in-flight names $f_lot task $f_task attempt $f_attempt, not this gate owner"
+        fi
+        if [ "$scope" = task ] || [ "$scope" = correction-task ]; then
             code=$(latest_code_proof "$lot" "$task" "$attempt") \
                 || die "the task gate cannot open before its latest code review has one durable final proof"
         fi
     else
-        [ "$lot $task $attempt" = "- 0 0" ] \
+        [ "$lot $task $attempt $correction" = "- 0 0 -" ] \
             || die "a baseline gate uses lot '-', task 0 and attempt 0"
         [ -z "$(git status --porcelain)" ] \
             || die "a controller baseline gate opens only on a clean committed tree"
@@ -279,8 +315,8 @@ open_check() {
 
     if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
         read_marker
-        [ "$M_SCOPE $M_OWNER $M_LOT $M_TASK $M_ATTEMPT $M_HEAD $M_BASE $M_TREE $M_GATE $M_CODE" \
-          = "$scope $owner $lot $task $attempt $head $base $tree $GATE_SHA $code" ] \
+        [ "$M_SCOPE $M_OWNER $M_LOT $M_CORRECTION $M_TASK $M_ATTEMPT $M_HEAD $M_BASE $M_TREE $M_GATE $M_CODE" \
+          = "$scope $owner $lot $correction $task $attempt $head $base $tree $GATE_SHA $code" ] \
             || die "another logical gate check owns the workspace: $M_OP ($M_OWNER).
 Finish or abandon that exact check before opening another."
         validate_frozen_state
@@ -300,6 +336,9 @@ Finish or abandon that exact check before opening another."
             printf 'tree %s\n' "$tree"
             printf 'gate %s\n' "$GATE_SHA"
             printf 'code %s\n' "$code"
+            if [ "$correction" != - ]; then
+                printf 'correction %s\n' "$correction"
+            fi
         } > "$marker_draft"
         python3 "$GATE_EXECUTION" open-marker "$marker_draft" \
             || { rm -f "$marker_draft"; die "the logical gate could not freeze its exact policy and schedule"; }
@@ -549,7 +588,8 @@ PY
 
 case ${1:-} in
     open)
-        [ $# -eq 7 ] || die "usage: gate-check.sh open <task|baseline> <owner> <lot|-> <task|0> <attempt|0> <base commit>"
+        { [ $# -eq 7 ] || [ $# -eq 8 ]; } \
+            || die "usage: gate-check.sh open <scope> <owner> <lot|-> <task|0> <attempt|0> <base commit> [correction]"
         shift
         open_check "$@"
         ;;

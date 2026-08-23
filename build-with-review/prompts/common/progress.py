@@ -136,7 +136,7 @@ SPEC_STATUS_LINE = re.compile(r"^(?:\*\*|__)?Status(?:\*\*|__)?\s*:", re.IGNOREC
 
 # The seven context fields a line may carry. `feature`, `schema` and `status`
 # stay out: they describe the run or the moment, never the event's subject.
-CONTEXT_FIELDS = ("mode", "lot", "task", "attempt", "round", "mandate", "job")
+CONTEXT_FIELDS = ("mode", "lot", "correction", "task", "attempt", "round", "mandate", "job")
 # Canonical key order of a line, after ts/by/event — so the file reads the
 # same by hand from the first line to the last.
 LINE_FIELDS = ("session", "status", "kind") + CONTEXT_FIELDS + ("archived", "hidden", "text", "data")
@@ -2554,6 +2554,75 @@ def active_attempt_identity(context, subject, *, allow_closer=False):
     finally:
         if descriptor is not None:
             os.close(descriptor)
+    if len(lines) == 1 and lines[0].startswith("{"):
+        try:
+            marker = json.loads(lines[0])
+        except ValueError as exc:
+            fail(f"{subject}'s correction attempt identity is malformed", exc)
+        required = {
+            "schema", "unit", "unit_authority_sha256", "tree_authority", "task", "attempt",
+            "document", "retry", "design_proof_authority",
+            "outstanding_final_checker_set_sha256", "assigned_final_checker_obligations",
+        }
+        unit = marker.get("unit") if isinstance(marker, dict) else None
+        correction = context.get("correction")
+        if set(marker) != required or marker.get("schema") != 2 \
+                or unit != {"kind": "correction", "built": lot, "round": correction} \
+                or not construction_positive_integer(correction) \
+                or marker.get("task") != task or marker.get("attempt") != attempt_number \
+                or marker.get("retry") != "-" or marker.get("design_proof_authority") is not None \
+                or marker.get("outstanding_final_checker_set_sha256") \
+                != EMPTY_FINAL_CHECKER_SET_SHA256 \
+                or marker.get("assigned_final_checker_obligations") != []:
+            fail(f"{subject} does not match the exact correction attempt-in-flight identity")
+        resolver = subprocess.run(
+            [sys.executable, os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py"),
+             "resolve-correction", lot, str(correction), str(task)],
+            capture_output=True, text=True,
+        )
+        if resolver.returncode != 0:
+            fail(f"{subject} cannot resolve its current Correction Round authority",
+                 resolver.stderr or resolver.stdout)
+        try:
+            resolved = json.loads(resolver.stdout)
+        except ValueError:
+            fail(f"{subject}'s Correction Round resolver returned malformed JSON")
+        document = marker.get("document")
+        current_task = resolved.get("task") or {}
+        expected_document = {
+            "path": resolved.get("workspace_document"),
+            "manifest_sha256": resolved.get("task_manifest_sha256"),
+            "controller_sha256": resolved.get("controller_sha256"),
+            "design_contract_sha256": current_task.get("design_contract_sha256"),
+            "consumer_account_sha256": current_task.get("consumer_account_sha256"),
+            "task_contract_sha256": current_task.get("task_contract_sha256"),
+            "design_sha256": document.get("design_sha256") if isinstance(document, dict) else None,
+            "disagreement_sha256": document.get("disagreement_sha256")
+            if isinstance(document, dict) else None,
+        }
+        tree_authority = marker.get("tree_authority")
+        if document != expected_document \
+                or marker.get("unit_authority_sha256") != resolved.get("authority", {}).get("sha256") \
+                or tree_authority != resolved.get("tree_authority"):
+            fail(f"{subject}'s correction attempt authority changed")
+        base_ref = f"{resolved['ref_root']}/attempt-base"
+        base = subprocess.run(
+            ["git", "-C", REPO, "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if base.returncode != 0 or base.stdout.strip() != tree_authority.get("commit"):
+            fail(f"{subject} has no exact correction attempt-base ref")
+        return {
+            "lot": lot, "correction": correction, "task": task, "attempt": attempt_number,
+            "unit": unit,
+            "unit_authority_sha256": marker["unit_authority_sha256"],
+            "execution_authority_sha256": resolved["execution_authority_sha256"],
+            "plan_manifest": document["manifest_sha256"],
+            "plan_tasks": resolved["task_count"],
+            "plan_ownership_sha256": document["controller_sha256"],
+            "contract_sha256": document["task_contract_sha256"],
+            "retry": None,
+        }
     allowed_lines = {2, 4} if allow_closer else {2}
     match = re.fullmatch(
         r"plan ([0-9a-f]{40,64}) ([1-9][0-9]*) ownership ([0-9a-f]{64}) "
@@ -2607,6 +2676,35 @@ def construction_logical_identity(entries, context, check, round_number, subject
 
 
 def construction_plan_generation(identity, subject):
+    if identity.get("correction") is not None:
+        result = subprocess.run(
+            [sys.executable, CONSTRUCTION_REVIEW, "correction-state",
+             identity["lot"], str(identity["correction"]), str(identity["task"])],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            fail(f"{subject} cannot authenticate the current Correction Round contract and Design",
+                 result.stderr or result.stdout)
+        try:
+            state = json.loads(result.stdout)
+        except ValueError:
+            fail(f"{subject}'s correction-state helper returned malformed JSON")
+        required = {
+            "plan", "plan_sha256", "plan_projection_sha256", "plan_ownership_sha256",
+            "contract_sha256", "design_sha256", "disagreement_sha256",
+        }
+        if not isinstance(state, dict) or set(state) != required \
+                or state.get("contract_sha256") != identity.get("contract_sha256") \
+                or state.get("plan_ownership_sha256") != identity.get("plan_ownership_sha256") \
+                or not re.fullmatch(r"[0-9a-f]{64}", state.get("design_sha256") or ""):
+            fail(f"{subject} does not use the frozen correction contract and one complete Design")
+        return {
+            "contract_sha256": state["contract_sha256"],
+            "design_sha256": state["design_sha256"],
+            "plan_projection_sha256": state["plan_projection_sha256"],
+            "plan_ownership_sha256": state["plan_ownership_sha256"],
+            "disagreement_sha256": state["disagreement_sha256"],
+        }
     result = subprocess.run(
         [sys.executable, CONSTRUCTION_REVIEW, "plan-state",
          identity["lot"], str(identity["task"])],
@@ -2642,8 +2740,15 @@ def construction_started_for(entries, before, base):
             if entry.get("event") == "subagent-started"
             and entry.get("kind") == CONSTRUCTION_CHECKERS.get(base["check"], "diagnostic")
             and entry.get("lot") == base["lot"] and entry.get("task") == base["task"]
+            and entry.get("correction") == base.get("correction")
             and entry.get("attempt") == base["attempt"]
             and (base["check"] == "diagnostic" or entry.get("round") == base["round"])]
+
+
+def construction_unit_matches(entry, identity):
+    return entry.get("lot") == identity["lot"] \
+        and entry.get("task") == identity["task"] \
+        and entry.get("correction") == identity.get("correction")
 
 
 def construction_frozen_logical(entries, before, base, subject):
@@ -2738,6 +2843,7 @@ def previous_code_batch(entries, base, subject):
     prior_round = base["round"] - 1
     verdicts = code_verdicts(
         entries, len(entries), base["lot"], base["task"], base["attempt"],
+        base.get("correction"),
     )
     matches = [(index, entry) for index, entry in verdicts
                if note_data(entry).get("round") == prior_round]
@@ -2747,6 +2853,7 @@ def previous_code_batch(entries, base, subject):
     verdict_data = note_data(verdict)
     resolutions = [(index, entry) for index, entry in code_resolutions(
         entries, len(entries), base["lot"], base["task"], base["attempt"],
+        base.get("correction"),
     ) if note_data(entry).get("round") == prior_round]
     if len(resolutions) != 1 or resolutions[0][0] <= verdict_index:
         fail(f"{subject} has no exact complete correction account for the prior findings")
@@ -2951,6 +3058,7 @@ def validate_design_generation_history(entries, before, logical, subject):
         fail(f"{subject}'s design-review manifest contradicts its frozen generation")
     prior = design_verdicts(
         entries, start_index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )
     if len(prior) != logical["round"] - 1:
         fail(f"{subject} has the wrong number of prior design-review generations")
@@ -2967,6 +3075,8 @@ def construction_event_matches(entry, logical, event):
         return False
     keys = ("lot", "task", "attempt")
     if any(entry.get(key) != logical[key] for key in keys):
+        return False
+    if entry.get("correction") != logical.get("correction"):
         return False
     return logical["check"] == "diagnostic" or entry.get("round") == logical["round"]
 
@@ -3097,6 +3207,7 @@ def construction_domain_spends(entries, before, logical):
     spends = [entry for entry in entries[:before] if entry.get("event") == "note"
               and entry.get("kind") == "bound.spent"
               and entry.get("lot") == logical["lot"] and entry.get("task") == logical["task"]
+              and entry.get("correction") == logical.get("correction")
               and entry.get("attempt") == logical["attempt"]
               and (logical["check"] == "diagnostic" or entry.get("round") == logical["round"])
               and entry.get("text") == construction_domain_text(logical)]
@@ -3116,6 +3227,7 @@ def construction_consumed(entries, before, logical):
     return [entry for entry in entries[:before] if entry.get("event") == "note"
             and entry.get("kind") == "verdict.consumed"
             and entry.get("lot") == logical["lot"] and entry.get("task") == logical["task"]
+            and entry.get("correction") == logical.get("correction")
             and entry.get("attempt") == logical["attempt"]
             and note_data(entry).get("check") == logical["check"]
             and (logical["check"] == "diagnostic" or entry.get("round") == logical["round"])]
@@ -3144,6 +3256,7 @@ def normalize_construction_started(entries, data, context, check, round_number):
     if check in CONSTRUCTION_CHECKERS:
         previous = [entry for entry in entries if entry.get("kind") == "verdict.consumed"
                     and entry.get("lot") == logical["lot"]
+                    and entry.get("correction") == logical.get("correction")
                     and entry.get("task") == logical["task"]
                     and entry.get("attempt") == logical["attempt"]
                     and note_data(entry).get("check") == check]
@@ -3169,10 +3282,23 @@ def normalize_construction_started(entries, data, context, check, round_number):
             previous_account = design_previous_batch(
                 entries, {**logical, **generation}, "the design-checker opening",
             )
+            manifest_command = [
+                sys.executable, CONSTRUCTION_REVIEW,
+                "correction-design-manifest" if logical.get("correction") else "design-manifest",
+                logical["lot"],
+            ]
+            if logical.get("correction"):
+                manifest_command.append(str(logical["correction"]))
+            manifest_command.extend([
+                str(logical["task"]), str(logical["attempt"]), str(logical["round"]),
+            ])
+            if logical.get("correction"):
+                manifest_command.extend([
+                    logical["unit_authority_sha256"],
+                    logical["execution_authority_sha256"],
+                ])
             manifest = subprocess.run(
-                [sys.executable, CONSTRUCTION_REVIEW, "design-manifest",
-                 logical["lot"], str(logical["task"]), str(logical["attempt"]),
-                 str(logical["round"])],
+                manifest_command,
                 input=json.dumps(previous_account) if previous_account else "",
                 capture_output=True, text=True,
             )
@@ -3432,24 +3558,27 @@ def code_resolution_text_items(text, subject, statuses):
     return items
 
 
-def design_verdicts(entries, before, lot, task, attempt):
+def design_verdicts(entries, before, lot, task, attempt, correction=None):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "verdict.consumed"
             and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("correction") == correction
             and entry.get("attempt") == attempt and note_data(entry).get("check") == "design"]
 
 
-def design_resolutions(entries, before, lot, task, attempt):
+def design_resolutions(entries, before, lot, task, attempt, correction=None):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "design.review.resolved"
             and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("correction") == correction
             and entry.get("attempt") == attempt]
 
 
-def design_blockers(entries, before, lot, task, attempt):
+def design_blockers(entries, before, lot, task, attempt, correction=None):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "design.review.blocked"
             and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("correction") == correction
             and entry.get("attempt") == attempt]
 
 
@@ -3482,9 +3611,11 @@ def design_previous_batch(entries, base, subject):
     prior_round = base["round"] - 1
     verdicts = [(index, entry) for index, entry in design_verdicts(
         entries, len(entries), base["lot"], base["task"], base["attempt"],
+        base.get("correction"),
     ) if note_data(entry).get("round") == prior_round]
     resolutions = [(index, entry) for index, entry in design_resolutions(
         entries, len(entries), base["lot"], base["task"], base["attempt"],
+        base.get("correction"),
     ) if note_data(entry).get("round") == prior_round]
     if len(verdicts) != 1 or note_data(verdicts[0][1]).get("outcome") != "findings" \
             or len(resolutions) != 1 or resolutions[0][0] <= verdicts[0][0]:
@@ -3526,24 +3657,27 @@ def design_previous_batch(entries, base, subject):
     }
 
 
-def code_verdicts(entries, before, lot, task, attempt):
+def code_verdicts(entries, before, lot, task, attempt, correction=None):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "verdict.consumed"
             and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("correction") == correction
             and entry.get("attempt") == attempt and note_data(entry).get("check") == "code"]
 
 
-def code_resolutions(entries, before, lot, task, attempt):
+def code_resolutions(entries, before, lot, task, attempt, correction=None):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "code.review.resolved"
             and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("correction") == correction
             and entry.get("attempt") == attempt]
 
 
-def code_blockers(entries, before, lot, task, attempt):
+def code_blockers(entries, before, lot, task, attempt, correction=None):
     return [(index, entry) for index, entry in enumerate(entries[:before])
             if entry.get("event") == "note" and entry.get("kind") == "code.review.blocked"
             and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("correction") == correction
             and entry.get("attempt") == attempt]
 
 
@@ -9055,7 +9189,8 @@ def cmd_subagent_started(args):
         data = normalize_construction_started(
             journal_entries(), data, context, check, args.round,
         )
-        context.update({key: data[key] for key in ("lot", "task", "attempt")})
+        context.update({key: data[key] for key in ("lot", "correction", "task", "attempt")
+                        if key in data})
         if check == "diagnostic":
             context.pop("round", None)
     elif data is not None:
@@ -9104,7 +9239,8 @@ def cmd_subagent_ended(args):
         data = normalize_construction_ended(
             journal_entries(), data, context, check, args.round,
         )
-        context.update({key: data[key] for key in ("lot", "task", "attempt")})
+        context.update({key: data[key] for key in ("lot", "correction", "task", "attempt")
+                        if key in data})
         if check == "diagnostic":
             context.pop("round", None)
     validate_subagent_transition(

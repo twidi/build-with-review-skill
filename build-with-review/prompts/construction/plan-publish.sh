@@ -11,6 +11,11 @@ die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 [ -e "$REPO/.git" ] || die "$REPO is not a git repository"
 source "$WORKSPACE/prompts/common/attempt-closer.sh"
 
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    exec python3 "$HERE/correction_artifact_publish.py" "$@"
+fi
+
 [ $# -eq 1 ] || die "1 argument expected, $# given — usage: plan-publish.sh <lot>   e.g. lot-1, lot-1.1"
 LOT=$1
 [[ $LOT =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "the lot must read lot-<N> or lot-<N>.<M> — positive integers, no leading zeros — got \`$LOT\`"

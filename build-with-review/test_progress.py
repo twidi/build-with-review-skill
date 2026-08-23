@@ -7849,6 +7849,152 @@ def correction_round_opening_rejects_reordered_batch_tails():
 
 
 @test
+def correction_task_attempt_starts_from_the_exact_opened_round():
+    state = seed_unopened_correction_allocation("correction-task-start")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    opened = subprocess.run(
+        [opening_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening_index = len(journal_lines()) - 1
+    opening = journal_lines()[opening_index]
+
+    started_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-started.sh",
+    )
+    started = subprocess.run(
+        [started_script, "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+    marker_path = os.path.join(WORKSPACE, "attempt-in-flight")
+    with open(marker_path, encoding="utf-8") as source:
+        marker = json.load(source)
+    check(marker["schema"] == 2, marker)
+    check(marker["unit"] == {"kind": "correction", "built": "lot-1", "round": 1}, marker)
+    opening_authority = hashlib.sha256(json.dumps(
+        opening["data"], sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    check(marker["unit_authority_sha256"] == opening_authority, marker)
+    check(marker["task"] == 1 and marker["attempt"] == 1, marker)
+    check(marker["document"]["path"] == state["artifact_relative"], marker)
+    check(marker["retry"] == "-", marker)
+    check(marker["design_proof_authority"] is None, marker)
+    check(marker["assigned_final_checker_obligations"] == [], marker)
+    check(marker["outstanding_final_checker_set_sha256"]
+          == load_common_module("correction_authority").EMPTY_FINAL_CHECKER_SET_SHA256, marker)
+
+    ref = "refs/bwr/test-run/lot-1/correction-1/attempt-base"
+    ref_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", ref], text=True,
+    ).strip()
+    check(ref_commit == opening["data"]["base_commit"],
+          "the correction attempt-base ref does not name the opened base")
+
+
+@test
+def correction_task_design_checker_uses_the_correction_contract_and_paths():
+    state = seed_unopened_correction_allocation("correction-task-design")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    opened = subprocess.run(
+        [opening_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    opening_index = len(journal_lines()) - 1
+    started_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-started.sh",
+    )
+    started = subprocess.run(
+        [started_script, "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+    artifact = pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace(
+            "[written at correction task Design - see below]",
+            "Change the bounded production path and prove the accepted behavior.",
+        ),
+        encoding="utf-8",
+    )
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": 1, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+
+    checker = run_progress(
+        "subagent-started", "design-checker", "--task", "1", "--round", "1",
+    )
+    check(checker.returncode == 0, checker.stdout + checker.stderr)
+    payload = json.loads(checker.stdout.splitlines()[0])
+    check(payload["manifest"].startswith(
+        "reports/construction/lot-1/correction-1/task-1-attempt-1-design-round-1-manifest.json"
+    ), payload)
+    event = journal_lines()[-1]
+    check(event.get("correction") == 1, event)
+    check(event["data"]["unit"] == {
+        "kind": "correction", "built": "lot-1", "round": 1,
+    }, event)
+
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "design checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result_source = pathlib.Path(BASE) / "correction-design-result.json"
+    result_source.write_text(json.dumps({
+        "verdict": "clean",
+        "manifest": payload["manifest"],
+        "checks": [
+            {"subject": "source findings", "evidence": "The bounded findings are covered."},
+            {"subject": "product contract", "evidence": "The affected contract is preserved."},
+        ],
+        "previous": [],
+        "findings": [],
+    }), encoding="utf-8")
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": str(result_source)}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    consumed = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"design","outcome":"clean"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+    correction_events = [
+        entry for entry in journal_lines()[opening_index + 1:]
+        if entry.get("kind") in {"bound.spent", "verdict.consumed"}
+        and entry.get("task") == 1 and entry.get("attempt") == 1
+    ]
+    check(correction_events and all(entry.get("correction") == 1 for entry in correction_events),
+          correction_events)
+    publish = pathlib.Path(WORKSPACE) / "prompts" / "construction" / "plan-publish.sh"
+    published = subprocess.run(
+        [publish, "--correction", "lot-1", "1"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    repository_artifact = pathlib.Path(REPO) / state["artifact_relative"]
+    check(repository_artifact.read_bytes() == artifact.read_bytes(),
+          "the correction artifact was not published byte-for-byte")
+
+
+@test
 def correction_helper_owned_supersession_requires_its_complete_move():
     state = seed_unopened_correction_allocation("helper-owned-supersession")
     helper_path = os.path.join(
@@ -12236,6 +12382,8 @@ def main():
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
             "construction_review.py", "correction_round.py",
+            "work_unit.py", "correction_attempt_start.py", "attempt-started.sh",
+            "correction_artifact_publish.py", "plan-publish.sh",
             "correction_round_supersede.py", "correction-round-supersede.sh",
             "correction_round_void.py", "correction-round-void.sh",
             "correction_round_open.py", "correction-round-open.sh",

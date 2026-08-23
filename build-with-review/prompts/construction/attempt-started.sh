@@ -24,6 +24,11 @@ die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 source "$WORKSPACE/prompts/common/attempt-closer.sh"
 source "$WORKSPACE/prompts/common/bare-stop.sh"
 
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    exec python3 "$HERE/correction_attempt_start.py" "$@"
+fi
+
 [ $# -ge 3 ] && [ $# -le 4 ] \
     || die "3 or 4 arguments expected, $# given — usage: attempt-started.sh <lot> <task N> <attempt K> [accepted-defect failure report]"
 LOT=$1 N=$2 K=$3 RETRY_REPORT=${4:--}

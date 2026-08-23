@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 
+from correction_round import canonical_sha256, parse_artifact
+
 
 HERE = pathlib.Path(__file__).resolve().parent
 WORKSPACE = HERE.parent.parent
@@ -196,6 +198,36 @@ def committed_plan_state(lot, task, revision):
     )
     result = git_bytes("show", f"{revision}:{relative}")
     return plan_state_bytes(result.stdout, lot, task, relative)
+
+
+def correction_state(built, correction, task):
+    task = validate_identity(built, task)
+    if not TASK_RE.fullmatch(str(correction)):
+        refuse("the Correction Round identity is malformed")
+    correction = int(correction)
+    relative = pathlib.PurePosixPath("corrections", built, f"round-{correction}.md")
+    path = real_workspace_file(str(relative), "the Correction Round artifact")
+    try:
+        artifact = parse_artifact(path, expected_built=built, expected_round=correction)
+    except ValueError as exc:
+        refuse(str(exc))
+    if artifact["state"] != "active" or task > len(artifact["tasks"]):
+        refuse("the Correction Round has no active requested task")
+    selected = artifact["tasks"][task - 1]
+    projection = {
+        "schema": 1,
+        "controller_sha256": artifact["controller_sha256"],
+        "designs": [item["design_sha256"] for item in artifact["tasks"]],
+    }
+    return {
+        "plan": str(relative),
+        "plan_sha256": artifact["artifact_sha256"],
+        "plan_projection_sha256": canonical_sha256(projection),
+        "plan_ownership_sha256": artifact["controller_sha256"],
+        "contract_sha256": selected["task_contract_sha256"],
+        "design_sha256": selected["design_sha256"],
+        "disagreement_sha256": selected["disagreement_sha256"],
+    }
 
 
 def appended_disagreement_headings(content, base_sha256, heading, subject):
@@ -437,6 +469,41 @@ def design_manifest(lot, task, attempt, round_number):
     return {"path": str(relative), "sha256": sha256(payload)}
 
 
+def correction_design_manifest(
+    built, correction, task, attempt, round_number, unit_authority, execution_authority,
+):
+    task = validate_identity(built, task)
+    if not all(TASK_RE.fullmatch(str(value)) for value in (correction, attempt, round_number)) \
+            or int(round_number) > 10 \
+            or not re.fullmatch(r"[0-9a-f]{64}", unit_authority) \
+            or not re.fullmatch(r"[0-9a-f]{64}", execution_authority):
+        refuse("the correction design-review identity is malformed")
+    state = correction_state(built, correction, task)
+    unit = {"kind": "correction", "built": built, "round": int(correction)}
+    document = {
+        "schema": 2,
+        "unit": unit,
+        "unit_authority_sha256": unit_authority,
+        "execution_authority_sha256": execution_authority,
+        "lot": built,
+        "correction": int(correction),
+        "task": task,
+        "attempt": int(attempt),
+        "round": int(round_number),
+        **state,
+        "previous": read_design_previous_account(int(round_number)),
+    }
+    payload = (json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ) + "\n").encode()
+    relative = pathlib.PurePosixPath(
+        "reports", "construction", built, f"correction-{correction}",
+        f"task-{task}-attempt-{attempt}-design-round-{round_number}-manifest.json",
+    )
+    atomic_publish(str(relative), payload, "the correction design-review manifest")
+    return {"path": str(relative), "sha256": sha256(payload)}
+
+
 def load_design_manifest(relative):
     path = real_workspace_file(relative, "the design-review manifest")
     payload = path.read_bytes()
@@ -449,8 +516,13 @@ def load_design_manifest(relative):
         "plan_projection_sha256", "plan_ownership_sha256", "contract_sha256",
         "design_sha256", "disagreement_sha256", "previous",
     }
-    if not isinstance(document, dict) or set(document) != required \
-            or document.get("schema") != 1:
+    correction_required = required | {
+        "unit", "unit_authority_sha256", "execution_authority_sha256", "correction",
+    }
+    schema_two = isinstance(document, dict) and document.get("schema") == 2
+    if not isinstance(document, dict) \
+            or set(document) != (correction_required if schema_two else required) \
+            or document.get("schema") not in {1, 2}:
         refuse("the design-review manifest has an invalid shape")
     task = validate_identity(document.get("lot"), document.get("task"))
     if not TASK_RE.fullmatch(str(document.get("attempt"))) \
@@ -458,10 +530,22 @@ def load_design_manifest(relative):
             or document["round"] > 10:
         refuse("the design-review manifest has a malformed generation identity")
     validate_design_previous_account(document["previous"], document["round"])
-    expected_relative = str(pathlib.PurePosixPath(
-        "reports", "construction", document["lot"],
-        f"task-{task}-attempt-{document['attempt']}-design-round-{document['round']}-manifest.json",
-    ))
+    if schema_two:
+        correction = document.get("correction")
+        if not TASK_RE.fullmatch(str(correction)) or document.get("unit") != {
+            "kind": "correction", "built": document["lot"], "round": correction,
+        } or not re.fullmatch(r"[0-9a-f]{64}", str(document.get("unit_authority_sha256"))) \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(document.get("execution_authority_sha256"))):
+            refuse("the correction design-review manifest has malformed authority")
+        expected_relative = str(pathlib.PurePosixPath(
+            "reports", "construction", document["lot"], f"correction-{correction}",
+            f"task-{task}-attempt-{document['attempt']}-design-round-{document['round']}-manifest.json",
+        ))
+    else:
+        expected_relative = str(pathlib.PurePosixPath(
+            "reports", "construction", document["lot"],
+            f"task-{task}-attempt-{document['attempt']}-design-round-{document['round']}-manifest.json",
+        ))
     if relative != expected_relative:
         refuse("the design-review manifest path contradicts its generation identity")
     return path, payload, document
@@ -1063,6 +1147,10 @@ def main():
         print(json.dumps(manifest(*args), separators=(",", ":"), sort_keys=True))
     elif command == "design-manifest" and len(args) == 4:
         print(json.dumps(design_manifest(*args), separators=(",", ":"), sort_keys=True))
+    elif command == "correction-state" and len(args) == 3:
+        print(json.dumps(correction_state(*args), separators=(",", ":"), sort_keys=True))
+    elif command == "correction-design-manifest" and len(args) == 7:
+        print(json.dumps(correction_design_manifest(*args), separators=(",", ":"), sort_keys=True))
     elif command == "read" and len(args) == 5:
         read_candidate(*args)
     elif command == "count" and len(args) == 1:
