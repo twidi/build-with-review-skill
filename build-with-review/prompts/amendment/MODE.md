@@ -165,9 +165,10 @@ unclosed edits, and park the very reviewers whose job is to re-verify the change
 
 **You and the human talk.** The discussion is free-form. The subject decides how far it
 goes: some answers take one message, some take twenty. When that discussion reaches one
-final bounded choice, use `SKILL.md`'s **human-judgment presentation rule**. Explain the
-need, origin, evidence, timing and each option's trade-offs, then ask through the widget.
-The rule structures the final choice, not the preceding exchanges.
+final bounded choice, use `SKILL.md`'s **human-judgment presentation rule**. Start with
+the product orientation. Then explain the need, origin, evidence, timing and each
+option's trade-offs before the widget. The rule structures the final choice, not the
+preceding exchanges.
 
 **One origin skips this discussion: an R2.4 decision batch is already settled.** Its
 initial `decision.batch.settled` and any `decision.batch.supplemented` events carry every
@@ -228,9 +229,13 @@ progress.py note amendment.opened \
   --text-file "$JOURNAL_TEXT_FILE"
 ```
 
-`origin` is exactly `construction` or `product-review`. A construction opening follows
-the validated SPEC close and cannot bypass an open product-review pass. A product-review
-opening consumes the exact current pass and its built lot.
+`origin` is exactly `construction` or `product-review`. A construction opening normally
+follows the validated SPEC close and cannot bypass an open product-review pass. A run
+whose one `run.started` begins directly in Construction has no `spec.written`. In that
+case, `progress.py` freezes `construction_source` from that run, the current lot's latest
+`plan.written`, the current committed canonical plan, its one structural root `Spec:`
+line, and both committed document hashes. Do not supply, edit or infer that account.
+A product-review opening consumes the exact current pass and its built lot.
 
 The line is the order's identity and return address. Its text is non-empty and contains
 the complete order plus the exact phase return. Once it exists, the ruling is not
@@ -635,7 +640,10 @@ launch a fresh one, the next number**: it walks the whole frontier again, so wha
 replacement takes. **And once only**: the fresh sweep returning the same reason makes the
 blocker stable — stop launching sweeps and take it to the human, as the exit door takes a
 frontier that will not close; `SKILL.md`'s audit duty carries the gesture and its journal
-line. Nothing runs until they answer.
+line. Before the widget, use `SKILL.md`'s **human-judgment presentation rule** with a
+workflow orientation. Name the amendment, both sweeps, the repeated blocker, the durable
+input that is still unavailable, and the exact route each answer selects. Nothing runs
+until they answer.
 
 ### A DECISION raised by the sweep
 
@@ -649,12 +657,14 @@ defect to fix, it produces a question nobody has answered.
 answer has a reach of its own.
 
 This is a product ruling, not the exit door's operational choice. Allocate its `R<N>`
-through `SKILL.md` before asking, settle it with route `amendment-fixer`, and publish its
-run-wide `ruling.ready` state before dispatching the fixer. If it conflicts with an active
-answer from any batch or earlier ruling, resolve that global conflict first. The amendment
-then gives this active `R<N>` its own decision section, and A4 writes its applied line
-after the shared commit. The exit-door ruling below has no `ruling` identity and never
-enters this state.
+through `SKILL.md` before asking. Before the widget, use `SKILL.md`'s
+**human-judgment presentation rule** with a product orientation. Establish the concrete
+product scene before the Reach evidence, timing, options and workflow consequences. Then
+settle it with route `amendment-fixer`, and publish its run-wide `ruling.ready` state before
+dispatching the fixer. If it conflicts with an active answer from any batch or earlier
+ruling, resolve that global conflict first. The amendment then gives this active `R<N>`
+its own decision section, and A4 writes its applied line after the shared commit. The
+exit-door ruling below has no `ruling` identity and never enters this state.
 
 Before sending the answer to the fixer, publish its owner-linked assignment:
 
@@ -685,7 +695,10 @@ handled, and a later hop returning zero is an amendment. A small frontier can be
 **Report every completed count and the exact blocker** — the missing durable input, or
 the unbounded input, that prevents the next hop. Then let the human confirm. They may
 answer *"carry on as an amendment"*, and that is their call to make explicitly rather
-than by drift. Record the ruling either way:
+than by drift. Before the widget, use `SKILL.md`'s **human-judgment presentation rule**
+with a workflow orientation. Name the amendment, current sweep, completed hops, exact
+enumeration failure, and the complete route after each choice. Record the ruling either
+way:
 
 ```
 progress.py note ruling --text-file "$JOURNAL_TEXT_FILE"
@@ -791,10 +804,13 @@ task, the plan being written; the run resumes where it stood.
    the commit consumes.
 
    **The spec path is authority, not controller memory.** Use the exact `spec.written`
-   source when this run has one. A construction-only run has no such boundary: for a
+   source when this run has one. A construction-only run has no such boundary. For a
    PRODUCT REVIEW amendment, use the one structural root `Spec: <relative path>` in the
-   exact committed plan reviewed by the amendment's voided pass. A fenced example is not
-   that source. Never infer the path from the report, process cwd, or a remembered launch.
+   exact committed plan reviewed by the amendment's voided pass. For a Construction
+   amendment, use only the `construction_source.spec` path frozen by `amendment.opened`.
+   Its commit and hashes remain the historical source while the fixer changes the live
+   specification. A fenced example is not that source. Never infer the path from the
+   report, process cwd, current `HEAD`, or a remembered launch.
 
 4. **A subagent checks the consolidation** — bracket it:
 
@@ -880,6 +896,9 @@ task, the plan being written; the run resumes where it stood.
    was never settled.
    Stop there, and take the exact entries from `verdict.consumed` to the human. A third
    result that was merely lost takes this same round-three regeneration route instead.
+   Before the widget, use `SKILL.md`'s **human-judgment presentation rule** with a
+   workflow orientation. Name the amendment, three checker generations, exact surviving
+   discrepancies, fixer attempts, and the consequence of every available answer.
 
 5. **You commit both files, with explicit paths.** The subject is yours to write, in the
    project's own conventions; everything else is the script's:

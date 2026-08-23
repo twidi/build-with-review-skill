@@ -223,7 +223,10 @@ reading a lens honestly did not do is still a reading nobody did, **and no later
 exists to do it** — this mode has no next round that re-covers everything. **And
 relaunch once**: a replacement returning the same reason is a stable blocker, not
 inattention — stop replacing and take it to the human; `SKILL.md`'s audit duty carries
-the gesture and its journal line. The pass waits on their answer.
+the gesture and its journal line. Before the widget, use `SKILL.md`'s
+**human-judgment presentation rule** with a workflow orientation. Name the lens, original
+and replacement sessions, unavailable reading, attempted lift, and the consequence of
+every available answer. The pass waits on their answer.
 
 Then go to **R2.1** for that report — **do not wait for the others.**
 
@@ -532,8 +535,9 @@ One refutation stays yours: **refuting from the spec, with the citation.**
 4. **Send every currently confirmed DECISION in that source to the human as one
    message.** A refuted DECISION stays silent unless a later recheck reactivates it. Each
    option says what a user would see, never what it costs to build. Before the widget,
-   use `SKILL.md`'s **human-judgment presentation rule** for every stable `D<N>` and keep
-   those IDs aligned with the batched widget. Then wait.
+   use `SKILL.md`'s **human-judgment presentation rule** for every stable `D<N>`. Start
+   each decision account with its product orientation. Keep those IDs aligned with the
+   batched widget. Then wait.
 
    The answer also lands as **one journal event**, before any route. The data binds every
    stable ID to its chosen option and its mechanical route. The text carries every exact
@@ -675,8 +679,8 @@ One refutation stays yours: **refuting from the spec, with the citation.**
    3. **Settle every newly live unanswered DECISION before another route runs.** Send all
       `answer required` items in this one snapshot to the human as one message. Before
       the widget, use `SKILL.md`'s **human-judgment presentation rule** for every item;
-      explain why this later recheck made it newly live. Record the whole answer group
-      atomically:
+      start each item with its product orientation, then explain why this later recheck
+      made it newly live. Record the whole answer group atomically:
 
       ```sh
       progress.py note decision.batch.supplemented \
@@ -732,9 +736,10 @@ One refutation stays yours: **refuting from the spec, with the citation.**
       ```
 
       Only now ask the human. Before the widget, use `SKILL.md`'s
-      **human-judgment presentation rule** for this conflict. Explain the incompatible
-      standing answers, the evidence that exposed the conflict, why it appears now, and
-      every outcome's trade-offs and next route. Record the whole resolution atomically.
+      **human-judgment presentation rule** for this conflict. Start with the product
+      orientation. Then explain the incompatible standing answers, the evidence that
+      exposed the conflict, why it appears now, and every outcome's trade-offs and next
+      route. Record the whole resolution atomically.
       Its `updates` list
       names every affected stable ID; the closed `action` is `keep`, `supersede`,
       `qualify`, `replace` or `reconcile`. Each update also carries its resulting `active`
@@ -990,6 +995,10 @@ used, whose plan and refs are frozen. Concretely:
    progress.py note sublot.opened --text "<lot N.n>"
    ```
 
+   `sublot.opened` is the only durable CONSTRUCTION origin for a sub-lot. It consumes
+   this exact positive `pass.closed`, allocation, confirmed artifact and plan. C1,
+   `plan-commit.sh`, every attempt and the later PRODUCT REVIEW refuse without it.
+
    Add `"conflict":<C>` when that generation is the effective answer's current
    authority. Write `ruling.applied` only for an active `sublot` ruling that has no
    earlier applied line;
@@ -1016,6 +1025,11 @@ Two numbers to report, neither of which is a rule:
   has stopped being one — `progress.py note sublot.oversized --text-file "$JOURNAL_TEXT_FILE"`;
 - **three sub-lots touching the same area** — that is a design problem, not a series of
   corrections — `progress.py note not-converging --text-file "$JOURNAL_TEXT_FILE"`.
+
+Either report creates a non-routine workflow judgement. Before its widget, use
+`SKILL.md`'s **human-judgment presentation rule** with a workflow orientation. Name the
+reviewed built unit, exact confirmed work, sub-lot sequence or size, structural concern,
+and the next workflow route for every answer. Do not invent a product surface.
 
 ### The rule that governs every later pass
 
@@ -1254,7 +1268,8 @@ state until a later ready conflict resolution supersedes them.
   **write the `sublot.opened` line for the lot named by `sublot.allocated`**, then construction C1.
   Never re-verify, never re-adjudicate, never re-close.
 - **`sublot.opened` in the slice** → the sub-lot is open and its name is in the note:
-  **go to construction C1 for THAT lot, and never allocate again.** R2.5 is complete;
+  **go to construction C1 for THAT lot, and never allocate again.** C1 authenticates
+  that exact opening again before any plan publication. R2.5 is complete;
   none of its artifacts or lifecycle lines repeats past this boundary.
 - **`pass.closed` with `confirmed:0`, no `lot.delivered` after it** → the lot is done
   and the close does not repeat. First write any missing `decision.batch.closed` whose
@@ -1299,7 +1314,10 @@ obligation into R2.5 with any new work those readings found.
 
 **Only when the human says the whole feature is done, ask the final trace question from
 `SKILL.md`: keep the workspace and refs, or clean them up.** `Keep` leaves both untouched.
-For `Clean up`, first publish the choice and the whole-run scope:
+Before that widget, use `SKILL.md`'s **human-judgment presentation rule** with a workflow
+orientation. Name the delivered feature, workspace, ref namespace, retained history,
+destructive cleanup order, and consequence of both choices. For `Clean up`, first publish
+the choice and the whole-run scope:
 
 ```sh
 progress.py note cleanup.started --data '{"reason":"feature-complete","scope":"whole-run","choice":"clean"}'

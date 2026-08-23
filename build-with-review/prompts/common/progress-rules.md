@@ -144,6 +144,13 @@ completion block, exact report path, finding headings, verdict, counts and SHA-2
 account and resulting spec snapshot. The unbound spec close consumes only a clean full
 round and permits only its status-line delta.
 
+A run that starts directly in Construction has no `spec.written`. A Construction-origin
+`amendment.opened` freezes one schema-1 `construction_source` instead. It binds the exact
+Construction `run.started`, current lot origin, latest `plan.written`, committed plan and
+its one structural root `Spec:` source, plus both committed hashes. Append-time admission
+requires the live plan and spec to equal those committed bytes. Historical consumers use
+the frozen commit and objects without requiring it to remain current `HEAD`.
+
 An `owner:"spec-loop"` recheck is not an exception. It follows one exact shared close.
 It names every current pending `spec-fixer` authority, preserves the complete run-wide
 answer state, and consumes one fresh bracketed finding-verifier result per pending R.
@@ -180,6 +187,11 @@ the exact physical close account. A `reclassify` supersession reuses its authent
 moved account, and a null correction predecessor moves nothing. `lot.delivered` consumes
 only the current clean close, its reviewed SHA, the
 exact ordinary-pass count and every required batch-close tail.
+
+`sublot.opened` consumes one exact positive close and its exact allocation. It is the
+sub-lot's only CONSTRUCTION origin. Plan publication, attempt start, `lot.built` and the
+first PRODUCT REVIEW pass all replay that origin. A missing or changed close/open pair
+refuses before the next durable boundary. A root lot has no such origin.
 
 If it rejects yours, you have the wrong name — **look it up where the call was given to
 you, and never invent a variant.** A vocabulary that is not enforced is not a vocabulary,

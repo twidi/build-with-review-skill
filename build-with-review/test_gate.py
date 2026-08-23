@@ -2260,6 +2260,36 @@ def plan_commit_refuses_when_any_task_lacks_a_design_boundary():
 
 
 @test
+def construction_entry_refuses_a_sublot_without_its_opening_terminal():
+    fixture = Fixture()
+    try:
+        original_head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        original_copy = fixture.plan_copy.read_bytes()
+        plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
+
+        refused_plan = fixture.run(
+            "bash", plan_commit, "lot-1.1", "invalid sub-lot entry", ok=False,
+        )
+        check("sub-lot" in refused_plan.stderr and "sublot.opened" in refused_plan.stderr,
+              refused_plan.stderr)
+        check(fixture.git("rev-parse", "HEAD").stdout.strip() == original_head,
+              "a sub-lot without an opening created a plan commit")
+        check(fixture.plan_copy.read_bytes() == original_copy,
+              "a refused sub-lot entry changed the repository plan copy")
+        check(not (fixture.workspace / "plan-commit-in-progress").exists(),
+              "a refused sub-lot entry created a plan marker")
+
+        started = fixture.workspace / "prompts" / "construction" / "attempt-started.sh"
+        refused_attempt = fixture.run("bash", started, "lot-1.1", "1", "1", ok=False)
+        check("sub-lot" in refused_attempt.stderr and "sublot.opened" in refused_attempt.stderr,
+              refused_attempt.stderr)
+        check(not (fixture.workspace / "attempt-in-flight").exists(),
+              "a sub-lot without an opening created an attempt identity")
+    finally:
+        fixture.close()
+
+
+@test
 def attempt_start_refuses_a_committed_task_without_a_design_boundary():
     fixture = Fixture()
     try:

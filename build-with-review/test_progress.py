@@ -9208,6 +9208,64 @@ def task_pass_requires_the_final_manifest_task_and_lot_built_boundary():
 
 
 @test
+def task_pass_refuses_a_built_sublot_without_its_authenticated_origin():
+    commit, gate, _ = seed_task_gate("lot-1.1", "missing-sublot-origin")
+    data = json.dumps({"built": "lot-1.1", "commit": commit, "gate": gate})
+    before = len(journal_lines())
+    opening = run_progress("note", "pass.opened", "--data", data)
+    check(opening.returncode != 0 and len(journal_lines()) == before,
+          "a built sub-lot entered PRODUCT REVIEW without its source pass terminal")
+
+
+@test
+def task_pass_accepts_a_built_sublot_after_the_exact_origin_terminal():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    commit, gate, _ = seed_task_gate(
+        "lot-1.1", "authenticated-sublot-origin",
+        plan_spec_lines=("Covers: lot-1-confirmed.md",),
+    )
+    data = json.dumps({"built": "lot-1.1", "commit": commit, "gate": gate})
+    review = run_progress("note", "pass.opened", "--data", data)
+    check(review.returncode == 0, review.stdout + review.stderr)
+
+
+@test
+def construction_origin_keeps_root_lots_origin_free():
+    origin = run_progress("construction-origin-check", "lot-3")
+    check(origin.returncode == 0 and origin.stdout.strip() == "root",
+          origin.stdout + origin.stderr)
+
+
+@test
+def generic_construction_terminals_cannot_bypass_a_missing_sublot_origin():
+    config = default_config()
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload["lot"] = "lot-1.1"
+    set_config(config)
+
+    for kind, data in (
+        ("plan.written", {"tasks": 1, "op": "bypass"}),
+        ("lot.built", {"tasks": 1, "attempts": 1}),
+    ):
+        before = len(journal_lines())
+        result = run_progress(
+            "note", kind, "--data", json.dumps(data, separators=(",", ":")),
+        )
+        check(result.returncode != 0 and len(journal_lines()) == before,
+              f"generic {kind} bypassed the missing sub-lot origin")
+
+
+@test
 def task_pass_consumer_accepts_and_reauthenticates_a_retry_success_shape():
     progress = load_common_module("progress")
     retry = "17:" + "a" * 64
@@ -9993,6 +10051,182 @@ def positive_pass_close_requires_exact_allocation_and_artifacts():
 
 
 @test
+def sublot_opening_requires_and_replays_the_exact_positive_pass_close():
+    seed_review_pass(confirmed=1)
+    allocation = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps(allocation_data(), separators=(",", ":")),
+    )
+    check(allocation.returncode == 0, allocation.stdout + allocation.stderr)
+    write_confirmed("lot-1", [])
+
+    before = len(journal_lines())
+    premature = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(premature.returncode != 0 and len(journal_lines()) == before,
+          "a sub-lot opened before its source pass closed")
+
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    origin = run_progress("construction-origin-check", "lot-1.1")
+    check(origin.returncode == 0 and origin.stdout.strip(), origin.stdout + origin.stderr)
+
+    duplicate = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(duplicate.returncode != 0, "one sub-lot received two opening terminals")
+
+    rows = journal_lines()
+    close_entry = next(entry for entry in rows if entry.get("kind") == "pass.closed")
+    close_entry["data"] = {"confirmed": 0}
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in rows:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed = run_progress("construction-origin-check", "lot-1.1")
+    check(changed.returncode != 0,
+          "construction retained a sub-lot opening after its source close changed")
+
+
+@test
+def sublot_opening_can_finish_after_downstream_work_without_rewriting_history():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    append_note("plan.written", {"tasks": 1, "op": "historical-missing-boundary"}, lot="lot-1.1")
+    append_note("lot.built", {"tasks": 1, "attempts": 1}, lot="lot-1.1")
+
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    origin = run_progress("construction-origin-check", "lot-1.1")
+    check(origin.returncode == 0, origin.stdout + origin.stderr)
+
+
+@test
+def sublot_origin_replays_the_frozen_source_gate_not_the_later_current_head():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    plan = (
+        "# Plan\n\n"
+        "Covers: reports/product-review/lot-1/lot-1-confirmed.md\n\n"
+        "## Task 1 - Correct the confirmed behavior\n"
+        "Achieves: The confirmed behavior is corrected.\n"
+        "To verify: The confirmed behavior stays corrected.\n\n"
+        "### Design\n"
+        "[written at C3.1 - see below]\n"
+    )
+    write_report("plans/lot-1.1-plan.md", plan)
+    config = default_config()
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload["lot"] = "lot-1.1"
+    set_config(config)
+
+    source_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    plan_commit = os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh")
+    committed = subprocess.run(
+        ["bash", plan_commit, "lot-1.1", "test: publish sub-lot plan"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    later_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    check(later_head != source_head, "the real plan commit did not create its later HEAD")
+    terminal = journal_lines()[-1]
+    check(terminal.get("kind") == "plan.written" and terminal.get("lot") == "lot-1.1",
+          "the real plan commit did not append its authenticated plan.written terminal")
+    current_gate = subprocess.run(
+        ["bash", os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh"),
+         "require-current"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(current_gate.returncode != 0,
+          "the fixture unexpectedly gave the later plan commit a baseline gate")
+    origin = run_progress("construction-origin-check", "lot-1.1")
+    check(origin.returncode == 0, origin.stdout + origin.stderr)
+
+
+@test
+def sublot_origin_rejects_a_changed_frozen_source_gate():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    entries = journal_lines()
+    pass_commit = next(
+        entry for entry in entries if entry.get("kind") == "pass.opened"
+    )["data"]["commit"]
+    foreign_tree = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{pass_commit}^^{{tree}}"], text=True,
+    ).strip()
+    terminal = next(
+        entry for entry in entries
+        if entry.get("event") == "subagent-ended" and entry.get("kind") == "gate-runner"
+        and (entry.get("data") or {}).get("scope") == "task"
+    )
+    terminal["data"]["tree"] = foreign_tree
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in entries:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed = run_progress("construction-origin-check", "lot-1.1")
+    check(changed.returncode != 0,
+          "construction accepted a source-pass gate terminal for another frozen tree")
+
+
+@test
+def sublot_origin_replays_only_the_immediate_source_not_every_ancestor():
+    progress = load_common_module("progress")
+    ancestors = [
+        {"event": "note", "kind": "sublot.opened", "text": f"lot-1.{number}"}
+        for number in range(1, 20)
+    ]
+    opening_index = len(ancestors)
+    close_index = opening_index + 2
+    entries = [
+        *ancestors,
+        {"event": "note", "kind": "pass.opened", "data": {"built": "lot-1.19"}},
+        {"event": "note", "kind": "sublot.allocated", "text": "lot-1.20",
+         "data": {"built": "lot-1.19"}},
+        {"event": "note", "kind": "pass.closed", "data": {"confirmed": 1}},
+    ]
+    calls = []
+
+    def source_close(_entries, _subject, *, validate_origin=True, validate_current_gate=True):
+        calls.append(("close", validate_origin, validate_current_gate))
+        return opening_index, entries[opening_index], close_index, entries[close_index], 1, "lot-1.19"
+
+    def source_opening(_entries, _before, _subject, *, validate_origin=True):
+        calls.append(("allocation", validate_origin))
+        return opening_index, entries[opening_index], "lot-1.19", "a" * 40
+
+    progress.current_pass_close = source_close
+    progress.current_pass_opening = source_opening
+    progress.validate_global_authority_precedence = lambda _entries: None
+    progress.validate_current_direct_terminals = lambda _entries, _before, _subject: None
+    progress.validate_allocation_identity = lambda *_args: "lot-1"
+    progress.validate_allocation_account = lambda *_args: None
+
+    progress.validate_sublot_opening(entries, None, "lot-1.20", "the deep origin")
+    check(calls == [("close", False, False), ("allocation", False)],
+          f"the historical projector re-enabled ancestor or current-gate validation: {calls}")
+
+
+@test
 def positive_pass_dedupe_accounts_for_every_confirmed_source_once():
     seed_review_pass(confirmed=2)
     omitted = allocation_data(items=[{
@@ -10430,6 +10664,161 @@ def amendment_sweep_preflight_requires_the_exact_owed_next_sweep():
 
 
 @test
+def amendment_sweep_reach_sources_include_a_later_owner_linked_amendment_ruling():
+    seed_written_amendment_for_reach()
+    accept_reach_sweep(
+        1,
+        reach_report(hops=(1,), dispositions=("kept",)),
+        "reach-before-later-ruling",
+    )
+
+    state_path = seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    authority = {
+        "authority_kind": "ruling.ready",
+        "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    }
+    dispatched = run_progress(
+        "note", "fixer.dispatched",
+        "--data", json.dumps({
+            "ruling": "R1", "route": "amendment-fixer", **authority,
+        }),
+        "--text", state_path,
+    )
+    check(dispatched.returncode == 0, dispatched.stdout + dispatched.stderr)
+    before_duplicate = len(journal_lines())
+    duplicate = run_progress(
+        "note", "fixer.dispatched",
+        "--data", json.dumps({
+            "ruling": "R1", "route": "amendment-fixer", **authority,
+        }),
+        "--text", state_path,
+    )
+    check(duplicate.returncode != 0 and len(journal_lines()) == before_duplicate,
+          "a duplicate current-authority amendment-fixer dispatch reached the journal")
+    write_report(
+        "amendments/1.md",
+        amendment_document(1, "apply the reach order; return to product review", ("R1",)),
+    )
+
+    write_report(
+        "reports/amendment/1/sweep-2.md",
+        reach_report(sources=("A1/order", "R1")),
+    )
+    session = "reach-after-later-ruling"
+    configure_reach_session(session, 2)
+    append_live_reach_session(2, session)
+    preflight = run_progress("amendment-sweep-check", "2")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    retired = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    proof = json.loads(preflight.stdout)
+    receipt = run_progress(
+        "note", "sweep.reported", "--round", "2",
+        "--data", json.dumps({key: proof[key] for key in ("hop", "places", "closed")}),
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    history = run_progress("amendment-state-check")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    journal = journal_lines()
+    dispatch = next(entry for entry in journal if entry.get("kind") == "fixer.dispatched")
+    dispatch["data"]["authority_sha256"] = "0" * 64
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_history = run_progress("amendment-state-check")
+    check(changed_history.returncode != 0,
+          "historical Reach replay accepted a changed owner-linked source authority")
+
+
+@test
+def amendment_sweep_refuses_an_active_amendment_ruling_without_its_owner_dispatch():
+    seed_written_amendment_for_reach()
+    seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    session = "reach-with-unowned-ruling"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    before = len(journal_lines())
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode != 0 and len(journal_lines()) == before,
+          "Reach preflight omitted an active amendment-fixer ruling without a dispatch")
+
+
+@test
+def amendment_sweep_requires_one_dispatch_for_the_current_ruling_authority():
+    seed_written_amendment_for_reach()
+    state_path = seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    initial_authority = {
+        "authority_kind": "ruling.ready",
+        "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    }
+    append_note("fixer.dispatched", {
+        "ruling": "R1", "route": "amendment-fixer", **initial_authority,
+    })
+    ready_path, ready_sha = append_conflict_generation(
+        "R1", 1, ["R1"],
+        [{"id": "R1", "action": "qualify", "status": "active",
+          "route": "amendment-fixer"}],
+        [{"answer": "R1", "status": "active", "route": "amendment-fixer"}],
+        state_kind="ruling.ready", state_ref="R1",
+    )
+    current_authority = {
+        "authority_kind": "decision.conflict.ready",
+        "authority_ref": "R1/C1",
+        "authority_sha256": ready_sha,
+    }
+    write_report(
+        "reports/amendment/1/sweep-1.md",
+        reach_report(sources=("A1/order", "R1")),
+    )
+    session = "reach-after-ruling-authority-change"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    missing_current_owner = run_progress("amendment-sweep-check", "1")
+    check(missing_current_owner.returncode != 0,
+          "an older amendment-fixer dispatch owned the current ruling authority")
+
+    current_dispatch = run_progress(
+        "note", "fixer.dispatched",
+        "--data", json.dumps({
+            "ruling": "R1", "route": "amendment-fixer", **current_authority,
+        }),
+        "--text", ready_path,
+    )
+    check(current_dispatch.returncode == 0, current_dispatch.stdout + current_dispatch.stderr)
+    accepted = run_progress("amendment-sweep-check", "1")
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+
+
+@test
+def amendment_sweep_ignores_a_dispatch_for_a_superseded_ruling_authority():
+    seed_written_amendment_for_reach()
+    state_path = seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    append_note("fixer.dispatched", {
+        "ruling": "R1", "route": "amendment-fixer",
+        "authority_kind": "ruling.ready",
+        "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    })
+    append_conflict_generation(
+        "R1", 1, ["R1"],
+        [{"id": "R1", "action": "supersede", "status": "superseded",
+          "route": None}],
+        [{"answer": "R1", "status": "superseded"}],
+        state_kind="ruling.ready", state_ref="R1",
+    )
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    session = "reach-after-ruling-supersession"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    accepted = run_progress("amendment-sweep-check", "1")
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+
+
+@test
 def amendment_clean_positive_place_sweep_authorizes_consolidation():
     seed_written_amendment_for_reach()
     accept_reach_sweep(
@@ -10467,6 +10856,155 @@ def amendment_construction_only_product_pass_authenticates_its_spec_for_consolid
 
     started = run_progress("subagent-started", "consolidation", "--round", "1")
     check(started.returncode == 0, started.stdout + started.stderr)
+
+
+@test
+def construction_only_run_opens_a_construction_amendment_from_its_committed_plan_spec():
+    append_note(
+        "run.started", {"cap": 3}, "construction-only-feature",
+        mode="construction", lot="lot-1", job="controller",
+    )
+    spec_relative = "docs/plans/construction-only-direct-design.md"
+    plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-lot-1-plan.md"
+    write_project(spec_relative, spec_document())
+    write_project(
+        plan_relative,
+        "# Construction plan\n\n"
+        f"Spec: {spec_relative}\n\n"
+        "## Task 1 - Implement the product\n"
+        "Achieves: The product follows the committed specification.\n"
+        "To verify: The product result matches the specification.\n",
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "add", spec_relative, plan_relative], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "seed construction authority"], check=True,
+    )
+    append_note(
+        "plan.written", {"tasks": 1, "op": "construction-plan"},
+        mode="construction", lot="lot-1", job="controller",
+    )
+    state_path = seed_direct_ruling(ruling="R1", route="amendment")
+    order = "apply R1 and return to lot-1 task 1"
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", json.dumps({
+            "amendment": 1,
+            "origin": "construction",
+            "ruling": "R1",
+            "authority_kind": "ruling.ready",
+            "authority_ref": "R1",
+            "authority_sha256": file_sha256(state_path),
+        }),
+        "--text", order,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    source = journal_lines()[-1]["data"].get("construction_source")
+    check(
+        isinstance(source, dict)
+        and source.get("lot") == "lot-1"
+        and source.get("plan") == plan_relative
+        and source.get("spec") == spec_relative,
+        "the opening did not freeze its committed Construction spec source",
+    )
+    write_project("docs/later.txt", "later committed work\n")
+    subprocess.run(["git", "-C", REPO, "add", "docs/later.txt"], check=True)
+    subprocess.run(["git", "-C", REPO, "commit", "-qm", "advance head"], check=True)
+    write_report("amendments/1.md", amendment_document(1, order, ("R1",)))
+    os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "1"), exist_ok=True)
+    amendment_path = os.path.join(WORKSPACE, "amendments", "1.md")
+    written = run_progress(
+        "note", "amendment.written", "--data", '{"amendment":1}',
+        "--text", amendment_path,
+    )
+    check(written.returncode == 0, written.stdout + written.stderr)
+    accept_reach_sweep(1, reach_report(sources=("R1",)), "construction-direct-reach")
+    returned = run_progress(
+        "note", "fixer.returned", "--data", '{"applied":1,"declined":0}',
+    )
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    write_project(spec_relative, spec_document(status="amended"))
+    consolidation = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(consolidation.returncode == 0, consolidation.stdout + consolidation.stderr)
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1",
+        "--text", "consolidation round 1 of 3",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    ended = run_progress(
+        "subagent-ended", "consolidation", "--round", "1",
+        "--data", '{"exact":true}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    consumed = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"consolidation","outcome":"exact"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+    commit_script = os.path.join(
+        WORKSPACE, "prompts", "amendment", "amendment-commit.sh",
+    )
+    committed = subprocess.run(
+        [commit_script, "1", spec_relative, "docs: land Construction amendment", "-"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    state = run_progress("amendment-state-check")
+    check(state.returncode == 0, state.stdout + state.stderr)
+
+
+@test
+def construction_only_amendment_source_fails_closed_before_opening():
+    for label in ("dirty-spec", "duplicate-spec", "untracked-spec"):
+        reset()
+        append_note(
+            "run.started", {"cap": 3}, "construction-only-feature",
+            mode="construction", lot="lot-1", job="controller",
+        )
+        spec_relative = "docs/plans/construction-only-direct-design.md"
+        plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-lot-1-plan.md"
+        write_project(spec_relative, spec_document())
+        spec_lines = f"Spec: {spec_relative}\n"
+        if label == "duplicate-spec":
+            spec_lines += f"Spec: {spec_relative}\n"
+        write_project(
+            plan_relative,
+            "# Construction plan\n\n"
+            f"{spec_lines}\n"
+            "## Task 1 - Implement the product\n"
+            "Achieves: The product follows the committed specification.\n"
+            "To verify: The product result matches the specification.\n",
+        )
+        staged = [plan_relative]
+        if label != "untracked-spec":
+            staged.append(spec_relative)
+        subprocess.run(["git", "-C", REPO, "add", *staged], check=True)
+        subprocess.run(
+            ["git", "-C", REPO, "commit", "-qm", f"seed {label} authority"],
+            check=True,
+        )
+        append_note(
+            "plan.written", {"tasks": 1, "op": label},
+            mode="construction", lot="lot-1", job="controller",
+        )
+        if label == "dirty-spec":
+            write_project(spec_relative, spec_document(extra="\nUncommitted change.\n"))
+        state_path = seed_direct_ruling(ruling="R1", route="amendment")
+        before = len(journal_lines())
+        opened = run_progress(
+            "note", "amendment.opened",
+            "--data", json.dumps({
+                "amendment": 1,
+                "origin": "construction",
+                "ruling": "R1",
+                "authority_kind": "ruling.ready",
+                "authority_ref": "R1",
+                "authority_sha256": file_sha256(state_path),
+            }),
+            "--text", "apply R1 and return to lot-1 task 1",
+        )
+        refused_after(opened, before, f"the {label} Construction spec source")
 
 
 @test
@@ -12005,6 +12543,27 @@ def design_checker_proves_parent_product_closure_without_becoming_lot_review():
 
 
 @test
+def sublot_construction_requires_one_replayed_product_review_origin():
+    with open(os.path.join(HERE, "prompts", "product-review", "MODE.md"), encoding="utf-8") as f:
+        product = " ".join(f.read().split())
+    with open(os.path.join(HERE, "prompts", "construction", "MODE.md"), encoding="utf-8") as f:
+        construction = " ".join(f.read().split())
+    with open(os.path.join(COMMON_PROMPTS, "progress-rules.md"), encoding="utf-8") as f:
+        rules = " ".join(f.read().split())
+
+    for contract in (product, construction, rules):
+        check("sublot.opened" in contract and "CONSTRUCTION origin" in contract,
+              "a direct contract omits the sub-lot origin terminal")
+        check("positive" in contract and "allocation" in contract,
+              "a direct contract does not bind the source pass and allocation")
+    check("before any copy, staging, commit or marker" in construction,
+          "C1 does not refuse before plan publication mutates state")
+    check("Plan publication, attempt start, `lot.built`" in rules
+          and "first PRODUCT REVIEW pass" in rules,
+          "the shared rule omits a direct construction-origin consumer")
+
+
+@test
 def code_contract_blocker_stops_its_current_round_and_uses_the_plan_fault_route():
     with open(os.path.join(HERE, "prompts", "construction", "implementer.md"), encoding="utf-8") as f:
         implementer = " ".join(f.read().split())
@@ -12100,6 +12659,25 @@ def human_judgment_context_precedes_every_choice_widget_without_a_new_schema():
     skill_flat = " ".join(skill.split())
     check("The widget is the last step, never the explanation" in skill_flat,
           "a human judgment must receive context before its widget")
+    check("Every DECISION starts with an explicit product orientation" in skill_flat,
+          "a product DECISION must start with a product orientation")
+    check("feature or product area" in skill_flat and "exact screen or surface" in skill_flat,
+          "the orientation must identify the product area and surface")
+    check("what the user does immediately before the issue" in skill_flat
+          and "what the user sees now" in skill_flat,
+          "the orientation must establish the user action and visible result")
+    check("Define every project-specific object or label" in skill_flat,
+          "the orientation must define project-specific language")
+    check("one concrete start-to-finish example" in skill_flat
+          and "without implementation details" in skill_flat,
+          "the orientation must include one concrete product example")
+    check("before detection, evidence, timing, or options" in skill_flat,
+          "product orientation must precede technical and workflow analysis")
+    check("understandable when read without the preceding prose" in skill_flat,
+          "the widget question must remain understandable on its own")
+    check("A workflow-only judgement starts with an equivalent workflow orientation" in skill_flat
+          and "Do not invent a product screen or user action" in skill_flat,
+          "a workflow judgment must orient the human without inventing product context")
     check("why the answer is necessary now" in skill_flat and "what cannot continue without it" in skill_flat,
           "the orchestrator must explain the decision need and blocker")
     check("who detected it" in skill_flat and "evidence confirmed it" in skill_flat,
@@ -12123,10 +12701,122 @@ def human_judgment_context_precedes_every_choice_widget_without_a_new_schema():
     for name, mode in modes.items():
         check("human-judgment presentation rule" in mode,
               f"{name} does not propagate the shared human-judgment presentation rule")
+    for name in ("SPEC", "PRODUCT REVIEW", "AMENDMENT"):
+        check("product orientation" in modes[name],
+              f"{name} does not preserve product orientation at its direct DECISION boundary")
+    check("workflow orientation" in modes["CONSTRUCTION"] and "product orientation" in modes["CONSTRUCTION"],
+          "CONSTRUCTION must distinguish workflow judgments from product DECISIONs")
     check(modes["PRODUCT REVIEW"].count("human-judgment presentation rule") >= 3,
           "PRODUCT REVIEW must propagate the rule to initial, supplemental and conflict questions")
+    check(modes["PRODUCT REVIEW"].count("product orientation") >= 3,
+          "PRODUCT REVIEW must preserve product orientation for initial, supplemental and conflict questions")
     check("discussion is free-form" in modes["AMENDMENT"] and "final bounded choice" in modes["AMENDMENT"],
           "AMENDMENT must preserve discussion while contextualising its final choice")
+
+    amendment_repeated_reach = modes["AMENDMENT"].split("And once only", 1)[1].split(
+        "A DECISION raised by the sweep", 1)[0]
+    check("human-judgment presentation rule" in amendment_repeated_reach
+          and "workflow orientation" in amendment_repeated_reach,
+          "a repeated unliftable Reach blocker must orient its human judgment")
+    amendment_exit = modes["AMENDMENT"].split("The exit door", 1)[1].split(
+        "The hand-back clause", 1)[0]
+    check("human-judgment presentation rule" in amendment_exit
+          and "workflow orientation" in amendment_exit,
+          "the Reach exit door must orient its human judgment")
+
+    construction_dirty = modes["CONSTRUCTION"].split(
+        "C0.1 · The working tree", 1)[1].split("C0.2 · Read the gate file", 1)[0]
+    check("human-judgment presentation rule" in construction_dirty
+          and "workflow orientation" in construction_dirty,
+          "a foreign dirty tree must orient its human judgment")
+    construction_gate_leaf = modes["CONSTRUCTION"].split(
+        "C0.2 · Read the gate file", 1)[1].split("C0.2a · Validate gate execution", 1)[0]
+    check("human-judgment presentation rule" in construction_gate_leaf
+          and "workflow orientation" in construction_gate_leaf,
+          "a foreign gate leaf must orient its human judgment")
+    construction_repeated_failure = modes["CONSTRUCTION"].split(
+        "And it runs once logically per task", 1)[1].split("C3.9 · Where the next attempt starts", 1)[0]
+    check("human-judgment presentation rule" in construction_repeated_failure
+          and "workflow orientation" in construction_repeated_failure,
+          "a repeated post-diagnostic failure must orient its human judgment")
+    construction_abort_refs = modes["CONSTRUCTION"].split(
+        "The code:", 1)[1].split("A task creates files", 1)[0]
+    check("human-judgment presentation rule" in construction_abort_refs
+          and "workflow orientation" in construction_abort_refs,
+          "abort ref retention must orient its human judgment")
+
+    product_structural_exits = modes["PRODUCT REVIEW"].split(
+        "Two numbers to report", 1)[1].split("The rule that governs every later pass", 1)[0]
+    check("human-judgment presentation rule" in product_structural_exits
+          and "workflow orientation" in product_structural_exits,
+          "oversized and repeated-area sub-lot exits must orient their human judgments")
+
+    audit_blockers = skill_flat.split("Audit what comes back", 1)[1].split(
+        "Spot-check a report", 1)[0]
+    check("human-judgment presentation rule" in audit_blockers
+          and "workflow orientation" in audit_blockers,
+          "shared malformed and NOT DONE blockers must orient their human judgments")
+    workspace_ignore = skill_flat.split(
+        "It also refuses to create anything if `.superpowers/` is not ignored", 1)[1].split(
+        "The subject is yours", 1)[0]
+    check("human-judgment presentation rule" in workspace_ignore
+          and "workflow orientation" in workspace_ignore,
+          "the workspace ignore choice must orient its human judgment")
+    abort_trace = skill_flat.split(
+        "The workspace and the git refs go together", 1)[1].split("The reports need no decision", 1)[0]
+    check("human-judgment presentation rule" in abort_trace
+          and "workflow orientation" in abort_trace,
+          "the abort keep-or-clean choice must orient its human judgment")
+    final_trace = skill_flat.split("The feature is finished", 1)[1].split(
+        "The cap is asked once", 1)[0]
+    check("human-judgment presentation rule" in final_trace
+          and "workflow orientation" in final_trace,
+          "the final-delivery keep-or-clean choice must orient its human judgment")
+
+    spec_not_done = modes["SPEC"].split("And no block of that closing round", 1)[1].split(
+        "Never a reviewer simply writing READY", 1)[0]
+    check("human-judgment presentation rule" in spec_not_done
+          and "workflow orientation" in spec_not_done,
+          "the second full-round NOT DONE must orient its human judgment")
+    product_replacement = modes["PRODUCT REVIEW"].split(
+        "And relaunch once", 1)[1].split("Then go to R2.1", 1)[0]
+    check("human-judgment presentation rule" in product_replacement
+          and "workflow orientation" in product_replacement,
+          "the replacement lens stable blocker must orient its human judgment")
+    construction_missing_start = modes["CONSTRUCTION"].split(
+        "Ten refusals, and each has its route", 1)[1].split("The dirty-tree row grants one return", 1)[0]
+    check("missing start marker" in construction_missing_start
+          and "human-judgment presentation rule" in construction_missing_start
+          and "workflow orientation" in construction_missing_start,
+          "a missing attempt-start marker must orient its human judgment")
+    amendment_reach_decision = modes["AMENDMENT"].split(
+        "A DECISION raised by the sweep", 1)[1].split("Before sending the answer to the fixer", 1)[0]
+    check("human-judgment presentation rule" in amendment_reach_decision
+          and "product orientation" in amendment_reach_decision,
+          "an amendment Reach DECISION must orient its product judgment")
+    product_final_trace = modes["PRODUCT REVIEW"].split(
+        "Only when the human says the whole feature is done", 1)[1].split(
+        "This line must land before the first cleanup gesture", 1)[0]
+    check("human-judgment presentation rule" in product_final_trace
+          and "workflow orientation" in product_final_trace,
+          "PRODUCT REVIEW must preserve final trace orientation")
+    duplicate_session = skill_flat.split("several matches", 1)[1].split(
+        "One creature mutates", 1)[0]
+    check("human-judgment presentation rule" in duplicate_session
+          and "workflow orientation" in duplicate_session,
+          "duplicate physical owners must orient their human judgment")
+    amendment_consolidation = modes["AMENDMENT"].split("Three rounds at most", 1)[1].split(
+        "You commit both files", 1)[0]
+    check("human-judgment presentation rule" in amendment_consolidation
+          and "workflow orientation" in amendment_consolidation,
+          "a non-converging amendment consolidation must orient its human judgment")
+    spec_scoped_nonconvergence = modes["SPEC"].split(
+        "A scoped chain that does not converge", 1)[1].split("Closing the spec", 1)[0]
+    check("human-judgment presentation rule" in spec_scoped_nonconvergence
+          and "product orientation" in spec_scoped_nonconvergence
+          and "workflow orientation" in spec_scoped_nonconvergence
+          and "after the Recurring findings classification" in spec_scoped_nonconvergence,
+          "a non-converging scoped SPEC chain must select orientation from its classification")
 
 
 @test
@@ -12382,6 +13072,7 @@ def main():
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
             "construction_review.py", "correction_round.py",
+            "plan-commit.sh",
             "work_unit.py", "correction_attempt_start.py", "attempt-started.sh",
             "correction_artifact_publish.py", "plan-publish.sh",
             "correction_round_supersede.py", "correction-round-supersede.sh",

@@ -433,8 +433,8 @@ def validate_spec_loop_artifact(entry):
         fail("the SPEC-loop recheck artifact differs from its complete structured result")
 
 
-def direct_ruling_state(ruling):
-    notes = journal_entries()
+def direct_ruling_generation(ruling, notes=None):
+    notes = journal_entries() if notes is None else notes
     try:
         validate_global_authority_precedence(notes)
     except AuthorityPrecedenceError as exc:
@@ -458,8 +458,8 @@ def direct_ruling_state(ruling):
             matches = [action for action in (data.get("actions") or [])
                        if isinstance(action, dict) and action.get("answer") == ruling]
             if len(matches) == 1:
-                route = matches[0].get("route", route)
                 status = matches[0].get("status", status)
+                route = None if status == "superseded" else matches[0].get("route", route)
         elif kind == "decision.conflict.ready":
             try:
                 validate_conflict_generation(notes, data["owner"], data["conflict"])
@@ -478,18 +478,27 @@ def direct_ruling_state(ruling):
                     matches = [update for update in (note_data(settlements[0]).get("updates") or [])
                                if isinstance(update, dict) and update.get("id") == ruling]
             if len(matches) == 1:
-                route = matches[0].get("route", route)
                 status = matches[0].get("status", status)
+                route = None if status == "superseded" else matches[0].get("route", route)
                 authority = entry
                 authority_kind = "decision.conflict.ready"
                 authority_ref = f"{data.get('owner')}/C{data.get('conflict')}"
-    if route not in DIRECT_RULING_ROUTES or status != "active":
-        fail(f"{ruling} is not one active direct route", {"route": route, "status": status})
-    return notes, route, {
+    if status not in {"active", "superseded"} \
+            or status == "active" and route not in DIRECT_RULING_ROUTES \
+            or status == "superseded" and route is not None:
+        fail(f"{ruling} has no valid current direct route", {"route": route, "status": status})
+    return notes, route, status, {
         "authority_kind": authority_kind,
         "authority_ref": authority_ref,
         "authority_sha256": authority_artifact_sha(authority),
     }
+
+
+def direct_ruling_state(ruling, notes=None):
+    notes, route, status, authority = direct_ruling_generation(ruling, notes)
+    if status != "active":
+        fail(f"{ruling} is not one active direct route", {"route": route, "status": status})
+    return notes, route, authority
 
 
 def validate_authority(data, subject, expected=None):
@@ -1570,6 +1579,172 @@ def product_review_amendment_predecessor(entries, before, subject, *, historical
     }
 
 
+CONSTRUCTION_AMENDMENT_SOURCE_KEYS = {
+    "schema", "lot", "run", "origin", "plan_written", "commit",
+    "plan", "plan_sha256", "spec", "spec_sha256",
+}
+
+
+def committed_regular_payload(commit, relative, subject):
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        fail(f"{subject} has no exact commit")
+    if not isinstance(relative, str) or not relative:
+        fail(f"{subject} has no repository path")
+    parsed = PurePosixPath(relative)
+    if parsed.is_absolute() or parsed.as_posix() != relative or ".." in parsed.parts:
+        fail(f"{subject} has no exact repository-relative path", relative)
+    listed = subprocess.run(
+        ["git", "--literal-pathspecs", "-C", project_root(), "ls-tree", "-z",
+         commit, "--", relative],
+        capture_output=True,
+    )
+    raw = listed.stdout.removesuffix(b"\0")
+    fields = raw.split(b"\t", 1)
+    metadata = fields[0].split(b" ") if len(fields) == 2 else []
+    if listed.returncode != 0 or len(fields) != 2 or len(metadata) != 3 \
+            or metadata[0] not in {b"100644", b"100755"} \
+            or metadata[1] != b"blob" \
+            or fields[1] != relative.encode("utf-8"):
+        fail(f"{subject} is absent or not a regular file in its committed generation",
+             relative)
+    content = subprocess.run(
+        ["git", "-C", project_root(), "cat-file", "blob", metadata[2].decode("ascii")],
+        capture_output=True,
+    )
+    if content.returncode != 0:
+        fail(f"{subject} cannot read its committed bytes", relative)
+    return content.stdout
+
+
+def committed_plan_spec_account(commit, plan_relative, subject):
+    plan_payload = committed_regular_payload(commit, plan_relative, f"{subject}'s plan")
+    try:
+        plan_text = plan_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{subject}'s committed plan is not valid UTF-8", exc)
+    _, visible = markdown_structure_lines(plan_text)
+    task_headings = [
+        index for index, line in enumerate(visible)
+        if isinstance(line, str) and re.fullmatch(r"## Task [1-9][0-9]* - .+", line)
+    ]
+    spec_lines = [
+        (index, line[len("Spec: "):]) for index, line in enumerate(visible)
+        if isinstance(line, str) and line.startswith("Spec: ")
+    ]
+    if len(spec_lines) != 1 or not task_headings or spec_lines[0][0] >= task_headings[0]:
+        fail(f"{subject}'s committed plan has no one exact root Spec source")
+    spec_relative = spec_lines[0][1]
+    spec_payload = committed_regular_payload(
+        commit, spec_relative, f"{subject}'s specification",
+    )
+    return {
+        "commit": commit,
+        "plan": plan_relative,
+        "plan_sha256": sha256_bytes(plan_payload),
+        "spec": spec_relative,
+        "spec_sha256": sha256_bytes(spec_payload),
+    }
+
+
+def construction_run_and_plan(entries, before, lot, subject):
+    starts = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
+        entries[:before]
+    ) if candidate.get("kind") == "run.started"]
+    run = starts[0][1] if len(starts) == 1 else {}
+    run_data = note_data(run)
+    root_lot = lot.split(".", 1)[0]
+    if len(starts) != 1 or run.get("event") != "note" \
+            or run.get("mode") != "construction" or run.get("job") != "controller" \
+            or run.get("lot") != root_lot or not isinstance(run.get("text"), str) \
+            or not run["text"] or set(run_data) != {"cap"} \
+            or not isinstance(run_data.get("cap"), int) or isinstance(run_data.get("cap"), bool) \
+            or run_data["cap"] < 1:
+        fail(f"{subject} has no one exact Construction run opening")
+    plans = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
+        entries[:before]
+    ) if candidate.get("kind") == "plan.written" and candidate.get("lot") == lot]
+    if not plans:
+        fail(f"{subject} has no published plan for {lot}")
+    plan_index, plan = plans[-1]
+    plan_data = note_data(plan)
+    if plan.get("event") != "note" or plan.get("mode") != "construction" \
+            or plan.get("job") != "controller" \
+            or not isinstance(plan_data.get("tasks"), int) \
+            or isinstance(plan_data.get("tasks"), bool) \
+            or plan_data["tasks"] < 1 or not isinstance(plan_data.get("op"), str) \
+            or not plan_data["op"] or set(plan_data) != {"tasks", "op"}:
+        fail(f"{subject}'s latest plan publication is malformed")
+    return starts[0], (plan_index, plan)
+
+
+def current_construction_amendment_source(entries, context, subject):
+    lot = context.get("lot")
+    if not isinstance(lot, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
+    ):
+        fail(f"{subject} has no exact Construction lot")
+    (run_index, _), (plan_index, _) = construction_run_and_plan(
+        entries, len(entries), lot, subject,
+    )
+    commit_result = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", "HEAD^{commit}"],
+        capture_output=True, text=True,
+    )
+    if commit_result.returncode != 0:
+        fail(f"{subject} has no current committed tree", commit_result.stderr)
+    commit = commit_result.stdout.strip()
+    plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
+    committed = committed_plan_spec_account(commit, plan_relative, subject)
+    live_plan = exact_real_file(project_root(), plan_relative, f"{subject}'s current plan")
+    live_spec = exact_real_file(project_root(), committed["spec"], f"{subject}'s current spec")
+    with open(live_plan, "rb") as source:
+        live_plan_sha256 = sha256_bytes(source.read())
+    with open(live_spec, "rb") as source:
+        live_spec_sha256 = sha256_bytes(source.read())
+    if live_plan_sha256 != committed["plan_sha256"] \
+            or live_spec_sha256 != committed["spec_sha256"]:
+        fail(f"{subject} does not start from its exact committed plan and specification")
+    return {
+        "schema": 1,
+        "lot": lot,
+        "run": journal_line_proof(run_index),
+        "origin": validate_construction_lot_origin(entries, len(entries), lot, subject),
+        "plan_written": journal_line_proof(plan_index),
+        **committed,
+    }
+
+
+def validate_construction_amendment_source(entries, before, source, subject):
+    if not isinstance(source, dict) or set(source) != CONSTRUCTION_AMENDMENT_SOURCE_KEYS \
+            or source.get("schema") != 1:
+        fail(f"{subject} has no exact frozen Construction spec source")
+    lot = source.get("lot")
+    if not isinstance(lot, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
+    ):
+        fail(f"{subject} has a malformed Construction lot")
+    run_index, run = journal_entry_from_proof(entries, source.get("run"), subject)
+    plan_index, plan = journal_entry_from_proof(entries, source.get("plan_written"), subject)
+    expected_run, expected_plan = construction_run_and_plan(entries, before, lot, subject)
+    if not run_index < plan_index < before or run.get("kind") != "run.started" \
+            or run.get("event") != "note" or run.get("mode") != "construction" \
+            or plan.get("kind") != "plan.written" or plan.get("lot") != lot \
+            or expected_run[0] != run_index or expected_plan[0] != plan_index:
+        fail(f"{subject} does not bind its ordered Construction run and plan")
+    expected_origin = validate_construction_lot_origin(entries, before, lot, subject)
+    expected = {
+        "schema": 1,
+        "lot": lot,
+        "run": source["run"],
+        "origin": expected_origin,
+        "plan_written": source["plan_written"],
+        **committed_plan_spec_account(source.get("commit"), source.get("plan"), subject),
+    }
+    if source != expected:
+        fail(f"{subject} changes its frozen Construction spec source", expected)
+    return source
+
+
 def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
     data = note_data(entry)
     number = data.get("amendment")
@@ -1598,6 +1773,8 @@ def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
         validate_amendment_commit_entry(entries, commits[0][0], commits[0][1])
 
     if origin == "product-review":
+        if "construction_source" in data:
+            fail("a product-review amendment opening cannot claim a Construction spec source")
         built = data.get("built")
         if not isinstance(built, str) or not re.fullmatch(
             r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built
@@ -1659,10 +1836,22 @@ def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
     else:
         if "built" in data:
             fail("a construction amendment opening may not claim a product-review built lot")
-        _, written = spec_written(entries[:index])
-        validate_spec_written_history(written)
-        if not any(candidate.get("kind") == "spec.committed" for candidate in entries[:index]):
-            fail("a construction amendment opening precedes the validated specification close")
+        readiness = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
+            entries[:index]
+        ) if candidate.get("kind") == "spec.written"]
+        if readiness:
+            _, written = spec_written(entries[:index])
+            validate_spec_written_history(written)
+            if "construction_source" in data:
+                fail("a SPEC-backed amendment opening cannot claim a Construction spec source")
+            if not any(candidate.get("kind") == "spec.committed"
+                       for candidate in entries[:index]):
+                fail("a construction amendment opening precedes the validated specification close")
+        else:
+            validate_construction_amendment_source(
+                entries, index, data.get("construction_source"),
+                "a construction-only amendment opening",
+            )
         pass_events = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
             entries[:index]
         ) if candidate.get("kind") in {"pass.opened", "pass.closed"}]
@@ -1671,7 +1860,7 @@ def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
     return data
 
 
-def normalize_amendment_opened(entries, data, text):
+def normalize_amendment_opened(entries, data, text, context):
     if not isinstance(data, dict):
         fail("amendment.opened requires structured identity data")
     candidate_data = dict(data)
@@ -1683,6 +1872,11 @@ def normalize_amendment_opened(entries, data, text):
             if any(key in candidate_data for key in predecessor):
                 fail("a product-review amendment cannot supply derived successor authority")
             candidate_data.update(predecessor)
+    if candidate_data.get("origin") == "construction" \
+            and not any(entry.get("kind") == "spec.written" for entry in entries):
+        candidate_data["construction_source"] = current_construction_amendment_source(
+            entries, context, "a construction-only amendment opening",
+        )
     candidate = {"event": "note", "kind": "amendment.opened",
                  "data": candidate_data, "text": text}
     candidate_data["opening_sha256"] = amendment_opening_digest(candidate)
@@ -1843,13 +2037,54 @@ def next_visible_line(lines, start, stop=None):
     return None
 
 
-def amendment_reach_sources(opening):
+def amendment_reach_sources(entries, opening_index, before, opening):
     data = note_data(opening)
     if isinstance(data.get("members"), list) and data["members"]:
-        return data["members"]
-    if isinstance(data.get("ruling"), str) and data["ruling"]:
-        return [data["ruling"]]
-    return [f"A{data['amendment']}/order"]
+        sources = list(data["members"])
+    elif isinstance(data.get("ruling"), str) and data["ruling"]:
+        sources = [data["ruling"]]
+    else:
+        sources = [f"A{data['amendment']}/order"]
+
+    dispatches = [
+        entry for entry in entries[opening_index + 1:before]
+        if entry.get("kind") == "fixer.dispatched"
+        and note_data(entry).get("route") == "amendment-fixer"
+    ]
+    candidate_rulings = set()
+    for entry in entries[opening_index + 1:before]:
+        entry_data = note_data(entry)
+        for value in (entry_data.get("ruling"), entry_data.get("answer")):
+            if re.fullmatch(r"R[1-9][0-9]*", str(value)):
+                candidate_rulings.add(value)
+        for account in (entry_data.get("actions"), entry_data.get("updates"),
+                        entry_data.get("rulings")):
+            for member in account or []:
+                if not isinstance(member, dict):
+                    continue
+                for key in ("answer", "id", "ruling"):
+                    value = member.get(key)
+                    if re.fullmatch(r"R[1-9][0-9]*", str(value)):
+                        candidate_rulings.add(value)
+    current_entries = entries[:before]
+    for ruling in sorted(candidate_rulings, key=lambda value: int(value[1:])):
+        _, route, status, authority = direct_ruling_generation(ruling, current_entries)
+        if status != "active" or route != "amendment-fixer":
+            continue
+        owners = [entry for entry in dispatches
+                  if note_data(entry).get("ruling") == ruling
+                  and all(note_data(entry).get(key) == authority[key]
+                          for key in ("authority_kind", "authority_ref", "authority_sha256"))]
+        if len(owners) != 1:
+            fail(f"the amendment Reach source {ruling} has no one exact owner-linked dispatch")
+        authority_tuple = tuple(authority[key] for key in (
+            "authority_kind", "authority_ref", "authority_sha256",
+        ))
+        if has_terminal(current_entries, ruling, authority_tuple):
+            fail(f"the amendment Reach source {ruling} is already terminal")
+        if ruling not in sources:
+            sources.append(ruling)
+    return sources
 
 
 def parse_reach_sources(value, subject):
@@ -2176,7 +2411,8 @@ def amendment_sweep_generation(entries, sweep, subject, *, live):
     with open(report, "rb") as source:
         payload = source.read()
     account = audit_reach_report(
-        payload, "the reach report", amendment_reach_sources(opening),
+        payload, "the reach report",
+        amendment_reach_sources(entries, opening_index, len(entries), opening),
     )
     amendment_path = exact_real_file(WORKSPACE, f"amendments/{number}.md",
                                      "the amendment under reach review")
@@ -2354,7 +2590,8 @@ def validate_sweep_entry(entries, index, entry, *, validate_owed=True):
     with open(report, "rb") as source:
         payload = source.read()
     account = audit_reach_report(
-        payload, "the reach report", amendment_reach_sources(opening),
+        payload, "the reach report",
+        amendment_reach_sources(entries, opening_index, index, opening),
     )
     expected = {
         "amendment": number, "sweep": sweep,
@@ -2466,8 +2703,13 @@ def amendment_spec_file(entries, before, opening_index, opening, subject):
     if readiness:
         _, spec_entry = spec_written(entries[:before])
         return spec_file_from_written(spec_entry)
-    if note_data(opening).get("origin") != "product-review":
-        spec_written(entries[:before])
+    if note_data(opening).get("origin") == "construction":
+        source = validate_construction_amendment_source(
+            entries, opening_index, note_data(opening).get("construction_source"), subject,
+        )
+        return exact_real_file(
+            project_root(), source["spec"], f"{subject}'s Construction specification",
+        )
     return product_review_amendment_spec_file(
         entries, opening_index, opening, subject,
     )
@@ -5781,9 +6023,11 @@ def validate_built_task_success(entries, index, entry, built, task, task_sha, su
     return data
 
 
-def validate_task_pass_completion(entries, before, data, subject):
+def validate_task_pass_completion(entries, before, data, subject, *, validate_origin=True):
     """Prove that a task-owned first pass follows one complete built lot."""
     built, commit = data["built"], data["commit"]
+    if validate_origin:
+        validate_construction_lot_origin(entries, before, built, subject)
     workspace_relative = PurePosixPath("plans", f"{built}-plan.md")
     workspace_plan = real_workspace_file(workspace_relative, f"{subject}'s current plan")
     with open(workspace_plan, "rb") as source:
@@ -5897,7 +6141,7 @@ def validate_task_pass_completion(entries, before, data, subject):
     return account, generation_sha256(account)
 
 
-def validate_pass_opening_history(entries, opening_index, subject):
+def validate_pass_opening_history(entries, opening_index, subject, *, validate_origin=True):
     opening = entries[opening_index]
     data = note_data(opening)
     schema_two = data.get("schema") == 2
@@ -5923,7 +6167,9 @@ def validate_pass_opening_history(entries, opening_index, subject):
         if data["source_lot"] != built or data["source_task"] < 1 \
                 or data["source_attempt"] < 1 or data["source_owner"] != expected_owner:
             fail(f"{subject} does not consume the exact built task identity")
-        _, generation = validate_task_pass_completion(entries, opening_index, data, subject)
+        _, generation = validate_task_pass_completion(
+            entries, opening_index, data, subject, validate_origin=validate_origin,
+        )
         if schema_two and (
             data.get("position") != 0 or data.get("generation_sha256") != generation
             or data.get("correction_terminal_kind") is not None
@@ -5968,13 +6214,15 @@ def validate_pass_opening_history(entries, opening_index, subject):
     return data
 
 
-def current_pass_opening(entries, before, subject):
+def current_pass_opening(entries, before, subject, *, validate_origin=True):
     openings = [(index, entry) for index, entry in enumerate(entries[:before])
                 if entry.get("kind") == "pass.opened"]
     if not openings:
         fail(f"{subject} has no current product-review pass")
     opening_index, opening = openings[-1]
-    data = validate_pass_opening_history(entries, opening_index, subject)
+    data = validate_pass_opening_history(
+        entries, opening_index, subject, validate_origin=validate_origin,
+    )
     return opening_index, opening, data["built"], data["commit"]
 
 
@@ -6860,9 +7108,11 @@ def validate_allocation_identity(entries, opening_index, before, built, lot, sub
     return root
 
 
-def validate_sublot_allocation(entries, data, text, subject):
+def validate_sublot_allocation(entries, data, text, subject, *, validate_origin=True):
     before = len(entries)
-    opening_index, _, built, _ = current_pass_opening(entries, before, subject)
+    opening_index, _, built, _ = current_pass_opening(
+        entries, before, subject, validate_origin=validate_origin,
+    )
     if any(entry.get("kind") == "pass.closed" for entry in entries[opening_index + 1:before]):
         fail(f"{subject} cannot follow a closed pass")
     if any(entry.get("kind") == "sublot.allocated" for entry in entries[opening_index + 1:before]):
@@ -7315,6 +7565,70 @@ def normalize_correction_allocation_supersession(
     return data
 
 
+def validate_sublot_opening(entries, data, text, subject):
+    """Prove that one sub-lot consumes its exact closed positive review pass."""
+    if data is not None:
+        fail(f"{subject} takes no structured data", data)
+    if not isinstance(text, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*\.[1-9][0-9]*", text,
+    ):
+        fail(f"{subject} has no exact sub-lot identity", text)
+    if any(entry.get("kind") == "sublot.opened" and entry.get("text") == text
+           for entry in entries):
+        fail(f"{subject} repeats the opening of {text}")
+
+    opening_index, _, close_index, _, confirmed, built = current_pass_close(
+        entries, subject, validate_origin=False, validate_current_gate=False,
+    )
+    if confirmed < 1:
+        fail(f"{subject} does not consume a positive product-review pass close", confirmed)
+    allocations = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:close_index], opening_index + 1,
+    ) if entry.get("kind") == "sublot.allocated" and entry.get("text") == text]
+    if len(allocations) != 1:
+        fail(f"{subject} has no one exact allocation for {text}", f"found {len(allocations)}")
+    allocation_index, allocation = allocations[0]
+    validate_sublot_allocation(
+        entries[:allocation_index], note_data(allocation), allocation.get("text"), subject,
+        validate_origin=False,
+    )
+    if note_data(allocation).get("built") != built:
+        fail(f"{subject}'s allocation belongs to another reviewed lot", built)
+
+    opened_batches = {note_data(entry).get("batch") for entry in entries
+                      if entry.get("kind") == "decision.batch.opened"}
+    closed_batches = {note_data(entry).get("batch") for entry in entries
+                      if entry.get("kind") == "decision.batch.closed"}
+    unfinished = sorted(
+        batch for batch in opened_batches - closed_batches
+        if isinstance(batch, int) and not isinstance(batch, bool)
+    )
+    if unfinished:
+        fail(f"{subject} still has open decision-batch routing", unfinished)
+
+
+def validate_construction_lot_origin(entries, before, lot, subject):
+    """Authenticate the PRODUCT REVIEW terminal that created a construction sub-lot."""
+    if not isinstance(lot, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
+    ):
+        fail(f"{subject} has a malformed lot identity", lot)
+    if "." not in lot:
+        return "root"
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "sublot.opened" and entry.get("text") == lot]
+    if len(openings) != 1:
+        fail(
+            f"{subject} requires one exact sub-lot `sublot.opened` terminal",
+            f"{lot}: found {len(openings)}",
+        )
+    opening_index, opening = openings[0]
+    validate_sublot_opening(
+        entries[:opening_index], opening.get("data"), opening.get("text"), subject,
+    )
+    return journal_line_proof(opening_index)
+
+
 def confirmed_account_lines(lines, subject):
     account = {}
     current = None
@@ -7741,9 +8055,14 @@ def validate_correction_void_account(
     return account
 
 
-def validate_pass_close(entries, data, subject, *, historical=False):
+def validate_pass_close(
+    entries, data, subject, *, historical=False,
+    validate_origin=True, validate_current_gate=True,
+):
     before = len(entries)
-    opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
+    opening_index, opening, built, _ = current_pass_opening(
+        entries, before, subject, validate_origin=validate_origin,
+    )
     if any(entry.get("kind") == "pass.closed" for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s current pass is already closed")
     if any(entry.get("kind") == "lot.delivered" for entry in entries[opening_index + 1:before]):
@@ -7826,7 +8145,7 @@ def validate_pass_close(entries, data, subject, *, historical=False):
         fail(f"{subject} must void the pass owned by its product-review amendment")
     if any(entry.get("kind") == "sublot.opened" for entry in entries[opening_index + 1:before]):
         fail(f"{subject} cannot close after its sub-lot already opened")
-    if not historical:
+    if not historical and validate_current_gate:
         validate_current_technical_gate(opening, subject)
     try:
         validate_global_authority_precedence(entries[:before])
@@ -7872,8 +8191,13 @@ def validate_pass_close(entries, data, subject, *, historical=False):
     return opening_index, opening, confirmed, built, submitted
 
 
-def current_pass_close(entries, subject, *, historical=False):
-    opening_index, opening, built, _ = current_pass_opening(entries, len(entries), subject)
+def current_pass_close(
+    entries, subject, *, historical=False,
+    validate_origin=True, validate_current_gate=True,
+):
+    opening_index, opening, built, _ = current_pass_opening(
+        entries, len(entries), subject, validate_origin=validate_origin,
+    )
     closes = [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:], opening_index + 1
     ) if entry.get("kind") == "pass.closed"]
@@ -7881,7 +8205,10 @@ def current_pass_close(entries, subject, *, historical=False):
         fail(f"{subject} requires one current pass close", f"found {len(closes)}")
     close_index, close = closes[0]
     _, _, confirmed, _, _ = validate_pass_close(
-        entries[:close_index], note_data(close), subject, historical=historical,
+        entries[:close_index], note_data(close), subject,
+        historical=historical,
+        validate_origin=validate_origin,
+        validate_current_gate=validate_current_gate,
     )
     if confirmed is None:
         fail(f"{subject} has no ordinary confirmed-count pass close")
@@ -8619,7 +8946,7 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
     elif kind == "fixer.returned" and round_number is not None:
         data = normalize_fixer_return(notes, data, round_number)
     elif kind == "amendment.opened":
-        data = normalize_amendment_opened(notes, data, text)
+        data = normalize_amendment_opened(notes, data, text, context)
     elif kind == "amendment.written":
         data = normalize_amendment_written(notes, data, text)
     elif kind == "sweep.reported":
@@ -8794,10 +9121,17 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         if data.get("route") not in {"spec-fixer", "amendment-fixer"}:
             fail("an owner-linked fixer dispatch has an unknown route",
                  "use exactly spec-fixer or amendment-fixer")
-        _, route, authority = direct_ruling_state(ruling)
+        notes, route, authority = direct_ruling_state(ruling)
         if data.get("route") != route:
             fail("the owner-linked fixer dispatch does not match the current route", route)
         validate_authority(data, "the owner-linked fixer dispatch", authority)
+        duplicates = [entry for entry in notes
+                      if entry.get("kind") == "fixer.dispatched"
+                      and note_data(entry).get("ruling") == ruling
+                      and all(note_data(entry).get(key) == authority[key]
+                              for key in ("authority_kind", "authority_ref", "authority_sha256"))]
+        if duplicates:
+            fail("the current ruling authority already has its owner-linked fixer dispatch")
 
     if kind == "ruling.applied" and data and "ruling" in data:
         ruling = str(data.get("ruling"))
@@ -8959,6 +9293,17 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
     if kind == "correction.round.opened":
         data = normalize_correction_round_opening(
             journal_entries(), data or {}, "a Correction Round opening",
+        )
+
+    if kind == "sublot.opened":
+        validate_sublot_opening(
+            journal_entries(), data, text, "a product-review sub-lot opening",
+        )
+
+    if kind in {"plan.written", "lot.built"}:
+        validate_construction_lot_origin(
+            journal_entries(), len(journal_entries()), context.get("lot"),
+            f"{kind} construction entry",
         )
 
     if kind == "pass.opened":
@@ -9945,6 +10290,14 @@ def cmd_construction_verdict_check(args):
     print(journal_line_proof(resolution_index))
 
 
+def cmd_construction_origin_check(args):
+    proof = validate_construction_lot_origin(
+        journal_entries(), len(journal_entries()), args.lot,
+        "the construction lot origin",
+    )
+    print(proof)
+
+
 def cmd_construction_failure_handoff(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
@@ -10147,6 +10500,10 @@ def build_parser():
     sp.add_argument("task", nargs="?", type=positive_int)
     sp.add_argument("attempt", nargs="?", type=positive_int)
     sp.set_defaults(func=cmd_construction_verdict_check)
+
+    sp = sub.add_parser("construction-origin-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.set_defaults(func=cmd_construction_origin_check)
 
     sp = sub.add_parser("construction-failure-handoff", help=argparse.SUPPRESS)
     sp.add_argument("lot")

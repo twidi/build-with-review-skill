@@ -16,6 +16,11 @@ its wording is the project's business — write it in the project's own conventi
 LOT=$1 SUBJECT=$2
 [[ $LOT =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "the lot must read lot-<N> or lot-<N>.<M> — positive integers, no leading zeros — got \`$LOT\`"
 [ -n "$SUBJECT" ] || die "the commit subject is empty"
+PROGRESS="$WORKSPACE/prompts/common/progress.py"
+"$PROGRESS" construction-origin-check "$LOT" >/dev/null \
+    || die "the lot has no authenticated construction origin. A sub-lot requires its exact
+positive pass close and sublot.opened terminal before C1. Nothing was copied, staged,
+committed or marked."
 DOCUMENT_COPY="$WORKSPACE/prompts/common/document-copy.sh"
 CONSTRUCTION_REVIEW="$WORKSPACE/prompts/construction/construction_review.py"
 SOURCE_REL="plans/$LOT-plan.md"
@@ -171,7 +176,7 @@ fi
 # happened. Finish, say the real state, and hand back the one retryable line.
 # The note carries the operation's own mark: it is what lets a later call
 # tell this completed operation's orphan marker from a live interrupted one.
-NOTE=("$WORKSPACE/prompts/common/progress.py" note plan.written --data "{\"tasks\":$TASKS,\"op\":\"$OP_NONCE\"}")
+NOTE=("$PROGRESS" note plan.written --data "{\"tasks\":$TASKS,\"op\":\"$OP_NONCE\"}")
 JOURNAL_MISSING=
 "${NOTE[@]}" || JOURNAL_MISSING=$(printf '%q ' "${NOTE[@]}")
 # The marker lives until the whole tail is durable — the journal line included.
