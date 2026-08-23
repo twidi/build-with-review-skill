@@ -126,7 +126,8 @@ def reset():
     for path in (os.path.join(FAKE_DIR, "calls.jsonl"),
                  os.path.join(WORKSPACE, "progress.jsonl"),
                  os.path.join(WORKSPACE, "progress.jsonl.lock"),
-                 os.path.join(REPO, "fixture-code-review.txt")):
+                 os.path.join(REPO, "fixture-code-review.txt"),
+                 os.path.join(REPO, "foreign.txt")):
         if os.path.exists(path):
             os.remove(path)
     shutil.rmtree(os.path.join(WORKSPACE, "dashboard"), ignore_errors=True)
@@ -1579,12 +1580,12 @@ def prepare_review_commit(built="lot-1", token=None, tasks=1, spec_relative=None
     return commit, tree, gate_blob
 
 
-def write_gate_report(op, gate_blob, tree):
+def write_gate_report(op, gate_blob, tree, command="true"):
     report_relative = f"reports/gate/{op}.json"
     report = {
         "op": op, "gate": gate_blob, "tree": tree,
-        "commands": [{"command": "true", "status": "green", "count": 1,
-                      "example": "true exited zero"}],
+        "commands": [{"command": command, "status": "green", "count": 1,
+                      "example": f"{command} exited zero"}],
         "cleanliness": {"completed": True, "unchanged": True, "paths": []},
         "surface": {"completed": True, "status": "unchanged", "candidates": []},
     }
@@ -1648,7 +1649,12 @@ def seed_baseline_gate(owner, commit, base):
         ["git", "-C", REPO, "hash-object", gate_path], text=True,
     ).strip()
     gate = hashlib.sha256(f"baseline:{owner}:{commit}".encode()).hexdigest()
-    report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
+    with open(gate_path, encoding="utf-8") as source:
+        commands = [line.strip() for line in source if line.strip()]
+    check(len(commands) == 1, "the baseline fixture requires one exact gate command")
+    report_relative, report_sha = write_gate_report(
+        gate, gate_blob, tree, command=commands[0],
+    )
     gate_data = {
         "op": gate, "scope": "baseline", "owner": owner, "lot": "-",
         "task": 0, "attempt": 0, "head": commit, "base": base,
@@ -5219,8 +5225,16 @@ def controller_successor_reclassifies_one_unopened_allocation_before_replacement
     )
     closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
     check(closed.returncode == 0, closed.stdout + closed.stderr)
-    check(journal_lines()[-1]["data"]["allocation"] == journal_proof(before - 1),
+    close_data = journal_lines()[-1]["data"]
+    check(close_data["allocation"] == journal_proof(before - 1),
           "the pass close did not consume the replacement allocation")
+    check({key: close_data[key] for key in (
+        "base_generation_sha256", "base_commit", "base_gate",
+    )} == {
+        "base_generation_sha256": successor_generation,
+        "base_commit": successor,
+        "base_gate": successor_gate,
+    }, "the replacement close retained the stale pass-opening base")
 
 
 @test
@@ -5277,6 +5291,237 @@ def reclassification_supersession_resumes_every_durable_move_prefix():
         for key in ("destination", "confirmed_destination"):
             check(os.path.isfile(pathlib.Path(WORKSPACE) / account[key]),
                   f"{cut}: recovery did not preserve {key}")
+
+
+@test
+def correction_round_opening_publishes_one_exact_task_zero_and_durable_event():
+    state = seed_unopened_correction_allocation("correction-round-open")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_index = len(journal_lines()) - 1
+    close_data = journal_lines()[close_index]["data"]
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    opened = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    event = journal_lines()[-1]["data"]
+    check(event == {
+        "schema": 1,
+        "built": "lot-1",
+        "round": 1,
+        "parent_generation_sha256": close_data["base_generation_sha256"],
+        "allocation": close_data["allocation"],
+        "pass_close": journal_proof(close_index),
+        "artifact": close_data["artifact"],
+        "artifact_sha256": close_data["artifact_sha256"],
+        "artifact_object": close_data["artifact_object"],
+        "controller_sha256": close_data["controller_sha256"],
+        "manifest_sha256": close_data["manifest_sha256"],
+        "tasks": close_data["tasks"],
+        "base_commit": close_data["base_commit"],
+    }, event)
+    ref = "refs/bwr/test-run/lot-1/correction-1/task-0"
+    target = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", ref], text=True,
+    ).strip()
+    check(target == close_data["base_commit"], "task-0 names another correction base")
+    check(not os.path.lexists(os.path.join(WORKSPACE, "correction-round-open-in-progress")),
+          "the completed opening retained its pending owner")
+    before = len(journal_lines())
+    repeated = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(repeated.returncode == 0 and len(journal_lines()) == before,
+          repeated.stdout + repeated.stderr)
+
+
+@test
+def correction_round_opening_resumes_marker_ref_and_event_prefixes():
+    for cut in ("marker", "task-zero", "event"):
+        reset()
+        seed_unopened_correction_allocation(f"open-prefix-{cut}")
+        closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+        check(closed.returncode == 0, closed.stdout + closed.stderr)
+        helper_path = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction_round_open.py",
+        )
+        specification = importlib.util.spec_from_file_location(
+            f"correction_round_open_{cut}", helper_path,
+        )
+        helper = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(helper)
+        args = SimpleNamespace(built="lot-1", round=1)
+        _, event = helper.current_close(args)
+        operation = helper.operation_identity(args, event["pass_close"])
+        account = helper.derive_account(args, operation)
+        marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+        with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+            helper.atomic_marker(marker, account)
+        if cut in {"task-zero", "event"}:
+            helper.publish_ref(account)
+        if cut == "event":
+            append_note("correction.round.opened", account["event"])
+
+        script = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+        )
+        resumed = subprocess.run(
+            [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        check(resumed.returncode == 0, f"{cut}: {resumed.stdout}{resumed.stderr}")
+        terminals = [entry for entry in journal_lines()
+                     if entry.get("kind") == "correction.round.opened"]
+        check(len(terminals) == 1 and terminals[0]["data"] == account["event"],
+              f"{cut}: recovery did not preserve one exact opening")
+        check(not marker.exists(), f"{cut}: recovery retained its opening owner")
+
+
+@test
+def correction_round_opening_refuses_head_drift_and_foreign_refs():
+    for defect in ("head-drift", "foreign-ref"):
+        reset()
+        state = seed_unopened_correction_allocation(f"open-{defect}")
+        closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+        check(closed.returncode == 0, closed.stdout + closed.stderr)
+        if defect == "head-drift":
+            write_project("foreign.txt", "foreign controller bytes\n")
+            subprocess.run(["git", "-C", REPO, "add", "foreign.txt"], check=True)
+            subprocess.run([
+                "git", "-C", REPO, "-c", "core.hooksPath=/dev/null", "commit", "-qm",
+                "foreign drift",
+            ], check=True)
+        else:
+            subprocess.run([
+                "git", "-C", REPO, "update-ref",
+                "refs/bwr/test-run/lot-1/correction-1/task-1", state["commit"],
+            ], check=True)
+        before = len(journal_lines())
+        script = os.path.join(
+            WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+        )
+        refused_open = subprocess.run(
+            [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        check(refused_open.returncode != 0 and len(journal_lines()) == before,
+              f"{defect}: an invalid opening changed the journal")
+        check(not os.path.lexists(os.path.join(
+            WORKSPACE, "correction-round-open-in-progress",
+        )), f"{defect}: a preflight refusal left a pending owner")
+
+
+@test
+def correction_round_opening_restores_only_exact_frozen_artifacts():
+    seed_unopened_correction_allocation("open-restore")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_data = journal_lines()[-1]["data"]
+    for key in ("confirmed_artifact", "artifact"):
+        os.remove(os.path.join(WORKSPACE, *close_data[key].split("/")))
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    restored = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(restored.returncode == 0, restored.stdout + restored.stderr)
+    for path_key, sha_key in (
+        ("confirmed_artifact", "confirmed_sha256"),
+        ("artifact", "artifact_sha256"),
+    ):
+        path = os.path.join(WORKSPACE, *close_data[path_key].split("/"))
+        check(os.path.isfile(path) and file_sha256(close_data[path_key]) == close_data[sha_key],
+              f"the opening did not restore {path_key} from its frozen object")
+
+    reset()
+    seed_unopened_correction_allocation("open-foreign-restore")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_data = journal_lines()[-1]["data"]
+    write_report(close_data["artifact"], "foreign bytes\n")
+    before = len(journal_lines())
+    refused_restore = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(refused_restore.returncode != 0 and len(journal_lines()) == before,
+          "the opening adopted foreign canonical artifact bytes")
+    check(not os.path.lexists(os.path.join(WORKSPACE, "correction-round-open-in-progress")),
+          "a foreign artifact refusal left a pending opening owner")
+
+
+@test
+def correction_round_baseline_selects_reuse_required_and_fresh_proofs():
+    seed_unopened_correction_allocation("correction-baseline")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    close_data = journal_lines()[-1]["data"]
+    open_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    opened = subprocess.run(
+        [open_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    baseline_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-baseline.sh",
+    )
+    reused = subprocess.run(
+        [baseline_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(reused.returncode == 0, reused.stdout + reused.stderr)
+    reuse_data = json.loads(reused.stdout)
+    owner = f"correction/lot-1/c1/{close_data['base_commit']}"
+    check(reuse_data == {
+        "schema": 1,
+        "built": "lot-1",
+        "round": 1,
+        "base_commit": close_data["base_commit"],
+        "task_zero": "refs/bwr/test-run/lot-1/correction-1/task-0",
+        "mode": "reuse",
+        "gate": close_data["base_gate"],
+        "owner": owner,
+    }, reuse_data)
+
+    gate_path = os.path.join(REPO, ".superpowers", "bwr", "gate.md")
+    with open(gate_path, "w", encoding="utf-8") as target:
+        target.write("python3 -c 'pass'\n")
+    required = subprocess.run(
+        [baseline_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(required.returncode == 0, required.stdout + required.stderr)
+    required_data = json.loads(required.stdout)
+    check(required_data["mode"] == "required" and required_data["gate"] is None
+          and required_data["owner"] == owner, required_data)
+
+    fresh_gate = seed_baseline_gate(
+        owner, close_data["base_commit"], close_data["base_commit"],
+    )
+    current = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh"),
+         "require-current"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(current.returncode == 0 and current.stdout.strip() == fresh_gate,
+          current.stdout + current.stderr)
+    fresh = subprocess.run(
+        [baseline_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(fresh.returncode == 0, fresh.stdout + fresh.stderr)
+    fresh_data = json.loads(fresh.stdout)
+    check(fresh_data["mode"] == "fresh" and fresh_data["gate"] == fresh_gate,
+          fresh_data)
 
 
 @test
@@ -8685,6 +8930,8 @@ def main():
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
             "construction_review.py", "correction_round.py",
             "correction_round_supersede.py", "correction-round-supersede.sh",
+            "correction_round_open.py", "correction-round-open.sh",
+            "correction_round_baseline.py", "correction-round-baseline.sh",
         ):
             destination = os.path.join(WORKSPACE, "prompts", "construction", name)
             shutil.copyfile(os.path.join(HERE, "prompts", "construction", name), destination)

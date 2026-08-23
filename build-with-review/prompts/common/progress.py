@@ -87,6 +87,7 @@ NOTE_KINDS = {
     "design.review.blocked",
     "code.review.resolved", "code.review.blocked",
     "correction.round.allocated", "correction.round.allocation.superseded",
+    "correction.round.opened",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -174,6 +175,7 @@ CORRECTION_AUTHORITY_NOTE_KINDS = {
     "rewind.done",
     "correction.round.allocated",
     "correction.round.allocation.superseded",
+    "correction.round.opened",
 }
 
 
@@ -7073,9 +7075,9 @@ def normalize_correction_pass_close(
         "confirmed": confirmed,
         "route": "correction",
         "allocation": journal_line_proof(allocation_index),
-        "base_generation_sha256": opening_data["generation_sha256"],
-        "base_commit": opening_data["commit"],
-        "base_gate": opening_data["gate"],
+        "base_generation_sha256": allocation["parent"]["generation_sha256"],
+        "base_commit": allocation["parent"]["commit"],
+        "base_gate": allocation["parent"]["gate"],
         "confirmed_artifact": str(confirmed_relative),
         "confirmed_sha256": confirmed_sha256,
         "confirmed_object": str(PurePosixPath(confirmed_object.relative_to(WORKSPACE))),
@@ -7177,7 +7179,7 @@ def validate_pass_close(entries, data, subject, *, historical=False):
     return opening_index, opening, confirmed, built, submitted
 
 
-def current_pass_close(entries, subject):
+def current_pass_close(entries, subject, *, historical=False):
     opening_index, opening, built, _ = current_pass_opening(entries, len(entries), subject)
     closes = [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:], opening_index + 1
@@ -7186,11 +7188,61 @@ def current_pass_close(entries, subject):
         fail(f"{subject} requires one current pass close", f"found {len(closes)}")
     close_index, close = closes[0]
     _, _, confirmed, _, _ = validate_pass_close(
-        entries[:close_index], note_data(close), subject,
+        entries[:close_index], note_data(close), subject, historical=historical,
     )
     if confirmed is None:
         fail(f"{subject} has no ordinary confirmed-count pass close")
     return opening_index, opening, close_index, close, confirmed, built
+
+
+def normalize_correction_round_opening(entries, data, subject, *, historical=False):
+    opening_index, _, close_index, close, confirmed, built = current_pass_close(
+        entries, subject, historical=historical,
+    )
+    close_data = note_data(close)
+    if confirmed < 1 or close_data.get("schema") != 2 \
+            or close_data.get("route") != "correction":
+        fail(f"{subject} has no exact positive Correction Round close")
+    allocation_index, allocation_entry = journal_entry_from_proof(
+        entries, close_data["allocation"], f"{subject}'s allocation",
+    )
+    if allocation_index >= close_index \
+            or allocation_entry.get("kind") != "correction.round.allocated":
+        fail(f"{subject} has no exact preceding correction allocation")
+    allocation = normalize_allocation(note_data(allocation_entry))
+    expected = {
+        "schema": 1,
+        "built": built,
+        "round": allocation["round"],
+        "parent_generation_sha256": close_data["base_generation_sha256"],
+        "allocation": close_data["allocation"],
+        "pass_close": journal_line_proof(close_index),
+        "artifact": close_data["artifact"],
+        "artifact_sha256": close_data["artifact_sha256"],
+        "artifact_object": close_data["artifact_object"],
+        "controller_sha256": close_data["controller_sha256"],
+        "manifest_sha256": close_data["manifest_sha256"],
+        "tasks": close_data["tasks"],
+        "base_commit": close_data["base_commit"],
+    }
+    if data != expected:
+        fail(f"{subject} changes its frozen close authority", {
+            "expected": expected, "actual": data,
+        })
+    duplicates = [entry for entry in entries[close_index + 1:]
+                  if entry.get("kind") == "correction.round.opened"
+                  and note_data(entry).get("built") == built
+                  and note_data(entry).get("round") == allocation["round"]]
+    if duplicates:
+        fail(f"{subject} repeats an opened Correction Round")
+    if not historical:
+        head = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        if head.returncode != 0 or head.stdout.strip() != close_data["base_commit"]:
+            fail(f"{subject}'s repository is not at its frozen correction base")
+    return expected
 
 
 def validate_lot_delivered(entries, data):
@@ -8087,6 +8139,11 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             journal_entries(), data or {}, "a Correction Round allocation supersession",
         )
 
+    if kind == "correction.round.opened":
+        data = normalize_correction_round_opening(
+            journal_entries(), data or {}, "a Correction Round opening",
+        )
+
     if kind == "pass.opened":
         data = normalize_pass_opened(data or {})
 
@@ -8493,23 +8550,28 @@ def correction_note_operation(args):
 
 
 def refuse_foreign_correction_pending_owner(operation):
-    marker = os.path.join(WORKSPACE, "correction-allocation-supersede-in-progress")
-    if not os.path.lexists(marker):
-        return
-    try:
-        metadata = os.lstat(marker)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            fail("the pending Correction Round authority owner is not one real file")
-        with open(marker, "rb") as source:
-            raw = source.read()
-        account = json.loads(raw)
-    except (OSError, UnicodeError, ValueError) as exc:
-        fail("the pending Correction Round authority owner is malformed", exc)
-    if not isinstance(account, dict) or account.get("operation") != operation:
-        fail(
-            "another Correction Round authority owner is unfinished",
-            "resume correction-round-supersede.sh with its exact recorded arguments",
-        )
+    markers = {
+        "correction-allocation-supersede-in-progress": "correction-round-supersede.sh",
+        "correction-round-open-in-progress": "correction-round-open.sh",
+    }
+    for name, command in markers.items():
+        marker = os.path.join(WORKSPACE, name)
+        if not os.path.lexists(marker):
+            continue
+        try:
+            metadata = os.lstat(marker)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                fail("the pending Correction Round authority owner is not one real file")
+            with open(marker, "rb") as source:
+                raw = source.read()
+            account = json.loads(raw)
+        except (OSError, UnicodeError, ValueError) as exc:
+            fail("the pending Correction Round authority owner is malformed", exc)
+        if not isinstance(account, dict) or account.get("operation") != operation:
+            fail(
+                "another Correction Round authority owner is unfinished",
+                f"resume {command} with its exact recorded arguments",
+            )
 
 
 def append_note(args, lease=None, lease_operation=None):
