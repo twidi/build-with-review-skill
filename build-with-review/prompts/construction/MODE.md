@@ -880,11 +880,13 @@ it.**
    against the exact parent product obligation. It follows directly coupled product
    consequences and task composition only where the current task's guarantee depends on
    them; it does not perform a lot-wide PRODUCT REVIEW. A controller-owned contract
-   defect returns through the implementer's existing `Blocked` route before code. At
-   round 10, `design.review.blocked` freezes that controller-owned terminal without an
-   implementer disposition. New candidates use shared impact/probability admission.
+   defect returns through the implementer's existing `Blocked` route before code.
+   `design.review.blocked` freezes that controller-owned terminal at the round where it
+   is found, without an implementer disposition or a later Design round. New candidates
+   use shared impact/probability admission.
    Prior identities remain public until addressed or carried forward. Rounds 1 through
-   9 require one complete correction account before another manifest. At round 10, an
+   9 require one complete correction account before another manifest, unless the exact
+   controller-owned blocker terminal stopped the batch. At round 10, an
    implementer-owned batch receives one exact `design.review.resolved` settlement. Zero
    accepted findings can authorize implementation and preserve alternatives in
    `### Disagreement`. An accepted defect stops before
@@ -1079,10 +1081,10 @@ the workspace. After that block, the message gives these role inputs, and nothin
    a reportless failure close. Another stop propagates the same proof until a successful
    retry consumes it.
 
-   A failed round-10 frozen-task-contract blocker is another exact reportless
+   A failed frozen-task-contract blocker from any Design round is another exact reportless
    correction obligation. Its `attempt.failed` note binds the derived
    `design.review.blocked` proof and complete immutable batch. Pass `-` to
-   `attempt-started.sh`. The first Design manifest carries every final identity as
+   `attempt-started.sh`. The first Design manifest carries every blocked-batch identity as
    `contract-blocked` or `carried` against the corrected plan.
 
 **It builds its own paths from the lot.** The plan is at `<workspace>/plans/<lot>-plan.md`,
@@ -1627,7 +1629,7 @@ Read what it is asking, and answer in one of three ways:
      <workspace>/prompts/construction/attempt-failed.sh <lot> <N> <K> <C3.9b|C3.9d>
      ```
 
-     A round-10 frozen-task-contract Design finding already has one exact
+     A frozen-task-contract Design finding already has one exact
      `design.review.blocked` note from the implementer. A code finding against the
      controller contract has `code.review.blocked` at the round where it was found. The
      closer authenticates either immutable complete batch. It uses the reportless
@@ -1725,12 +1727,13 @@ pause must not erase**, and three windows hold one:
 note exists for — and the resume routes on it: the C3.9 table as written, rewind and
 re-cut included, never the blanket default.**
 
-If round 10 already has a complete settlement with any `accepted` Design item, or one
-exact `design.review.blocked` terminal, the stop note also receives the immutable Design
-obligation. The stop does not wait for a failure report. A later attempt cannot start as
-an ordinary reportless retry. It passes `-`, freezes the stop proof, and gives the exact
-required identities to Design round 1. A stop with no correction obligation, or a
-settlement with zero accepted items, keeps the ordinary route.
+If round 10 already has a complete settlement with any `accepted` Design item, or any
+round has one exact `design.review.blocked` terminal, the stop note also receives the
+immutable Design obligation. The stop does not wait for a failure report. A later
+attempt cannot start as an ordinary reportless retry. It passes `-`, freezes the stop
+proof, and gives the exact required identities to Design round 1. A stop with no
+correction obligation, or a settlement with zero accepted items, keeps the ordinary
+route.
 
 **The code:**
 

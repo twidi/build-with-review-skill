@@ -3419,33 +3419,30 @@ def journal_entry_from_proof(entries, proof, subject):
     return index, entries[index]
 
 
-def final_design_failure_handoff(entries, before, lot, task, attempt, subject):
-    verdicts = [(index, entry) for index, entry in design_verdicts(
-        entries, before, lot, task, attempt,
-    ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
-    if not verdicts:
-        return None
-    if len(verdicts) != 1:
-        fail(f"{subject} has more than one final design-checker verdict")
-    verdict_index, verdict = verdicts[0]
-    verdict_data = note_data(verdict)
-    if verdict_data.get("outcome") != "findings":
-        return None
-    resolutions = [(index, entry) for index, entry in design_resolutions(
-        entries, before, lot, task, attempt,
-    ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
-    blockers = [(index, entry) for index, entry in design_blockers(
-        entries, before, lot, task, attempt,
-    ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
-    if resolutions and blockers:
-        fail(f"{subject} has both settlement and blocker terminals for final Design findings")
+def design_failure_handoff(entries, before, lot, task, attempt, subject):
+    blockers = design_blockers(entries, before, lot, task, attempt)
     if blockers:
-        if len(blockers) != 1 or blockers[0][0] <= verdict_index:
-            fail(f"{subject} has no one ordered final Design blocker terminal")
+        if len(blockers) != 1:
+            fail(f"{subject} has more than one Design controller-contract blocker")
         blocker_index, blocker = blockers[0]
         blocker_data = note_data(blocker)
+        round_number = blocker_data.get("round")
+        verdicts = [(index, entry) for index, entry in design_verdicts(
+            entries, blocker_index, lot, task, attempt,
+        ) if note_data(entry).get("round") == round_number]
+        resolutions = [(index, entry) for index, entry in design_resolutions(
+            entries, blocker_index, lot, task, attempt,
+        ) if note_data(entry).get("round") == round_number]
+        if resolutions:
+            fail(f"{subject} has both settlement and blocker terminals for one Design batch")
+        if len(verdicts) != 1:
+            fail(f"{subject} has no one exact Design verdict for its blocker")
+        verdict_index, verdict = verdicts[0]
+        verdict_data = note_data(verdict)
+        if verdict_data.get("outcome") != "findings" or blocker_index <= verdict_index:
+            fail(f"{subject} has no one ordered Design blocker terminal")
         if blocker_data.get("verdict") != journal_line_proof(verdict_index):
-            fail(f"{subject}'s final Design blocker belongs to another checker verdict")
+            fail(f"{subject}'s Design blocker belongs to another checker verdict")
         result, findings = immutable_design_result(verdict_data, subject)
         required = [item["id"] for item in findings]
         contract_blocked = [
@@ -3455,7 +3452,7 @@ def final_design_failure_handoff(entries, before, lot, task, attempt, subject):
                 or blocker_data.get("contract_blocked") != contract_blocked \
                 or blocker_data.get("result") != verdict_data.get("report") \
                 or blocker_data.get("result_sha256") != verdict_data.get("report_sha256"):
-            fail(f"{subject}'s final Design blocker changes its immutable findings batch")
+            fail(f"{subject}'s Design blocker changes its immutable findings batch")
         obligation = {
             "schema": 1,
             "verdict": journal_line_proof(verdict_index),
@@ -3470,6 +3467,37 @@ def final_design_failure_handoff(entries, before, lot, task, attempt, subject):
             "unresolved": False, "blocked": True, "obligation": obligation,
             "required": required, "contract_blocked": contract_blocked,
         }
+
+    intermediate_verdicts = [(index, entry) for index, entry in design_verdicts(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") < CONSTRUCTION_CHECKER_ROUNDS["design"]
+       and note_data(entry).get("outcome") == "findings"]
+    for verdict_index, verdict in intermediate_verdicts:
+        round_number = note_data(verdict).get("round")
+        resolutions = [(index, entry) for index, entry in design_resolutions(
+            entries, before, lot, task, attempt,
+        ) if note_data(entry).get("round") == round_number]
+        if not resolutions:
+            return {"unresolved": True}
+        if len(resolutions) != 1 or resolutions[0][0] <= verdict_index:
+            fail(f"{subject} has no one ordered intermediate design-review resolution")
+        if note_data(resolutions[0][1]).get("verdict") != journal_line_proof(verdict_index):
+            fail(f"{subject}'s intermediate Design resolution belongs to another verdict")
+
+    verdicts = [(index, entry) for index, entry in design_verdicts(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
+    if not verdicts:
+        return None
+    if len(verdicts) != 1:
+        fail(f"{subject} has more than one final design-checker verdict")
+    verdict_index, verdict = verdicts[0]
+    verdict_data = note_data(verdict)
+    if verdict_data.get("outcome") != "findings":
+        return None
+    resolutions = [(index, entry) for index, entry in design_resolutions(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
     if not resolutions:
         return {"unresolved": True}
     if len(resolutions) != 1 or resolutions[0][0] <= verdict_index:
@@ -3613,7 +3641,7 @@ def code_contract_failure_handoff(entries, before, lot, task, attempt, subject):
 
 
 def failure_report_state(entries, before, lot, task, attempt, classification, subject):
-    design_state = final_design_failure_handoff(entries, before, lot, task, attempt, subject)
+    design_state = design_failure_handoff(entries, before, lot, task, attempt, subject)
     code_state = final_code_failure_handoff(entries, before, lot, task, attempt, subject)
     code_blocked = code_contract_failure_handoff(entries, before, lot, task, attempt, subject)
     states = [state for state in (design_state, code_state, code_blocked) if state is not None]
@@ -3623,7 +3651,7 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
     if state is None:
         return None
     if state.get("unresolved"):
-        fail(f"{subject} cannot close unresolved round-10 checker findings")
+        fail(f"{subject} cannot close unresolved checker findings")
     review = "design" if design_state is not None else "code"
     if review == "design" and state.get("blocked"):
         if classification not in {"C3.9b", "C3.9d"}:
@@ -3737,7 +3765,7 @@ def compact_code_review_obligation(state):
 
 
 def attempt_stop_design_state(entries, before, lot, task, attempt, subject):
-    state = final_design_failure_handoff(
+    state = design_failure_handoff(
         entries, before, lot, task, attempt, subject,
     )
     if state is None or state.get("unresolved"):
@@ -3924,12 +3952,12 @@ def retry_code_batch(entries, proof, subject):
 def retry_design_member(entries, proof, proof_index, proof_entry, report, subject):
     compact = report["design_review"]
     if "blocked" in compact:
-        state = final_design_failure_handoff(
+        state = design_failure_handoff(
             entries, proof_index, proof_entry.get("lot"), proof_entry.get("task"),
             note_data(proof_entry).get("attempt"), subject,
         )
         if state is None or not state.get("blocked"):
-            fail(f"{subject}'s retry proof has no final Design blocker")
+            fail(f"{subject}'s retry proof has no Design controller-contract blocker")
         obligation = state["obligation"]
         blocked = set(state["contract_blocked"])
         findings = [
@@ -3942,7 +3970,7 @@ def retry_design_member(entries, proof, proof_index, proof_entry, report, subjec
             "evidence": (
                 "The frozen task contract blocks this exact finding."
                 if item["id"] in blocked
-                else "The final blocked Design generation carries this exact finding."
+                else "The blocked Design generation carries this exact finding."
             ),
         } for item in findings]
         return {
@@ -4093,7 +4121,7 @@ def canonical_design_blocker(logical, verdict_index, verdict, findings):
         item["id"] for item in findings if item.get("where") == "frozen task contract"
     ]
     if not contract_blocked:
-        fail("a final Design blocker requires one exact frozen task contract finding")
+        fail("a Design blocker requires one exact frozen task contract finding")
     return {
         **logical,
         "verdict": journal_line_proof(verdict_index),
@@ -4107,40 +4135,38 @@ def canonical_design_blocker(logical, verdict_index, verdict, findings):
 
 def normalize_design_blocker(entries, data, text, context, round_number):
     if data != {"check": "design"} or text is not None:
-        fail("a final Design blocker accepts only its derived design identity")
+        fail("a Design blocker accepts only its derived design identity")
     validate_construction_verdict_history(entries)
     base = construction_logical_identity(
-        entries, context, "design", round_number, "a final Design blocker",
+        entries, context, "design", round_number, "a Design blocker",
     )
     logical = construction_frozen_logical(
-        entries, len(entries), base, "a final Design blocker",
+        entries, len(entries), base, "a Design blocker",
     )
-    if logical["round"] != CONSTRUCTION_CHECKER_ROUNDS["design"]:
-        fail("a Design blocker terminal exists only for round 10")
     if any(note_data(entry).get("round") == logical["round"] for _, entry in design_resolutions(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
     )) or any(note_data(entry).get("round") == logical["round"] for _, entry in design_blockers(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
     )):
-        fail("this final Design batch already has a terminal account")
+        fail("this Design batch already has a terminal account")
     matches = [(index, entry) for index, entry in design_verdicts(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
     ) if note_data(entry).get("round") == logical["round"]]
     if len(matches) != 1:
-        fail("a final Design blocker has no exact round-10 verdict")
+        fail("a Design blocker has no exact current-round verdict")
     verdict_index, verdict = matches[0]
     verdict_data = note_data(verdict)
     if verdict_data.get("outcome") != "findings" \
             or not construction_positive_integer(verdict_data.get("findings")):
-        fail("a final Design blocker requires its exact findings verdict")
-    _, findings = immutable_design_result(verdict_data, "the final Design blocker")
-    current = construction_plan_generation(base, "the final Design blocker")
+        fail("a Design blocker requires its exact findings verdict")
+    _, findings = immutable_design_result(verdict_data, "the Design blocker")
+    current = construction_plan_generation(base, "the Design blocker")
     for key in (
         "contract_sha256", "plan_ownership_sha256", "design_sha256",
         "plan_projection_sha256", "disagreement_sha256",
     ):
         if current.get(key) != logical.get(key):
-            fail("a final Design blocker follows a changed plan generation")
+            fail("a Design blocker follows a changed plan generation")
     return canonical_design_blocker(logical, verdict_index, verdict, findings)
 
 
@@ -4151,37 +4177,38 @@ def validate_design_blocker_entry(entries, index, entry):
             or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", base["lot"]) \
             or not construction_positive_integer(base["task"]) \
             or not construction_positive_integer(base["attempt"]) \
-            or base["round"] != CONSTRUCTION_CHECKER_ROUNDS["design"] \
+            or not construction_positive_integer(base["round"]) \
+            or base["round"] > CONSTRUCTION_CHECKER_ROUNDS["design"] \
             or any(entry.get(key) != base[key] for key in ("lot", "task", "attempt", "round")):
-        fail("a durable final Design blocker has malformed logical identity")
+        fail("a durable Design blocker has malformed logical identity")
     logical = construction_frozen_logical(
-        entries, index, base, "a durable final Design blocker",
+        entries, index, base, "a durable Design blocker",
     )
     if design_resolutions(entries, index, logical["lot"], logical["task"], logical["attempt"]):
         final = [candidate for _, candidate in design_resolutions(
             entries, index, logical["lot"], logical["task"], logical["attempt"],
         ) if note_data(candidate).get("round") == logical["round"]]
         if final:
-            fail("a final Design batch has both settlement and blocker terminals")
+            fail("a Design batch has both settlement and blocker terminals")
     prior = [candidate for _, candidate in design_blockers(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
     ) if note_data(candidate).get("round") == logical["round"]]
     if prior:
-        fail("a final Design batch has more than one blocker terminal")
+        fail("a Design batch has more than one blocker terminal")
     matches = [(position, candidate) for position, candidate in design_verdicts(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
     ) if note_data(candidate).get("round") == logical["round"]]
     if len(matches) != 1:
-        fail("a durable final Design blocker has no exact checker verdict")
+        fail("a durable Design blocker has no exact checker verdict")
     verdict_index, verdict = matches[0]
     verdict_data = note_data(verdict)
     if verdict_data.get("outcome") != "findings" \
             or not construction_positive_integer(verdict_data.get("findings")):
-        fail("a durable final Design blocker does not follow exact findings")
-    _, findings = immutable_design_result(verdict_data, "the durable final Design blocker")
+        fail("a durable Design blocker does not follow exact findings")
+    _, findings = immutable_design_result(verdict_data, "the durable Design blocker")
     expected = canonical_design_blocker(logical, verdict_index, verdict, findings)
     if data != expected or entry.get("text") is not None:
-        fail("a durable final Design blocker changes its immutable batch", expected)
+        fail("a durable Design blocker changes its immutable batch", expected)
 
 
 def normalize_design_resolution(entries, data, text, context, round_number):
@@ -8880,7 +8907,7 @@ def cmd_construction_verdict_check(args):
 def cmd_construction_failure_handoff(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
-    design_state = final_design_failure_handoff(
+    design_state = design_failure_handoff(
         entries, len(entries), args.lot, args.task, args.attempt,
         "the final design-review failure handoff",
     )

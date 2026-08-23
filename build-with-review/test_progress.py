@@ -544,12 +544,16 @@ def resolve_design_round(round_number, items):
     check(result.returncode == 0, result.stdout + result.stderr)
 
 
-def block_final_design_contract():
+def block_design_contract(round_number):
     result = run_progress(
-        "note", "design.review.blocked", "--round", "10",
+        "note", "design.review.blocked", "--round", str(round_number),
         "--data", '{"check":"design"}',
     )
     check(result.returncode == 0, result.stdout + result.stderr)
+
+
+def block_final_design_contract():
+    block_design_contract(10)
 
 
 def replace_current_design(replacement):
@@ -2426,6 +2430,172 @@ def design_parity_final_contract_blocker_reaches_plan_fault_retry_without_settle
 
 
 @test
+def design_parity_early_contract_blocker_stops_without_spending_later_rounds():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[
+        {
+            "id": 1, "where": "frozen task contract",
+            "what": "The task contract requires the wrong product result.",
+            "why": "The implementer cannot correct controller-owned bytes.",
+            "impact": "IMPORTANT", "previous": [],
+        },
+        {
+            "id": 2, "where": "Design step 2",
+            "what": "The Design also carries one dependent defect.",
+            "why": "The corrected contract must be checked against the complete batch.",
+            "impact": "IMPORTANT", "previous": [],
+        },
+    ])
+    block_design_contract(1)
+
+    before = len(journal_lines())
+    refused_after(
+        run_progress("subagent-started", "design-checker", "--round", "2"),
+        before, "a later Design round after an early controller-contract blocker",
+    )
+    refused_after(
+        run_progress("construction-verdict-check", "design", "lot-1", "3", "2"),
+        before, "an early controller-contract blocker as implementation authority",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "3", "2", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    data = json.loads(admitted.stdout)
+    check(data["design_review"]["contract_blocked"] == [1], data)
+    check(data["design_review"]["required"] == [1, 2], data)
+
+    stop_active_attempt("pause")
+    stopped = journal_lines()[-1]
+    check(stopped["data"]["design_review"] == data["design_review"], stopped)
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0 and retry.stdout.strip() != "-", retry.stdout + retry.stderr)
+
+    journal = journal_lines()
+    blocked = next(entry for entry in journal if entry.get("kind") == "design.review.blocked")
+    blocked["data"]["required"] = [1]
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode != 0,
+          "historical replay accepted a changed early contract-blocker obligation")
+
+
+@test
+def early_design_blocker_refuses_an_implementer_owned_finding():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1, "where": "Design step 1",
+        "what": "The Design omits one implementation step.",
+        "why": "The implementer can correct its own Design.",
+        "impact": "IMPORTANT", "previous": [],
+    }])
+    before = len(journal_lines())
+    refused_after(
+        run_progress(
+            "note", "design.review.blocked", "--round", "1",
+            "--data", '{"check":"design"}',
+        ),
+        before, "an implementer-owned finding as a controller-contract blocker",
+    )
+    refused_after(
+        run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9b"),
+        before, "an unresolved implementer-owned Design finding as a plan-fault close",
+    )
+    replace_current_design("Add the missing implementation step.")
+    resolve_design_round(1, [{"id": 1, "status": "corrected"}])
+    next_opening = open_design_round(2)
+    check(next_opening["manifest"], "the ordinary corrected Design could not continue")
+
+
+@test
+def early_design_contract_blocker_composes_with_an_inherited_design_obligation():
+    seed_active_attempt()
+    drive_design_to_round_ten()
+    resolve_design_round(10, [
+        {"id": 1, "status": "alternative"},
+        {"id": 2, "status": "accepted"},
+    ])
+    stop_active_attempt("pause")
+    inherited = run_progress("construction-retry-check", "lot-1", "3", "-").stdout.strip()
+    check(inherited != "-", "the accepted Design obligation has no retry proof")
+
+    set_active_attempt_retry(inherited, 3)
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1, "where": "frozen task contract",
+        "what": "The corrected Design exposes a controller-contract defect.",
+        "why": "The controller must correct the task contract before another attempt.",
+        "impact": "IMPORTANT", "previous": [],
+    }], previous=[{
+        "id": 2, "status": "addressed",
+        "evidence": "This Design addresses the inherited accepted finding.",
+    }])
+    block_design_contract(1)
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "3", "3", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failure_data = json.loads(admitted.stdout)
+    check(failure_data.get("retry") == inherited, failure_data)
+    failed = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", admitted.stdout.strip(),
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    composed = run_progress("construction-retry-check", "lot-1", "3", "-").stdout.strip()
+    check(composed not in {"-", inherited}, "the early blocker replaced the inherited proof")
+
+    set_active_attempt_retry(composed, 4)
+    next_opening = open_design_round(1)
+    manifest = json.load(open(
+        os.path.join(WORKSPACE, next_opening["manifest"]), encoding="utf-8",
+    ))
+    previous = manifest["previous"]
+    check(previous["source"] == "retry-set" and previous["failure"] == composed, previous)
+    check(len(previous["members"]) == 2, previous)
+    check([item["id"] for item in previous["findings"]] == [1, 2], previous)
+    check(
+        [item["status"] for item in previous["resolution"]]
+        == ["accepted", "contract-blocked"],
+        previous,
+    )
+    finish_design_round(1, next_opening, previous=[
+        {
+            "id": 1, "status": "addressed",
+            "evidence": "The replacement Design preserves the inherited correction.",
+        },
+        {
+            "id": 2, "status": "addressed",
+            "evidence": "The replacement Design follows the corrected task contract.",
+        },
+    ])
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+
+@test
+def early_design_contract_blocker_survives_abort():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1, "where": "frozen task contract",
+        "what": "The task contract requires the wrong product result.",
+        "why": "The controller must correct the contract before another attempt.",
+        "impact": "IMPORTANT", "previous": [],
+    }])
+    block_design_contract(1)
+    stop_active_attempt("abort")
+    stopped = journal_lines()[-1]
+    check(stopped["kind"] == "aborted", stopped)
+    check(stopped["data"]["design_review"]["contract_blocked"] == [1], stopped)
+    retry = run_progress("construction-retry-check", "lot-1", "3", "-")
+    check(retry.returncode == 0 and retry.stdout.strip() != "-", retry.stdout + retry.stderr)
+
+
+@test
 def design_parity_stop_preserves_a_final_contract_blocker():
     seed_active_attempt()
     drive_design_to_round_ten_contract_blocker()
@@ -2539,6 +2709,92 @@ def code_contract_blocker_composes_with_an_inherited_design_obligation():
     data = json.loads(admitted.stdout)
     check(data.get("retry") == inherited, data)
     check(data["code_review"]["contract_blocked"] == [1], data)
+
+
+@test
+def early_design_contract_blocker_composes_with_an_inherited_code_obligation():
+    seed_active_attempt()
+    for round_number in range(1, 11):
+        append_checker_verdict(
+            "code", lot="lot-1", task=3, attempt=2,
+            round_number=round_number, findings=1,
+        )
+    resolution = os.path.join(BASE, "accepted-code-before-design-blocker.md")
+    with open(resolution, "w", encoding="utf-8") as target:
+        target.write(
+            "## Finding 1 — accepted\n"
+            "The retry must preserve this accepted code obligation.\n"
+        )
+    resolved = run_progress(
+        "note", "code.review.resolved", "--round", "10",
+        "--text-file", resolution,
+        "--data", '{"check":"code","items":[{"id":1,"status":"accepted"}]}',
+    )
+    check(resolved.returncode == 0, resolved.stdout + resolved.stderr)
+    handoff = run_progress("construction-failure-handoff", "lot-1", "3", "2")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report_relative = "reports/construction/lot-1-task-3-try-2.md"
+    report = os.path.join(WORKSPACE, report_relative)
+    os.makedirs(os.path.dirname(report), exist_ok=True)
+    with open(report, "w", encoding="utf-8") as target:
+        target.write(
+            "## What failed\nThe final code checker accepted one defect.\n\n"
+            "## Classification\nC3.9a — retry the implementation.\n\n"
+            "## Evidence read\nThe immutable code-checker result.\n\n"
+            + handoff.stdout
+        )
+    failure = run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9a")
+    check(failure.returncode == 0, failure.stdout + failure.stderr)
+    appended = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", failure.stdout.strip(),
+    )
+    check(appended.returncode == 0, appended.stdout + appended.stderr)
+    inherited = run_progress(
+        "construction-retry-check", "lot-1", "3", report_relative,
+    ).stdout.strip()
+    check(inherited != "-", "the accepted code obligation has no retry proof")
+
+    set_active_attempt_retry(inherited, 3)
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1, "where": "frozen task contract",
+        "what": "The retry Design exposes a controller-contract defect.",
+        "why": "The controller must correct the contract before another attempt.",
+        "impact": "IMPORTANT", "previous": [],
+    }])
+    block_design_contract(1)
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "3", "3", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failure_data = json.loads(admitted.stdout)
+    check(failure_data.get("retry") == inherited, failure_data)
+    failed = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", admitted.stdout.strip(),
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    composed = run_progress("construction-retry-check", "lot-1", "3", "-").stdout.strip()
+    check(composed not in {"-", inherited}, "the early blocker replaced the code proof")
+
+    set_active_attempt_retry(composed, 4)
+    design_opening = open_design_round(1)
+    design_manifest = json.load(open(
+        os.path.join(WORKSPACE, design_opening["manifest"]), encoding="utf-8",
+    ))
+    check([item["id"] for item in design_manifest["previous"]["findings"]] == [1],
+          design_manifest["previous"])
+    finish_design_round(1, design_opening, previous=[{
+        "id": 1, "status": "addressed",
+        "evidence": "The replacement Design follows the corrected task contract.",
+    }])
+    code_opening = append_real_code_verdict(attempt=4, findings=0)
+    code_manifest = json.load(open(
+        os.path.join(WORKSPACE, code_opening["manifest"]), encoding="utf-8",
+    ))
+    check([item["id"] for item in code_manifest["previous"]["findings"]] == [1],
+          code_manifest["previous"])
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
 
 
 @test
@@ -2880,6 +3136,16 @@ def design_parity_contract_has_probability_strict_result_repair_and_terminal_rul
               f"the {name} does not carry the exact design settlement")
         check("design.review.blocked" in contract,
               f"the {name} does not carry the exact controller-contract blocker")
+        lowered_contract = contract.lower()
+        check("at the round where it is found" in lowered_contract
+              or "at its current round" in lowered_contract,
+              f"the {name} defers a controller-owned Design blocker")
+    check("Do not allocate another Design round" in implementer,
+          "the implementer can continue after a controller-owned Design blocker")
+    check("design.review.blocked --round <K>" in implementer,
+          "the implementer lacks the exact current-round blocker command")
+    check("design.review.blocked --round 10" not in implementer,
+          "the implementer still limits a controller-owned blocker to round 10")
     check('"where":"frozen task contract"' in checker,
           "the Design checker lacks one exact controller-contract finding identity")
     check("Return one JSON object" in checker and "Return no prose outside it" in checker,

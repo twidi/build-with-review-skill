@@ -79,8 +79,8 @@ own identity. Nothing was moved, and nothing was staged."
 FAILURE_DATA=$("$WORKSPACE/prompts/common/progress.py" construction-failure-check \
     "$LOT" "$N" "$K" "$CLASS") \
     || die "the failure is not admitted by the exact checker state.
-Settle design or code round 10, or record the exact controller-owned Design or code
-blocker before the plan changes.
+Settle implementer-owned Design or code round 10, or record the exact controller-owned
+Design or code blocker at the round where it was found, before the plan changes.
 When it accepts an implementer-owned defect, complete its authenticated failure report
 first. Nothing was moved, staged, recorded or bound."
 

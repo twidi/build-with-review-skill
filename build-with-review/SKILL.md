@@ -1790,6 +1790,8 @@ The pair is the resume test:
   account. Code additionally requires a green ordinary gate. The next immutable manifest
   carries every prior finding for explicit `addressed` or `still-open` verification.
   Design rounds use `design.review.resolved`; code rounds use `code.review.resolved`.
+  The exact controller-owned blocker terminal is the only route that stops a Design
+  findings batch without that settlement or another round.
   Both checkers have ten logical rounds at most.
   A code finding which proves that valid work is absent from the frozen controller
   contract stops at its current round. `code.review.blocked` freezes the complete batch
@@ -1800,10 +1802,12 @@ The pair is the resume test:
   accepted Design or code obligation composes with this blocker. Failure, pause and abort
   preserve every member until one successful retry gives each member to its matching
   first checker.
+  A Design finding with the exact location `frozen task contract` follows the same
+  early boundary. At its current round, `design.review.blocked` freezes the complete
+  immutable batch without an implementer disposition. It allocates no later Design
+  round. The controller uses the reportless C3.9b or C3.9d plan-fault route.
   Round 10 never allocates round 11. Its implementer-owned settlement statuses are
-  `accepted`, `refuted` and `alternative`. A finding with the exact location
-  `frozen task contract` instead uses one derived `design.review.blocked` terminal. It
-  preserves the complete immutable batch without inventing an implementer disposition.
+  `accepted`, `refuted` and `alternative`.
   An accepted defect fails through C3.9. A complete account
   containing only refuted findings and valid alternatives can reach the final gate; the
   alternatives remain in the plan's exact `### Disagreement` block. A contract-owned
@@ -1827,12 +1831,12 @@ The pair is the resume test:
   and its first Design manifest receives those identities. A later stop propagates an
   inherited obligation until one successful retry consumes it.
 
-  A final frozen-task-contract blocker uses no failure report and no implementer
+  A frozen-task-contract blocker from any Design round uses no failure report and no implementer
   settlement. Its `design.review.blocked` proof and complete immutable batch enter the
   C3.9b or C3.9d `attempt.failed` note directly. A C3.9b controller-contract correction
   then crosses `plan-commit.sh`, the repeated C2 proof, and a fresh green baseline before
   the next attempt starts. C3.9d keeps its existing re-cut route. The next attempt passes
-  `-`; its first Design manifest carries every final identity as `contract-blocked` or
+  `-`; its first Design manifest carries every blocked-batch identity as `contract-blocked` or
   `carried`. That exact obligation also propagates until one successful retry consumes
   it.
 
