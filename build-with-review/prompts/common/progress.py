@@ -176,6 +176,17 @@ CORRECTION_AUTHORITY_NOTE_KINDS = {
     "correction.round.allocated",
     "correction.round.allocation.superseded",
     "correction.round.opened",
+    "spec.edit.ready",
+    "spec.committed",
+    "decision.recheck.completed",
+    "ruling.applied",
+}
+
+CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS = {
+    "spec.edit.ready",
+    "spec.committed",
+    "decision.recheck.completed",
+    "ruling.applied",
 }
 
 
@@ -8549,10 +8560,76 @@ def correction_note_operation(args):
     return f"progress-note:{digest}"
 
 
-def refuse_foreign_correction_pending_owner(operation):
+def product_authority_closed_terminal_matches(account, data):
+    if data.get("route") != "closed":
+        return False
+    owner = account.get("authority_owner")
+    if isinstance(owner, str) and re.fullmatch(r"R[1-9][0-9]*", owner):
+        try:
+            _, route, authority = direct_ruling_state(owner)
+        except SystemExit:
+            return False
+        return route == "closed" \
+            and data.get("answer") == owner \
+            and data.get("ruling") == owner \
+            and all(data.get(key) == authority[key] for key in (
+                "authority_kind", "authority_ref", "authority_sha256",
+            )) \
+            and account.get("state_kind") == authority["authority_kind"] \
+            and account.get("state_ref") == authority["authority_ref"] \
+            and account.get("state_artifact_sha256") == authority["authority_sha256"]
+
+    match = re.fullmatch(r"B([1-9][0-9]*)/(D[1-9][0-9]*)", str(owner))
+    if match is None:
+        return False
+    batch, decision = int(match.group(1)), match.group(2)
+    state = batch_state(journal_entries(), batch)
+    answer = state["answers"].get(decision)
+    return answer is not None \
+        and answer.get("status") == "active" \
+        and answer.get("route") == "closed" \
+        and data.get("answer") == owner \
+        and data.get("batch") == batch \
+        and data.get("decision") == decision \
+        and account.get("state_kind") == state["generation_kind"] \
+        and account.get("state_ref") == state["generation_ref"]
+
+
+def product_authority_note_matches(account, args, data, me):
+    if args.kind not in CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS \
+            or not isinstance(data, dict) \
+            or account.get("owner_session") != me.get("session_id"):
+        return False
+    state_kind = account.get("state_kind")
+    state_ref = account.get("state_ref")
+    ready_op = account.get("ready_op")
+    if args.kind == "spec.edit.ready":
+        return data.get("op") == ready_op \
+            and data.get("owner") == account.get("authority_owner") \
+            and data.get("state_kind") == state_kind \
+            and data.get("state_ref") == state_ref
+    if args.kind == "spec.committed":
+        return data.get("ready_op") == ready_op \
+            and data.get("state_kind") == state_kind \
+            and data.get("state_ref") == state_ref
+    if args.kind == "ruling.applied" and data.get("route") == "closed":
+        return product_authority_closed_terminal_matches(account, data)
+    commit_op = data.get("commit_op") if args.kind == "decision.recheck.completed" \
+        else data.get("recheck_op")
+    commits = [entry for entry in journal_entries()
+               if entry.get("kind") == "spec.committed"
+               and note_data(entry).get("op") == commit_op
+               and note_data(entry).get("ready_op") == ready_op
+               and note_data(entry).get("state_kind") == state_kind
+               and note_data(entry).get("state_ref") == state_ref]
+    return len(commits) == 1
+
+
+def refuse_foreign_correction_pending_owner(operation, args, data, me):
     markers = {
         "correction-allocation-supersede-in-progress": "correction-round-supersede.sh",
         "correction-round-open-in-progress": "correction-round-open.sh",
+        "correction-product-authority-in-progress": "correction-product-authority.sh",
     }
     for name, command in markers.items():
         marker = os.path.join(WORKSPACE, name)
@@ -8567,7 +8644,14 @@ def refuse_foreign_correction_pending_owner(operation):
             account = json.loads(raw)
         except (OSError, UnicodeError, ValueError) as exc:
             fail("the pending Correction Round authority owner is malformed", exc)
-        if not isinstance(account, dict) or account.get("operation") != operation:
+        canonical = json.dumps(account, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        if canonical != raw:
+            fail("the pending Correction Round authority owner is not canonical")
+        same_owner = isinstance(account, dict) and account.get("operation") == operation
+        product_step = name == "correction-product-authority-in-progress" \
+            and isinstance(account, dict) \
+            and product_authority_note_matches(account, args, data, me)
+        if not same_owner and not product_step:
             fail(
                 "another Correction Round authority owner is unfinished",
                 f"resume {command} with its exact recorded arguments",
@@ -8584,7 +8668,7 @@ def append_note(args, lease=None, lease_operation=None):
     context = with_flag_overrides(caller_context(me), args)
     operation = lease_operation or correction_note_operation(args)
     if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS:
-        refuse_foreign_correction_pending_owner(operation)
+        refuse_foreign_correction_pending_owner(operation, args, data, me)
     if lease is not None:
         try:
             lease.verify(operation)

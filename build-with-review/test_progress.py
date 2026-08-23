@@ -1670,10 +1670,11 @@ def seed_baseline_gate(owner, commit, base):
     return gate
 
 
-def seed_in_pass_controller_successor(opening_index, *, built="lot-1", ruling="R1"):
+def complete_in_pass_controller_successor(
+    opening_index, state_path, ready_op, *, built="lot-1", ruling="R1",
+):
     opening = journal_lines()[opening_index]["data"]
     predecessor = opening["commit"]
-    state_path = seed_direct_ruling(ruling=ruling, route="spec-in-place")
     spec_relative = f"docs/plans/{ruling.lower()}-controller-successor.md"
     write_project(spec_relative, f"# Accepted successor authority for {ruling}\n")
     subprocess.run(["git", "-C", REPO, "add", "--", spec_relative], check=True)
@@ -1686,29 +1687,24 @@ def seed_in_pass_controller_successor(opening_index, *, built="lot-1", ruling="R
     ).strip()
     artifact_sha = file_sha256(state_path)
     operation = f"edit-{ruling.lower()}-controller-successor"
-    ready_op = f"ready-{ruling.lower()}-controller-successor"
-    append_note("spec.edit.ready", {
-        "op": ready_op,
-        "owner": ruling,
-        "status": "active",
-        "route": "spec-in-place",
-        "state_kind": "ruling.ready",
-        "state_ref": ruling,
-        "source_sha": predecessor,
-        "spec_path_sha256": hashlib.sha256(spec_relative.encode()).hexdigest(),
-        "artifact_sha256": artifact_sha,
-    }, state_path)
-    ready_index = len(journal_lines()) - 1
-    append_note("spec.committed", {
-        "op": operation,
-        "sha": successor,
-        "parent": predecessor,
-        "ready_op": ready_op,
-        "state_kind": "ruling.ready",
-        "state_ref": ruling,
-        "artifact_sha256": artifact_sha,
-        "ruling": ruling,
-    })
+    ready_index = next(
+        index for index in range(len(journal_lines()) - 1, opening_index, -1)
+        if journal_lines()[index].get("kind") == "spec.edit.ready"
+        and journal_lines()[index]["data"].get("op") == ready_op
+    )
+    committed = run_progress(
+        "note", "spec.committed", "--data", json.dumps({
+            "op": operation,
+            "sha": successor,
+            "parent": predecessor,
+            "ready_op": ready_op,
+            "state_kind": "ruling.ready",
+            "state_ref": ruling,
+            "artifact_sha256": artifact_sha,
+            "ruling": ruling,
+        }),
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
     commit_index = len(journal_lines()) - 1
     recheck_path = f"reports/answers/{ruling}-controller-successor-recheck.md"
     recheck_sha = write_report(recheck_path, "The successor preserves the current answer.\n")
@@ -1760,6 +1756,27 @@ def seed_in_pass_controller_successor(opening_index, *, built="lot-1", ruling="R
     }
     authority = load_common_module("correction_authority")
     return successor, gate, account, authority.generation_sha256(account)
+
+
+def seed_in_pass_controller_successor(opening_index, *, built="lot-1", ruling="R1"):
+    opening = journal_lines()[opening_index]["data"]
+    state_path = seed_direct_ruling(ruling=ruling, route="spec-in-place")
+    spec_relative = f"docs/plans/{ruling.lower()}-controller-successor.md"
+    ready_op = f"ready-{ruling.lower()}-controller-successor"
+    append_note("spec.edit.ready", {
+        "op": ready_op,
+        "owner": ruling,
+        "status": "active",
+        "route": "spec-in-place",
+        "state_kind": "ruling.ready",
+        "state_ref": ruling,
+        "source_sha": opening["commit"],
+        "spec_path_sha256": hashlib.sha256(spec_relative.encode()).hexdigest(),
+        "artifact_sha256": file_sha256(state_path),
+    }, state_path)
+    return complete_in_pass_controller_successor(
+        opening_index, state_path, ready_op, built=built, ruling=ruling,
+    )
 
 
 def seed_review_pass(*, built="lot-1", commit=None, confirmed=0, omit=None):
@@ -5235,6 +5252,193 @@ def controller_successor_reclassifies_one_unopened_allocation_before_replacement
         "base_commit": successor,
         "base_gate": successor_gate,
     }, "the replacement close retained the stale pass-opening base")
+
+
+@test
+def product_authority_owner_blocks_competitors_and_finishes_reclassification():
+    state = seed_unopened_correction_allocation("product-authority-owner")
+    state_path = seed_direct_ruling(ruling="R1", route="spec-in-place")
+    ready_op = "ready-r1-controller-successor"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    begun = subprocess.run(
+        [
+            script, "begin", "lot-1", "1", state["allocation_proof"],
+            "R1", "ruling.ready", "R1", ready_op,
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+    marker = pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress"
+    check(marker.is_file(), "the accepted product authority has no pending owner")
+
+    blocked_close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(blocked_close.returncode != 0 and not any(
+        entry.get("kind") == "pass.closed" for entry in journal_lines()
+    ), "pass close bypassed the live product-authority owner")
+
+    spec_relative = "docs/plans/r1-controller-successor.md"
+    ready_data = {
+        "op": ready_op,
+        "owner": "R1",
+        "status": "active",
+        "route": "spec-in-place",
+        "state_kind": "ruling.ready",
+        "state_ref": "R1",
+        "source_sha": state["opening"]["commit"],
+        "spec_path_sha256": hashlib.sha256(spec_relative.encode()).hexdigest(),
+        "artifact_sha256": file_sha256(state_path),
+    }
+    mismatched = run_progress(
+        "note", "spec.edit.ready", "--data", json.dumps({
+            **ready_data, "op": "foreign-ready-op",
+        }), "--text", state_path,
+    )
+    check(mismatched.returncode != 0, "a foreign ready operation used the pending owner")
+    ready = run_progress(
+        "note", "spec.edit.ready", "--data", json.dumps(ready_data),
+        "--text", state_path,
+    )
+    check(ready.returncode == 0, ready.stdout + ready.stderr)
+    successor, successor_gate, _, successor_generation = (
+        complete_in_pass_controller_successor(
+            state["opening_index"], state_path, ready_op,
+        )
+    )
+
+    finished = subprocess.run(
+        [
+            script, "finish", "lot-1", "1", state["allocation_proof"],
+            "R1", "ruling.ready", "R1", ready_op,
+            "The accepted product authority changed the correction base.",
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+    check(not marker.exists(), "the finished product authority retained its pending owner")
+    supersession_index = len(journal_lines()) - 1
+    supersession = journal_lines()[supersession_index]
+    check(supersession.get("kind") == "correction.round.allocation.superseded",
+          "the product authority did not terminate the stale allocation")
+    check(supersession["data"]["outcome"] == "reclassify"
+          and supersession["data"]["current_generation_sha256"] == successor_generation,
+          "the product owner reclassified against another generation")
+
+    replacement = json.loads(json.dumps(state["allocation"]))
+    replacement["predecessor_supersession"] = journal_proof(supersession_index)
+    replacement["parent"] = {
+        "position": 0,
+        "generation_sha256": successor_generation,
+        "commit": successor,
+        "gate": successor_gate,
+    }
+    replacement["admission"]["reason"] = (
+        "The successor authority still permits one bounded implementation correction."
+    )
+    replacement["admission"]["items"][0]["reason"] = (
+        "The finding remains bounded under the successor authority."
+    )
+    replaced = run_progress(
+        "note", "correction.round.allocated", "--data", json.dumps(replacement),
+    )
+    check(replaced.returncode == 0, replaced.stdout + replaced.stderr)
+
+
+@test
+def rejected_product_authority_releases_its_owner_without_supersession():
+    state = seed_unopened_correction_allocation("product-authority-release")
+    state_path = seed_direct_ruling(ruling="R1", route="closed")
+    ready_op = "ready-r1-rejected"
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    base_command = [
+        script, "lot-1", "1", state["allocation_proof"],
+        "R1", "ruling.ready", "R1", ready_op,
+    ]
+    begun = subprocess.run(
+        [script, "begin", *base_command[1:]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+    marker = pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress"
+
+    terminal = {
+        "answer": "R1",
+        "ruling": "R1",
+        "route": "closed",
+        "authority_kind": "ruling.ready",
+        "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    }
+    applied = run_progress(
+        "note", "ruling.applied", "--data", json.dumps(terminal),
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    terminal_proof = journal_proof(len(journal_lines()) - 1)
+
+    foreign_release = subprocess.run(
+        [script, "release", *base_command[1:], state["allocation_proof"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(foreign_release.returncode != 0 and marker.is_file(),
+          "a foreign terminal released the product-authority owner")
+
+    released = subprocess.run(
+        [script, "release", *base_command[1:], terminal_proof],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(released.returncode == 0, released.stdout + released.stderr)
+    check(not marker.exists(), "the rejected product authority retained its pending owner")
+    check(not any(
+        entry.get("kind") == "correction.round.allocation.superseded"
+        for entry in journal_lines()
+    ), "the rejected product authority superseded the live allocation")
+
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    check(journal_lines()[-1]["data"]["allocation"] == state["allocation_proof"],
+          "the released authority changed the pass's Correction Round allocation")
+
+
+@test
+def rejected_batch_authority_releases_the_same_allocation():
+    state = seed_unopened_correction_allocation("batch-authority-release")
+    seed_batch(
+        items=[{"id": "D1", "verdict": "confirmed"}],
+        answers=[{"id": "D1", "choice": "O1", "route": "closed"}],
+    )
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-product-authority.sh",
+    )
+    arguments = [
+        "lot-1", "1", state["allocation_proof"], "B1/D1",
+        "decision.batch.ready", "B1", "ready-b1-rejected",
+    ]
+    begun = subprocess.run(
+        [script, "begin", *arguments], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(begun.returncode == 0, begun.stdout + begun.stderr)
+
+    applied = run_progress(
+        "note", "ruling.applied",
+        "--data", '{"answer":"B1/D1","batch":1,"decision":"D1","route":"closed"}',
+    )
+    check(applied.returncode == 0, applied.stdout + applied.stderr)
+    terminal_proof = journal_proof(len(journal_lines()) - 1)
+    released = subprocess.run(
+        [script, "release", *arguments, terminal_proof],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(released.returncode == 0, released.stdout + released.stderr)
+    check(not (pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress").exists(),
+          "the closed batch authority retained its pending owner")
+    check(not any(
+        entry.get("kind") == "correction.round.allocation.superseded"
+        for entry in journal_lines()
+    ), "the closed batch authority superseded the live allocation")
 
 
 @test
@@ -8932,6 +9136,7 @@ def main():
             "correction_round_supersede.py", "correction-round-supersede.sh",
             "correction_round_open.py", "correction-round-open.sh",
             "correction_round_baseline.py", "correction-round-baseline.sh",
+            "correction_product_authority.py", "correction-product-authority.sh",
         ):
             destination = os.path.join(WORKSPACE, "prompts", "construction", name)
             shutil.copyfile(os.path.join(HERE, "prompts", "construction", name), destination)

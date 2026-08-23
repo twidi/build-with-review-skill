@@ -88,7 +88,7 @@ def read_marker(path):
     return account
 
 
-def exact_current_allocation(args):
+def exact_current_allocation(args, *, allowed_marker=None):
     entries = progress.journal_entries()
     opening_index, opening, built, _ = progress.current_pass_opening(
         entries, len(entries), "the allocation supersession",
@@ -107,13 +107,15 @@ def exact_current_allocation(args):
     if allocation["round"] != args.round:
         fail("the allocation supersession names another correction round")
     if any((WORKSPACE / name).exists() or (WORKSPACE / name).is_symlink()
-           for name in BLOCKING_MARKERS):
+           for name in BLOCKING_MARKERS if name != allowed_marker):
         fail("another correction authority owner is unfinished")
     return entries, opening_index, opening, allocation_index, allocation
 
 
-def derive_account(args, operation):
-    entries, opening_index, opening, allocation_index, allocation = exact_current_allocation(args)
+def derive_account(args, operation, *, allowed_marker=None):
+    entries, opening_index, opening, allocation_index, allocation = exact_current_allocation(
+        args, allowed_marker=allowed_marker,
+    )
     opening_data = progress.note_data(opening)
     current = progress.current_product_generation(
         entries, opening_index, len(entries), args.built, "the allocation supersession",
