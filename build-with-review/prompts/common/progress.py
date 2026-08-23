@@ -367,8 +367,8 @@ def validate_spec_loop_artifact(entry):
         fail("the SPEC-loop recheck artifact differs from its complete structured result")
 
 
-def direct_ruling_state(ruling):
-    notes = journal_entries()
+def direct_ruling_generation(ruling, notes=None):
+    notes = journal_entries() if notes is None else notes
     try:
         validate_global_authority_precedence(notes)
     except AuthorityPrecedenceError as exc:
@@ -392,8 +392,8 @@ def direct_ruling_state(ruling):
             matches = [action for action in (data.get("actions") or [])
                        if isinstance(action, dict) and action.get("answer") == ruling]
             if len(matches) == 1:
-                route = matches[0].get("route", route)
                 status = matches[0].get("status", status)
+                route = None if status == "superseded" else matches[0].get("route", route)
         elif kind == "decision.conflict.ready":
             try:
                 validate_conflict_generation(notes, data["owner"], data["conflict"])
@@ -412,18 +412,27 @@ def direct_ruling_state(ruling):
                     matches = [update for update in (note_data(settlements[0]).get("updates") or [])
                                if isinstance(update, dict) and update.get("id") == ruling]
             if len(matches) == 1:
-                route = matches[0].get("route", route)
                 status = matches[0].get("status", status)
+                route = None if status == "superseded" else matches[0].get("route", route)
                 authority = entry
                 authority_kind = "decision.conflict.ready"
                 authority_ref = f"{data.get('owner')}/C{data.get('conflict')}"
-    if route not in DIRECT_RULING_ROUTES or status != "active":
-        fail(f"{ruling} is not one active direct route", {"route": route, "status": status})
-    return notes, route, {
+    if status not in {"active", "superseded"} \
+            or status == "active" and route not in DIRECT_RULING_ROUTES \
+            or status == "superseded" and route is not None:
+        fail(f"{ruling} has no valid current direct route", {"route": route, "status": status})
+    return notes, route, status, {
         "authority_kind": authority_kind,
         "authority_ref": authority_ref,
         "authority_sha256": authority_artifact_sha(authority),
     }
+
+
+def direct_ruling_state(ruling, notes=None):
+    notes, route, status, authority = direct_ruling_generation(ruling, notes)
+    if status != "active":
+        fail(f"{ruling} is not one active direct route", {"route": route, "status": status})
+    return notes, route, authority
 
 
 def validate_authority(data, subject, expected=None):
@@ -1886,13 +1895,54 @@ def next_visible_line(lines, start, stop=None):
     return None
 
 
-def amendment_reach_sources(opening):
+def amendment_reach_sources(entries, opening_index, before, opening):
     data = note_data(opening)
     if isinstance(data.get("members"), list) and data["members"]:
-        return data["members"]
-    if isinstance(data.get("ruling"), str) and data["ruling"]:
-        return [data["ruling"]]
-    return [f"A{data['amendment']}/order"]
+        sources = list(data["members"])
+    elif isinstance(data.get("ruling"), str) and data["ruling"]:
+        sources = [data["ruling"]]
+    else:
+        sources = [f"A{data['amendment']}/order"]
+
+    dispatches = [
+        entry for entry in entries[opening_index + 1:before]
+        if entry.get("kind") == "fixer.dispatched"
+        and note_data(entry).get("route") == "amendment-fixer"
+    ]
+    candidate_rulings = set()
+    for entry in entries[opening_index + 1:before]:
+        entry_data = note_data(entry)
+        for value in (entry_data.get("ruling"), entry_data.get("answer")):
+            if re.fullmatch(r"R[1-9][0-9]*", str(value)):
+                candidate_rulings.add(value)
+        for account in (entry_data.get("actions"), entry_data.get("updates"),
+                        entry_data.get("rulings")):
+            for member in account or []:
+                if not isinstance(member, dict):
+                    continue
+                for key in ("answer", "id", "ruling"):
+                    value = member.get(key)
+                    if re.fullmatch(r"R[1-9][0-9]*", str(value)):
+                        candidate_rulings.add(value)
+    current_entries = entries[:before]
+    for ruling in sorted(candidate_rulings, key=lambda value: int(value[1:])):
+        _, route, status, authority = direct_ruling_generation(ruling, current_entries)
+        if status != "active" or route != "amendment-fixer":
+            continue
+        owners = [entry for entry in dispatches
+                  if note_data(entry).get("ruling") == ruling
+                  and all(note_data(entry).get(key) == authority[key]
+                          for key in ("authority_kind", "authority_ref", "authority_sha256"))]
+        if len(owners) != 1:
+            fail(f"the amendment Reach source {ruling} has no one exact owner-linked dispatch")
+        authority_tuple = tuple(authority[key] for key in (
+            "authority_kind", "authority_ref", "authority_sha256",
+        ))
+        if has_terminal(current_entries, ruling, authority_tuple):
+            fail(f"the amendment Reach source {ruling} is already terminal")
+        if ruling not in sources:
+            sources.append(ruling)
+    return sources
 
 
 def parse_reach_sources(value, subject):
@@ -2219,7 +2269,8 @@ def amendment_sweep_generation(entries, sweep, subject, *, live):
     with open(report, "rb") as source:
         payload = source.read()
     account = audit_reach_report(
-        payload, "the reach report", amendment_reach_sources(opening),
+        payload, "the reach report",
+        amendment_reach_sources(entries, opening_index, len(entries), opening),
     )
     amendment_path = exact_real_file(WORKSPACE, f"amendments/{number}.md",
                                      "the amendment under reach review")
@@ -2397,7 +2448,8 @@ def validate_sweep_entry(entries, index, entry, *, validate_owed=True):
     with open(report, "rb") as source:
         payload = source.read()
     account = audit_reach_report(
-        payload, "the reach report", amendment_reach_sources(opening),
+        payload, "the reach report",
+        amendment_reach_sources(entries, opening_index, index, opening),
     )
     expected = {
         "amendment": number, "sweep": sweep,
@@ -7364,10 +7416,17 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         if data.get("route") not in {"spec-fixer", "amendment-fixer"}:
             fail("an owner-linked fixer dispatch has an unknown route",
                  "use exactly spec-fixer or amendment-fixer")
-        _, route, authority = direct_ruling_state(ruling)
+        notes, route, authority = direct_ruling_state(ruling)
         if data.get("route") != route:
             fail("the owner-linked fixer dispatch does not match the current route", route)
         validate_authority(data, "the owner-linked fixer dispatch", authority)
+        duplicates = [entry for entry in notes
+                      if entry.get("kind") == "fixer.dispatched"
+                      and note_data(entry).get("ruling") == ruling
+                      and all(note_data(entry).get(key) == authority[key]
+                              for key in ("authority_kind", "authority_ref", "authority_sha256"))]
+        if duplicates:
+            fail("the current ruling authority already has its owner-linked fixer dispatch")
 
     if kind == "ruling.applied" and data and "ruling" in data:
         ruling = str(data.get("ruling"))

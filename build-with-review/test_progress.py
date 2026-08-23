@@ -5835,6 +5835,161 @@ def amendment_sweep_preflight_requires_the_exact_owed_next_sweep():
 
 
 @test
+def amendment_sweep_reach_sources_include_a_later_owner_linked_amendment_ruling():
+    seed_written_amendment_for_reach()
+    accept_reach_sweep(
+        1,
+        reach_report(hops=(1,), dispositions=("kept",)),
+        "reach-before-later-ruling",
+    )
+
+    state_path = seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    authority = {
+        "authority_kind": "ruling.ready",
+        "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    }
+    dispatched = run_progress(
+        "note", "fixer.dispatched",
+        "--data", json.dumps({
+            "ruling": "R1", "route": "amendment-fixer", **authority,
+        }),
+        "--text", state_path,
+    )
+    check(dispatched.returncode == 0, dispatched.stdout + dispatched.stderr)
+    before_duplicate = len(journal_lines())
+    duplicate = run_progress(
+        "note", "fixer.dispatched",
+        "--data", json.dumps({
+            "ruling": "R1", "route": "amendment-fixer", **authority,
+        }),
+        "--text", state_path,
+    )
+    check(duplicate.returncode != 0 and len(journal_lines()) == before_duplicate,
+          "a duplicate current-authority amendment-fixer dispatch reached the journal")
+    write_report(
+        "amendments/1.md",
+        amendment_document(1, "apply the reach order; return to product review", ("R1",)),
+    )
+
+    write_report(
+        "reports/amendment/1/sweep-2.md",
+        reach_report(sources=("A1/order", "R1")),
+    )
+    session = "reach-after-later-ruling"
+    configure_reach_session(session, 2)
+    append_live_reach_session(2, session)
+    preflight = run_progress("amendment-sweep-check", "2")
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+    retired = run_progress("session-retired", session, "done", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    proof = json.loads(preflight.stdout)
+    receipt = run_progress(
+        "note", "sweep.reported", "--round", "2",
+        "--data", json.dumps({key: proof[key] for key in ("hop", "places", "closed")}),
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    history = run_progress("amendment-state-check")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    journal = journal_lines()
+    dispatch = next(entry for entry in journal if entry.get("kind") == "fixer.dispatched")
+    dispatch["data"]["authority_sha256"] = "0" * 64
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_history = run_progress("amendment-state-check")
+    check(changed_history.returncode != 0,
+          "historical Reach replay accepted a changed owner-linked source authority")
+
+
+@test
+def amendment_sweep_refuses_an_active_amendment_ruling_without_its_owner_dispatch():
+    seed_written_amendment_for_reach()
+    seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    session = "reach-with-unowned-ruling"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    before = len(journal_lines())
+    preflight = run_progress("amendment-sweep-check", "1")
+    check(preflight.returncode != 0 and len(journal_lines()) == before,
+          "Reach preflight omitted an active amendment-fixer ruling without a dispatch")
+
+
+@test
+def amendment_sweep_requires_one_dispatch_for_the_current_ruling_authority():
+    seed_written_amendment_for_reach()
+    state_path = seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    initial_authority = {
+        "authority_kind": "ruling.ready",
+        "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    }
+    append_note("fixer.dispatched", {
+        "ruling": "R1", "route": "amendment-fixer", **initial_authority,
+    })
+    ready_path, ready_sha = append_conflict_generation(
+        "R1", 1, ["R1"],
+        [{"id": "R1", "action": "qualify", "status": "active",
+          "route": "amendment-fixer"}],
+        [{"answer": "R1", "status": "active", "route": "amendment-fixer"}],
+        state_kind="ruling.ready", state_ref="R1",
+    )
+    current_authority = {
+        "authority_kind": "decision.conflict.ready",
+        "authority_ref": "R1/C1",
+        "authority_sha256": ready_sha,
+    }
+    write_report(
+        "reports/amendment/1/sweep-1.md",
+        reach_report(sources=("A1/order", "R1")),
+    )
+    session = "reach-after-ruling-authority-change"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    missing_current_owner = run_progress("amendment-sweep-check", "1")
+    check(missing_current_owner.returncode != 0,
+          "an older amendment-fixer dispatch owned the current ruling authority")
+
+    current_dispatch = run_progress(
+        "note", "fixer.dispatched",
+        "--data", json.dumps({
+            "ruling": "R1", "route": "amendment-fixer", **current_authority,
+        }),
+        "--text", ready_path,
+    )
+    check(current_dispatch.returncode == 0, current_dispatch.stdout + current_dispatch.stderr)
+    accepted = run_progress("amendment-sweep-check", "1")
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+
+
+@test
+def amendment_sweep_ignores_a_dispatch_for_a_superseded_ruling_authority():
+    seed_written_amendment_for_reach()
+    state_path = seed_direct_ruling(ruling="R1", route="amendment-fixer")
+    append_note("fixer.dispatched", {
+        "ruling": "R1", "route": "amendment-fixer",
+        "authority_kind": "ruling.ready",
+        "authority_ref": "R1",
+        "authority_sha256": file_sha256(state_path),
+    })
+    append_conflict_generation(
+        "R1", 1, ["R1"],
+        [{"id": "R1", "action": "supersede", "status": "superseded",
+          "route": None}],
+        [{"answer": "R1", "status": "superseded"}],
+        state_kind="ruling.ready", state_ref="R1",
+    )
+    write_report("reports/amendment/1/sweep-1.md", reach_report())
+    session = "reach-after-ruling-supersession"
+    configure_reach_session(session, 1)
+    append_live_reach_session(1, session)
+    accepted = run_progress("amendment-sweep-check", "1")
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+
+
+@test
 def amendment_clean_positive_place_sweep_authorizes_consolidation():
     seed_written_amendment_for_reach()
     accept_reach_sweep(
