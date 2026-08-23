@@ -522,6 +522,12 @@ schedule belongs to the old gate blob and cannot authorize the new list.
 
 ## C1 — The plan
 
+**A sub-lot's exact `sublot.opened` terminal is its only durable CONSTRUCTION origin.** It
+must consume one positive closed PRODUCT REVIEW pass, its allocation, confirmed artifact
+and plan. `plan-commit.sh` checks this origin before any copy, staging, commit or marker.
+Every attempt and the later PRODUCT REVIEW check the same historical origin again. A root
+lot has no sub-lot origin.
+
 You write the plan yourself, in **`<workspace>/plans/<lot>-plan.md`**. That is where it
 lives; `docs/plans/` only ever receives a copy.
 

@@ -30,6 +30,10 @@ LOT=$1 N=$2 K=$3 RETRY_REPORT=${4:--}
 [[ $LOT =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "the lot must read lot-<N> or lot-<N>.<M> — positive integers, no leading zeros — got \`$LOT\`"
 [[ $N =~ ^[1-9][0-9]*$ ]] || die "the task number must be a positive integer without leading zeros, got \`$N\`"
 [[ $K =~ ^[1-9][0-9]*$ ]] || die "the attempt number must be a positive integer without leading zeros, got \`$K\`"
+"$PROGRESS" construction-origin-check "$LOT" >/dev/null \
+    || die "the lot has no authenticated construction origin. A sub-lot requires its exact
+positive pass close and sublot.opened terminal before an attempt can start. Nothing was
+marked and no session exists."
 
 RUN="refs/bwr/$(basename "$WORKSPACE")"   # this run's own ref namespace — see vocabulary.md
 

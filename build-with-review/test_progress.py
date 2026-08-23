@@ -4478,6 +4478,64 @@ def task_pass_requires_the_final_manifest_task_and_lot_built_boundary():
 
 
 @test
+def task_pass_refuses_a_built_sublot_without_its_authenticated_origin():
+    commit, gate, _ = seed_task_gate("lot-1.1", "missing-sublot-origin")
+    data = json.dumps({"built": "lot-1.1", "commit": commit, "gate": gate})
+    before = len(journal_lines())
+    opening = run_progress("note", "pass.opened", "--data", data)
+    check(opening.returncode != 0 and len(journal_lines()) == before,
+          "a built sub-lot entered PRODUCT REVIEW without its source pass terminal")
+
+
+@test
+def task_pass_accepts_a_built_sublot_after_the_exact_origin_terminal():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    commit, gate, _ = seed_task_gate(
+        "lot-1.1", "authenticated-sublot-origin",
+        plan_spec_lines=("Covers: lot-1-confirmed.md",),
+    )
+    data = json.dumps({"built": "lot-1.1", "commit": commit, "gate": gate})
+    review = run_progress("note", "pass.opened", "--data", data)
+    check(review.returncode == 0, review.stdout + review.stderr)
+
+
+@test
+def construction_origin_keeps_root_lots_origin_free():
+    origin = run_progress("construction-origin-check", "lot-3")
+    check(origin.returncode == 0 and origin.stdout.strip() == "root",
+          origin.stdout + origin.stderr)
+
+
+@test
+def generic_construction_terminals_cannot_bypass_a_missing_sublot_origin():
+    config = default_config()
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload["lot"] = "lot-1.1"
+    set_config(config)
+
+    for kind, data in (
+        ("plan.written", {"tasks": 1, "op": "bypass"}),
+        ("lot.built", {"tasks": 1, "attempts": 1}),
+    ):
+        before = len(journal_lines())
+        result = run_progress(
+            "note", kind, "--data", json.dumps(data, separators=(",", ":")),
+        )
+        check(result.returncode != 0 and len(journal_lines()) == before,
+              f"generic {kind} bypassed the missing sub-lot origin")
+
+
+@test
 def task_pass_consumer_accepts_and_reauthenticates_a_retry_success_shape():
     progress = load_common_module("progress")
     retry = "17:" + "a" * 64
@@ -5162,6 +5220,182 @@ def positive_pass_close_requires_exact_allocation_and_artifacts():
     check(valid.returncode == 0, valid.stdout + valid.stderr)
     duplicate = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
     check(duplicate.returncode != 0, "a duplicate pass close was accepted")
+
+
+@test
+def sublot_opening_requires_and_replays_the_exact_positive_pass_close():
+    seed_review_pass(confirmed=1)
+    allocation = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps(allocation_data(), separators=(",", ":")),
+    )
+    check(allocation.returncode == 0, allocation.stdout + allocation.stderr)
+    write_confirmed("lot-1", [])
+
+    before = len(journal_lines())
+    premature = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(premature.returncode != 0 and len(journal_lines()) == before,
+          "a sub-lot opened before its source pass closed")
+
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    origin = run_progress("construction-origin-check", "lot-1.1")
+    check(origin.returncode == 0 and origin.stdout.strip(), origin.stdout + origin.stderr)
+
+    duplicate = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(duplicate.returncode != 0, "one sub-lot received two opening terminals")
+
+    rows = journal_lines()
+    close_entry = next(entry for entry in rows if entry.get("kind") == "pass.closed")
+    close_entry["data"] = {"confirmed": 0}
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in rows:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed = run_progress("construction-origin-check", "lot-1.1")
+    check(changed.returncode != 0,
+          "construction retained a sub-lot opening after its source close changed")
+
+
+@test
+def sublot_opening_can_finish_after_downstream_work_without_rewriting_history():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    append_note("plan.written", {"tasks": 1, "op": "historical-missing-boundary"}, lot="lot-1.1")
+    append_note("lot.built", {"tasks": 1, "attempts": 1}, lot="lot-1.1")
+
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    origin = run_progress("construction-origin-check", "lot-1.1")
+    check(origin.returncode == 0, origin.stdout + origin.stderr)
+
+
+@test
+def sublot_origin_replays_the_frozen_source_gate_not_the_later_current_head():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    plan = (
+        "# Plan\n\n"
+        "Covers: reports/product-review/lot-1/lot-1-confirmed.md\n\n"
+        "## Task 1 - Correct the confirmed behavior\n"
+        "Achieves: The confirmed behavior is corrected.\n"
+        "To verify: The confirmed behavior stays corrected.\n\n"
+        "### Design\n"
+        "[written at C3.1 - see below]\n"
+    )
+    write_report("plans/lot-1.1-plan.md", plan)
+    config = default_config()
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload["lot"] = "lot-1.1"
+    set_config(config)
+
+    source_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    plan_commit = os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh")
+    committed = subprocess.run(
+        ["bash", plan_commit, "lot-1.1", "test: publish sub-lot plan"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    later_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    check(later_head != source_head, "the real plan commit did not create its later HEAD")
+    terminal = journal_lines()[-1]
+    check(terminal.get("kind") == "plan.written" and terminal.get("lot") == "lot-1.1",
+          "the real plan commit did not append its authenticated plan.written terminal")
+    current_gate = subprocess.run(
+        ["bash", os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh"),
+         "require-current"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(current_gate.returncode != 0,
+          "the fixture unexpectedly gave the later plan commit a baseline gate")
+    origin = run_progress("construction-origin-check", "lot-1.1")
+    check(origin.returncode == 0, origin.stdout + origin.stderr)
+
+
+@test
+def sublot_origin_rejects_a_changed_frozen_source_gate():
+    seed_review_pass(confirmed=1)
+    append_note("sublot.allocated", allocation_data(), text="lot-1.1")
+    write_confirmed("lot-1", [])
+    close = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(close.returncode == 0, close.stdout + close.stderr)
+    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    entries = journal_lines()
+    pass_commit = next(
+        entry for entry in entries if entry.get("kind") == "pass.opened"
+    )["data"]["commit"]
+    foreign_tree = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{pass_commit}^^{{tree}}"], text=True,
+    ).strip()
+    terminal = next(
+        entry for entry in entries
+        if entry.get("event") == "subagent-ended" and entry.get("kind") == "gate-runner"
+        and (entry.get("data") or {}).get("scope") == "task"
+    )
+    terminal["data"]["tree"] = foreign_tree
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in entries:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed = run_progress("construction-origin-check", "lot-1.1")
+    check(changed.returncode != 0,
+          "construction accepted a source-pass gate terminal for another frozen tree")
+
+
+@test
+def sublot_origin_replays_only_the_immediate_source_not_every_ancestor():
+    progress = load_common_module("progress")
+    ancestors = [
+        {"event": "note", "kind": "sublot.opened", "text": f"lot-1.{number}"}
+        for number in range(1, 20)
+    ]
+    opening_index = len(ancestors)
+    close_index = opening_index + 2
+    entries = [
+        *ancestors,
+        {"event": "note", "kind": "pass.opened", "data": {"built": "lot-1.19"}},
+        {"event": "note", "kind": "sublot.allocated", "text": "lot-1.20",
+         "data": {"built": "lot-1.19"}},
+        {"event": "note", "kind": "pass.closed", "data": {"confirmed": 1}},
+    ]
+    calls = []
+
+    def source_close(_entries, _subject, *, validate_origin=True, validate_current_gate=True):
+        calls.append(("close", validate_origin, validate_current_gate))
+        return opening_index, entries[opening_index], close_index, entries[close_index], 1, "lot-1.19"
+
+    def source_opening(_entries, _before, _subject, *, validate_origin=True):
+        calls.append(("allocation", validate_origin))
+        return opening_index, entries[opening_index], "lot-1.19", "a" * 40
+
+    progress.current_pass_close = source_close
+    progress.current_pass_opening = source_opening
+    progress.validate_global_authority_precedence = lambda _entries: None
+    progress.validate_current_direct_terminals = lambda _entries, _before, _subject: None
+    progress.validate_allocation_identity = lambda *_args: "lot-1"
+    progress.validate_allocation_account = lambda *_args: None
+
+    progress.validate_sublot_opening(entries, None, "lot-1.20", "the deep origin")
+    check(calls == [("close", False, False), ("allocation", False)],
+          f"the historical projector re-enabled ancestor or current-gate validation: {calls}")
 
 
 @test
@@ -7176,6 +7410,27 @@ def design_checker_proves_parent_product_closure_without_becoming_lot_review():
 
 
 @test
+def sublot_construction_requires_one_replayed_product_review_origin():
+    with open(os.path.join(HERE, "prompts", "product-review", "MODE.md"), encoding="utf-8") as f:
+        product = " ".join(f.read().split())
+    with open(os.path.join(HERE, "prompts", "construction", "MODE.md"), encoding="utf-8") as f:
+        construction = " ".join(f.read().split())
+    with open(os.path.join(COMMON_PROMPTS, "progress-rules.md"), encoding="utf-8") as f:
+        rules = " ".join(f.read().split())
+
+    for contract in (product, construction, rules):
+        check("sublot.opened" in contract and "CONSTRUCTION origin" in contract,
+              "a direct contract omits the sub-lot origin terminal")
+        check("positive" in contract and "allocation" in contract,
+              "a direct contract does not bind the source pass and allocation")
+    check("before any copy, staging, commit or marker" in construction,
+          "C1 does not refuse before plan publication mutates state")
+    check("Plan publication, attempt start, `lot.built`" in rules
+          and "first PRODUCT REVIEW pass" in rules,
+          "the shared rule omits a direct construction-origin consumer")
+
+
+@test
 def code_contract_blocker_stops_its_current_round_and_uses_the_plan_fault_route():
     with open(os.path.join(HERE, "prompts", "construction", "implementer.md"), encoding="utf-8") as f:
         implementer = " ".join(f.read().split())
@@ -7548,7 +7803,7 @@ def main():
         os.makedirs(os.path.join(WORKSPACE, "prompts", "construction"))
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
-            "construction_review.py",
+            "construction_review.py", "plan-commit.sh",
         ):
             destination = os.path.join(WORKSPACE, "prompts", "construction", name)
             shutil.copyfile(os.path.join(HERE, "prompts", "construction", name), destination)

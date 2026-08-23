@@ -976,6 +976,10 @@ used, whose plan and refs are frozen. Concretely:
    progress.py note sublot.opened --text "<lot N.n>"
    ```
 
+   `sublot.opened` is the only durable CONSTRUCTION origin for a sub-lot. It consumes
+   this exact positive `pass.closed`, allocation, confirmed artifact and plan. C1,
+   `plan-commit.sh`, every attempt and the later PRODUCT REVIEW refuse without it.
+
    Add `"conflict":<C>` when that generation is the effective answer's current
    authority. Write `ruling.applied` only for an active `sublot` ruling that has no
    earlier applied line;
@@ -1235,7 +1239,8 @@ state until a later ready conflict resolution supersedes them.
   **write the `sublot.opened` line for the lot named by `sublot.allocated`**, then construction C1.
   Never re-verify, never re-adjudicate, never re-close.
 - **`sublot.opened` in the slice** → the sub-lot is open and its name is in the note:
-  **go to construction C1 for THAT lot, and never allocate again.** R2.5 is complete;
+  **go to construction C1 for THAT lot, and never allocate again.** C1 authenticates
+  that exact opening again before any plan publication. R2.5 is complete;
   none of its artifacts or lifecycle lines repeats past this boundary.
 - **`pass.closed` with `confirmed:0`, no `lot.delivered` after it** → the lot is done
   and the close does not repeat. First write any missing `decision.batch.closed` whose

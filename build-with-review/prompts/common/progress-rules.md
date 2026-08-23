@@ -173,6 +173,11 @@ unfinished answer work. A voided close consumes one exact product-review amendme
 opening. `lot.delivered` consumes only the current clean close, its reviewed SHA, the
 exact ordinary-pass count and every required batch-close tail.
 
+`sublot.opened` consumes one exact positive close and its exact allocation. It is the
+sub-lot's only CONSTRUCTION origin. Plan publication, attempt start, `lot.built` and the
+first PRODUCT REVIEW pass all replay that origin. A missing or changed close/open pair
+refuses before the next durable boundary. A root lot has no such origin.
+
 If it rejects yours, you have the wrong name — **look it up where the call was given to
 you, and never invent a variant.** A vocabulary that is not enforced is not a vocabulary,
 and a dashboard cannot count what it cannot name.

@@ -5420,9 +5420,11 @@ def validate_built_task_success(entries, index, entry, built, task, task_sha, su
     return data
 
 
-def validate_task_pass_completion(entries, before, data, subject):
+def validate_task_pass_completion(entries, before, data, subject, *, validate_origin=True):
     """Prove that a task-owned first pass follows one complete built lot."""
     built, commit = data["built"], data["commit"]
+    if validate_origin:
+        validate_construction_lot_origin(entries, before, built, subject)
     workspace_relative = PurePosixPath("plans", f"{built}-plan.md")
     workspace_plan = real_workspace_file(workspace_relative, f"{subject}'s current plan")
     with open(workspace_plan, "rb") as source:
@@ -5494,7 +5496,7 @@ def validate_task_pass_completion(entries, before, data, subject):
              built_data)
 
 
-def validate_pass_opening_history(entries, opening_index, subject):
+def validate_pass_opening_history(entries, opening_index, subject, *, validate_origin=True):
     opening = entries[opening_index]
     data = note_data(opening)
     if set(data) != PASS_OPENING_KEYS:
@@ -5519,7 +5521,9 @@ def validate_pass_opening_history(entries, opening_index, subject):
         if data["source_lot"] != built or data["source_task"] < 1 \
                 or data["source_attempt"] < 1 or data["source_owner"] != expected_owner:
             fail(f"{subject} does not consume the exact built task identity")
-        validate_task_pass_completion(entries, opening_index, data, subject)
+        validate_task_pass_completion(
+            entries, opening_index, data, subject, validate_origin=validate_origin,
+        )
         duplicates = [entry for entry in entries[:opening_index]
                       if entry.get("kind") == "pass.opened"
                       and note_data(entry).get("built") == built]
@@ -5539,13 +5543,15 @@ def validate_pass_opening_history(entries, opening_index, subject):
     return data
 
 
-def current_pass_opening(entries, before, subject):
+def current_pass_opening(entries, before, subject, *, validate_origin=True):
     openings = [(index, entry) for index, entry in enumerate(entries[:before])
                 if entry.get("kind") == "pass.opened"]
     if not openings:
         fail(f"{subject} has no current product-review pass")
     opening_index, opening = openings[-1]
-    data = validate_pass_opening_history(entries, opening_index, subject)
+    data = validate_pass_opening_history(
+        entries, opening_index, subject, validate_origin=validate_origin,
+    )
     return opening_index, opening, data["built"], data["commit"]
 
 
@@ -6243,9 +6249,11 @@ def validate_allocation_identity(entries, opening_index, before, built, lot, sub
     return root
 
 
-def validate_sublot_allocation(entries, data, text, subject):
+def validate_sublot_allocation(entries, data, text, subject, *, validate_origin=True):
     before = len(entries)
-    opening_index, _, built, _ = current_pass_opening(entries, before, subject)
+    opening_index, _, built, _ = current_pass_opening(
+        entries, before, subject, validate_origin=validate_origin,
+    )
     if any(entry.get("kind") == "pass.closed" for entry in entries[opening_index + 1:before]):
         fail(f"{subject} cannot follow a closed pass")
     if any(entry.get("kind") == "sublot.allocated" for entry in entries[opening_index + 1:before]):
@@ -6257,6 +6265,70 @@ def validate_sublot_allocation(entries, data, text, subject):
     validate_current_direct_terminals(entries, before, subject)
     validate_allocation_identity(entries, opening_index, before, built, text, subject)
     validate_allocation_account(entries, opening_index, before, built, data, subject)
+
+
+def validate_sublot_opening(entries, data, text, subject):
+    """Prove that one sub-lot consumes its exact closed positive review pass."""
+    if data is not None:
+        fail(f"{subject} takes no structured data", data)
+    if not isinstance(text, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*\.[1-9][0-9]*", text,
+    ):
+        fail(f"{subject} has no exact sub-lot identity", text)
+    if any(entry.get("kind") == "sublot.opened" and entry.get("text") == text
+           for entry in entries):
+        fail(f"{subject} repeats the opening of {text}")
+
+    opening_index, _, close_index, _, confirmed, built = current_pass_close(
+        entries, subject, validate_origin=False, validate_current_gate=False,
+    )
+    if confirmed < 1:
+        fail(f"{subject} does not consume a positive product-review pass close", confirmed)
+    allocations = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:close_index], opening_index + 1,
+    ) if entry.get("kind") == "sublot.allocated" and entry.get("text") == text]
+    if len(allocations) != 1:
+        fail(f"{subject} has no one exact allocation for {text}", f"found {len(allocations)}")
+    allocation_index, allocation = allocations[0]
+    validate_sublot_allocation(
+        entries[:allocation_index], note_data(allocation), allocation.get("text"), subject,
+        validate_origin=False,
+    )
+    if note_data(allocation).get("built") != built:
+        fail(f"{subject}'s allocation belongs to another reviewed lot", built)
+
+    opened_batches = {note_data(entry).get("batch") for entry in entries
+                      if entry.get("kind") == "decision.batch.opened"}
+    closed_batches = {note_data(entry).get("batch") for entry in entries
+                      if entry.get("kind") == "decision.batch.closed"}
+    unfinished = sorted(
+        batch for batch in opened_batches - closed_batches
+        if isinstance(batch, int) and not isinstance(batch, bool)
+    )
+    if unfinished:
+        fail(f"{subject} still has open decision-batch routing", unfinished)
+
+
+def validate_construction_lot_origin(entries, before, lot, subject):
+    """Authenticate the PRODUCT REVIEW terminal that created a construction sub-lot."""
+    if not isinstance(lot, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
+    ):
+        fail(f"{subject} has a malformed lot identity", lot)
+    if "." not in lot:
+        return "root"
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "sublot.opened" and entry.get("text") == lot]
+    if len(openings) != 1:
+        fail(
+            f"{subject} requires one exact sub-lot `sublot.opened` terminal",
+            f"{lot}: found {len(openings)}",
+        )
+    opening_index, opening = openings[0]
+    validate_sublot_opening(
+        entries[:opening_index], opening.get("data"), opening.get("text"), subject,
+    )
+    return journal_line_proof(opening_index)
 
 
 def confirmed_account(path, subject):
@@ -6376,9 +6448,13 @@ def validate_current_technical_gate(opening, subject):
              proof.stderr or proof.stdout)
 
 
-def validate_pass_close(entries, data, subject):
+def validate_pass_close(
+    entries, data, subject, *, validate_origin=True, validate_current_gate=True,
+):
     before = len(entries)
-    opening_index, opening, built, _ = current_pass_opening(entries, before, subject)
+    opening_index, opening, built, _ = current_pass_opening(
+        entries, before, subject, validate_origin=validate_origin,
+    )
     if any(entry.get("kind") == "pass.closed" for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s current pass is already closed")
     if any(entry.get("kind") == "lot.delivered" for entry in entries[opening_index + 1:before]):
@@ -6408,7 +6484,8 @@ def validate_pass_close(entries, data, subject):
         fail(f"{subject} must void the pass owned by its product-review amendment")
     if any(entry.get("kind") == "sublot.opened" for entry in entries[opening_index + 1:before]):
         fail(f"{subject} cannot close after its sub-lot already opened")
-    validate_current_technical_gate(opening, subject)
+    if validate_current_gate:
+        validate_current_technical_gate(opening, subject)
     try:
         validate_global_authority_precedence(entries[:before])
     except AuthorityPrecedenceError as exc:
@@ -6428,8 +6505,12 @@ def validate_pass_close(entries, data, subject):
     return opening_index, opening, confirmed, built
 
 
-def current_pass_close(entries, subject):
-    opening_index, opening, built, _ = current_pass_opening(entries, len(entries), subject)
+def current_pass_close(
+    entries, subject, *, validate_origin=True, validate_current_gate=True,
+):
+    opening_index, opening, built, _ = current_pass_opening(
+        entries, len(entries), subject, validate_origin=validate_origin,
+    )
     closes = [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:], opening_index + 1
     ) if entry.get("kind") == "pass.closed"]
@@ -6438,6 +6519,8 @@ def current_pass_close(entries, subject):
     close_index, close = closes[0]
     _, _, confirmed, _ = validate_pass_close(
         entries[:close_index], note_data(close), subject,
+        validate_origin=validate_origin,
+        validate_current_gate=validate_current_gate,
     )
     if confirmed is None:
         fail(f"{subject} has no ordinary confirmed-count pass close")
@@ -7243,6 +7326,17 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             journal_entries(), data or {}, text, "a product-review sub-lot allocation",
         )
 
+    if kind == "sublot.opened":
+        validate_sublot_opening(
+            journal_entries(), data, text, "a product-review sub-lot opening",
+        )
+
+    if kind in {"plan.written", "lot.built"}:
+        validate_construction_lot_origin(
+            journal_entries(), len(journal_entries()), context.get("lot"),
+            f"{kind} construction entry",
+        )
+
     if kind == "pass.opened":
         data = normalize_pass_opened(data or {})
 
@@ -7812,6 +7906,14 @@ def cmd_construction_verdict_check(args):
     print(journal_line_proof(resolution_index))
 
 
+def cmd_construction_origin_check(args):
+    proof = validate_construction_lot_origin(
+        journal_entries(), len(journal_entries()), args.lot,
+        "the construction lot origin",
+    )
+    print(proof)
+
+
 def cmd_construction_failure_handoff(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
@@ -8014,6 +8116,10 @@ def build_parser():
     sp.add_argument("task", nargs="?", type=positive_int)
     sp.add_argument("attempt", nargs="?", type=positive_int)
     sp.set_defaults(func=cmd_construction_verdict_check)
+
+    sp = sub.add_parser("construction-origin-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.set_defaults(func=cmd_construction_origin_check)
 
     sp = sub.add_parser("construction-failure-handoff", help=argparse.SUPPRESS)
     sp.add_argument("lot")
