@@ -60,7 +60,7 @@ from authority_precedence import (
 NOTE_KINDS = {
     "run.started", "spec.written", "round.opened", "report.received",
     "fixer.returned", "spec.committed", "plan.written", "attempt.failed",
-    "attempt.succeeded",
+    "attempt.succeeded", "attempt.launch.abandoned",
     "lot.built", "pass.opened", "pass.closed", "sublot.allocated",
     "sublot.opened", "lot.delivered", "amendment.opened",
     "amendment.written", "sweep.reported",
@@ -2959,6 +2959,293 @@ def active_attempt_identity(context, subject, *, allow_closer=False):
     }
 
 
+def git_commit_and_tree(name, subject):
+    commit = subprocess.run(
+        ["git", "-C", REPO, "rev-parse", "--verify", f"{name}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        fail(f"{subject} has no exact commit", commit.stderr)
+    sha = commit.stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", REPO, "rev-parse", "--verify", f"{sha}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    if tree.returncode != 0:
+        fail(f"{subject} has no exact tree", tree.stderr)
+    return sha, tree.stdout.strip()
+
+
+def construction_session_start_account(context, subject):
+    identity = active_attempt_identity(context, subject)
+    base_ref = (
+        f"refs/bwr/{Path(WORKSPACE).name}/{identity['lot']}/attempt-base"
+    )
+    base, tree = git_commit_and_tree(base_ref, subject)
+    identity_sha256 = sha256_bytes(json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    return {
+        "schema": 1,
+        "attempt_identity": identity,
+        "attempt_identity_sha256": identity_sha256,
+        "attempt_base": base,
+        "attempt_base_tree": tree,
+    }
+
+
+def validate_construction_session_start(entry, subject, *, entries=None, index=None):
+    context = {key: entry.get(key) for key in ("lot", "task", "attempt")}
+    if entry.get("event") != "session-started" \
+            or entry.get("mode") != "construction" \
+            or entry.get("job") != "implementer" \
+            or not isinstance(entry.get("session"), str) or not entry["session"] \
+            or not isinstance(context["lot"], str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", context["lot"]) \
+            or not construction_positive_integer(context["task"]) \
+            or not construction_positive_integer(context["attempt"]):
+        fail(f"{subject} has malformed implementer launch identity")
+    data = entry.get("data")
+    if data is None:
+        return context  # historical schema-1 line, before launch accounts existed
+    required = {
+        "schema", "attempt_identity", "attempt_identity_sha256",
+        "attempt_base", "attempt_base_tree",
+    }
+    identity = data.get("attempt_identity") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 1 \
+            or not isinstance(identity, dict):
+        fail(f"{subject} has malformed frozen attempt authority")
+    identity_required = {
+        "lot", "task", "attempt", "plan_manifest", "plan_tasks",
+        "plan_ownership_sha256", "contract_sha256", "retry",
+    }
+    if set(identity) != identity_required \
+            or {key: identity.get(key) for key in ("lot", "task", "attempt")} != context \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(identity.get("plan_manifest"))) \
+            or not construction_positive_integer(identity.get("plan_tasks")) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(identity.get("plan_ownership_sha256"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(identity.get("contract_sha256"))) \
+            or identity.get("retry") is not None \
+            and not re.fullmatch(r"[0-9]+:[0-9a-f]{64}", str(identity.get("retry"))):
+        fail(f"{subject} has malformed frozen attempt identity")
+    digest = sha256_bytes(json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    commit, tree = git_commit_and_tree(data.get("attempt_base"), subject)
+    if data.get("attempt_identity_sha256") != digest \
+            or commit != data.get("attempt_base") \
+            or tree != data.get("attempt_base_tree"):
+        fail(f"{subject} changed its frozen attempt authority")
+    if entries is not None and index is not None \
+            and identity.get("retry") != outstanding_retry_proof(entries[:index], context["lot"]):
+        fail(f"{subject} changed its outstanding retry authority")
+    return context
+
+
+def construction_attempt_terminal(entry, lot, task, attempt_number):
+    return entry.get("event") == "note" \
+        and entry.get("kind") in {"attempt.failed", "attempt.succeeded", "paused", "aborted"} \
+        and entry.get("lot") == lot and entry.get("task") == task \
+        and note_data(entry).get("attempt") == attempt_number
+
+
+def construction_launch_abandonment_account(
+        entries, before, session, subject, *, live=False, recorded=None,
+):
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "session-started"
+              and entry.get("session") == session
+              and entry.get("mode") == "construction"
+              and entry.get("job") == "implementer"]
+    if len(starts) > 1:
+        fail(f"{subject} has more than one implementer start", session)
+    start_index, start = starts[0] if starts else (None, None)
+    retirements = [(index, entry) for index, entry in enumerate(entries[:before])
+                   if entry.get("event") == "session-retired"
+                   and entry.get("session") == session
+                   and entry.get("mode") == "construction"
+                   and entry.get("job") == "implementer"]
+    if len(retirements) != 1:
+        fail(f"{subject} requires one exact implementer retirement", session)
+    retired_index, retired = retirements[0]
+    if start_index is not None and retired_index <= start_index:
+        fail(f"{subject}'s retirement precedes its implementer start")
+    if retired.get("status") != "failed" \
+            or retired.get("archived") is not True or retired.get("hidden") is not True:
+        fail(f"{subject} requires one failed, archived and hidden implementer")
+    context_source = start if start is not None else retired
+    context = validate_construction_session_start(
+        start, subject, entries=entries, index=start_index,
+    ) if start is not None else {
+        key: retired.get(key) for key in ("lot", "task", "attempt")
+    }
+    if start is None and (
+        retired.get("mode") != "construction" or retired.get("job") != "implementer"
+        or not isinstance(retired.get("lot"), str)
+        or not construction_positive_integer(retired.get("task"))
+        or not construction_positive_integer(retired.get("attempt"))
+    ):
+        fail(f"{subject} has malformed retired implementer identity")
+    if any(context_source.get(key) != retired.get(key)
+           for key in ("lot", "task", "attempt")):
+        fail(f"{subject}'s start and retirement name different attempts")
+    lot, task, attempt_number = context["lot"], context["task"], context["attempt"]
+    if any(construction_attempt_terminal(entry, lot, task, attempt_number)
+           for entry in entries[:before]):
+        fail(f"{subject} cannot replace a real attempt terminal")
+    if any(entry.get("event") == "subagent-started"
+           and entry.get("kind") in {"design-checker", "code-checker", "diagnostic"}
+           and entry.get("lot") == lot and entry.get("task") == task
+           and entry.get("attempt") == attempt_number for entry in entries[:before]):
+        fail(f"{subject} cannot discard checker work from the orphan launch")
+    if any(entry.get("event") == "note" and entry.get("kind") == "attempt.launch.abandoned"
+           and note_data(entry).get("session") == session for entry in entries[:before]):
+        fail(f"{subject} repeats an existing orphan-launch terminal")
+
+    if live:
+        for name in ("attempt-in-flight", "attempt-in-flight.tmp"):
+            if os.path.lexists(os.path.join(WORKSPACE, name)):
+                fail(f"{subject} cannot abandon a launch while {name} exists")
+        dirty = subprocess.run(
+            ["git", "-C", REPO, "status", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        if dirty.returncode != 0 or dirty.stdout:
+            fail(f"{subject} requires one clean repository tree", dirty.stdout or dirty.stderr)
+        head, tree = git_commit_and_tree("HEAD", subject)
+        base_ref = f"refs/bwr/{Path(WORKSPACE).name}/{lot}/attempt-base"
+        attempt_base, _ = git_commit_and_tree(base_ref, subject)
+        if attempt_base != head:
+            fail(f"{subject}'s current HEAD differs from its unclaimed attempt-base")
+        ref_root = f"refs/bwr/{Path(WORKSPACE).name}/{lot}"
+        for ref in (f"{ref_root}/task-{task}-try-{attempt_number}", f"{ref_root}/task-{task}"):
+            present = subprocess.run(
+                ["git", "-C", REPO, "rev-parse", "--verify", "--quiet", ref],
+                capture_output=True, text=True,
+            )
+            if present.returncode == 0:
+                fail(f"{subject} cannot abandon a launch that owns {ref}")
+        report = os.path.join(
+            WORKSPACE, "reports", "construction",
+            f"{lot}-task-{task}-try-{attempt_number}.md",
+        )
+        if os.path.lexists(report):
+            fail(f"{subject} cannot abandon a launch with an attempt report")
+    else:
+        data = recorded if isinstance(recorded, dict) else {}
+        head, tree = git_commit_and_tree(data.get("head"), subject)
+        attempt_base = data.get("attempt_base")
+        if head != data.get("head") or tree != data.get("tree") \
+                or attempt_base != head:
+            fail(f"{subject} changed its frozen clean repository account")
+
+    return {
+        "schema": 1,
+        "reason": "missing-attempt-identity",
+        "session": session,
+        "lot": lot,
+        "task": task,
+        "attempt": attempt_number,
+        "started": journal_line_proof(start_index) if start_index is not None else None,
+        "retired": journal_line_proof(retired_index),
+        "head": head,
+        "tree": tree,
+        "attempt_base": attempt_base,
+        "retry": outstanding_retry_proof(entries[:before], lot),
+    }
+
+
+def validate_construction_launch_abandonment(entries, index, entry, subject):
+    if entry.get("event") != "note" or entry.get("kind") != "attempt.launch.abandoned" \
+            or entry.get("mode") != "construction" or entry.get("job") != "controller":
+        fail(f"{subject} has malformed terminal context")
+    data = note_data(entry)
+    required = {
+        "schema", "reason", "session", "lot", "task", "attempt", "started",
+        "retired", "head", "tree", "attempt_base", "retry",
+    }
+    if set(data) != required or data.get("schema") != 1 \
+            or data.get("reason") != "missing-attempt-identity" \
+            or any(entry.get(key) != data.get(key) for key in ("lot", "task", "attempt")):
+        fail(f"{subject} has malformed terminal data")
+    expected = construction_launch_abandonment_account(
+        entries, index, data.get("session"), subject, live=False, recorded=data,
+    )
+    if data != expected:
+        fail(f"{subject} changed its exact orphan-launch account", expected)
+    return expected
+
+
+def validate_construction_launch_candidate(entries, lot, task, attempt_number, subject):
+    if not isinstance(lot, str) or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot) \
+            or not construction_positive_integer(task) \
+            or not construction_positive_integer(attempt_number):
+        fail(f"{subject} has malformed attempt identity")
+    abandonments = {}
+    for index, entry in enumerate(entries):
+        if entry.get("event") != "note" or entry.get("kind") != "attempt.launch.abandoned":
+            continue
+        data = validate_construction_launch_abandonment(
+            entries, index, entry, "a durable orphan-launch terminal",
+        )
+        key = (data["lot"], data["task"], data["attempt"], data["session"])
+        if key in abandonments:
+            fail(f"{subject} has duplicate orphan-launch terminals", key)
+        abandonments[key] = data
+
+    seen = set()
+    orphan_sessions = []
+    for entry_index, entry in enumerate(entries):
+        if entry.get("event") == "session-started" \
+                and entry.get("mode") == "construction" \
+                and entry.get("job") == "implementer" \
+                and entry.get("lot") == lot and entry.get("task") == task:
+            context = validate_construction_session_start(
+                entry, "a durable construction implementer start",
+                entries=entries, index=entry_index,
+            )
+            number = context["attempt"]
+            seen.add(number)
+            owner = (lot, task, number, entry.get("session"))
+            terminal = any(construction_attempt_terminal(candidate, lot, task, number)
+                           for candidate in entries)
+            retired = [candidate for candidate in entries
+                       if candidate.get("event") == "session-retired"
+                       and candidate.get("session") == entry.get("session")
+                       and candidate.get("mode") == "construction"
+                       and candidate.get("job") == "implementer"
+                       and candidate.get("lot") == lot and candidate.get("task") == task
+                       and candidate.get("attempt") == number
+                       and candidate.get("status") in {"done", "failed", "cancelled", "superseded"}]
+            if len(retired) != 1 or not terminal and owner not in abandonments:
+                orphan_sessions.append(entry.get("session"))
+        elif entry.get("event") == "session-retired" \
+                and entry.get("mode") == "construction" \
+                and entry.get("job") == "implementer" \
+                and entry.get("lot") == lot and entry.get("task") == task \
+                and construction_positive_integer(entry.get("attempt")):
+            seen.add(entry["attempt"])
+            owner = (lot, task, entry["attempt"], entry.get("session"))
+            if not any(construction_attempt_terminal(candidate, lot, task, entry["attempt"])
+                       for candidate in entries) \
+                    and owner not in abandonments:
+                orphan_sessions.append(entry.get("session"))
+        elif entry.get("event") == "note" \
+                and entry.get("kind") in {"attempt.failed", "attempt.succeeded", "paused", "aborted"} \
+                and entry.get("lot") == lot and entry.get("task") == task \
+                and construction_positive_integer(note_data(entry).get("attempt")):
+            seen.add(note_data(entry)["attempt"])
+    if orphan_sessions:
+        fail(f"{subject} has an implementer launch with no attempt identity or terminal",
+             orphan_sessions)
+    highest = max(seen, default=0)
+    if attempt_number != highest + 1:
+        fail(f"{subject} must use the next attempt number",
+             {"expected": highest + 1, "actual": attempt_number})
+    return highest
+
+
 def diagnostic_attempt_identity(entries, context, subject):
     lot, task = context.get("lot"), context.get("task")
     if not isinstance(lot, str) or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot) \
@@ -5611,6 +5898,14 @@ def validate_attempt_succeeded_entry(entries, index, entry):
 
 def validate_construction_verdict_history(entries):
     for index, entry in enumerate(entries):
+        if entry.get("event") == "session-started" \
+                and entry.get("mode") == "construction" \
+                and entry.get("job") == "implementer":
+            validate_construction_session_start(
+                entry, "the durable construction implementer start",
+                entries=entries, index=index,
+            )
+    for index, entry in enumerate(entries):
         if entry.get("event") != "note" or entry.get("kind") != "verdict.consumed":
             continue
         check = note_data(entry).get("check")
@@ -5632,6 +5927,10 @@ def validate_construction_verdict_history(entries):
             validate_attempt_failed_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "attempt.succeeded":
             validate_attempt_succeeded_entry(entries, index, entry)
+        elif entry.get("event") == "note" and entry.get("kind") == "attempt.launch.abandoned":
+            validate_construction_launch_abandonment(
+                entries, index, entry, "the durable orphan-launch terminal",
+            )
         elif entry.get("event") == "note" and entry.get("kind") == "plan.written":
             validate_plan_written_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") in {"paused", "aborted"} \
@@ -7877,6 +8176,8 @@ def validate_conflict_partial(notes, kind, data, text):
 def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None, context=None):
     notes = journal_entries()
     context = context or {}
+    if kind == "attempt.launch.abandoned":
+        fail("attempt.launch.abandoned is helper-owned; use construction-launch-abandoned")
     if kind == "attempt.failed":
         data = normalize_attempt_failed(notes, data, context)
     elif kind == "attempt.succeeded":
@@ -8383,6 +8684,24 @@ def cmd_session_started(args):
     me = whoami()
     target = created_session(args.session_id)
     context = context_of(target)
+    data = None
+    if context.get("mode") == "construction" and context.get("job") == "implementer":
+        entries = journal_entries()
+        validate_construction_launch_candidate(
+            entries, context.get("lot"), context.get("task"), context.get("attempt"),
+            "the construction implementer start",
+        )
+        data = construction_session_start_account(
+            context, "the construction implementer start",
+        )
+        validate_construction_session_start(
+            {
+                "event": "session-started", "session": args.session_id,
+                "data": data, **context,
+            },
+            "the construction implementer start",
+            entries=entries, index=len(entries),
+        )
     if context.get("mode") == "amendment" and context.get("mandate") == "reach":
         sweep = context.get("round")
         entries = journal_entries()
@@ -8401,7 +8720,40 @@ def cmd_session_started(args):
             "the Reach reviewer start",
         )
     append_event(me["session_id"], "session-started",
-                 session=args.session_id, **context)
+                 session=args.session_id, data=data, **context)
+
+
+def cmd_construction_launch_abandoned(args):
+    me = whoami()
+    caller = caller_context(me)
+    target = created_session(args.session_id)
+    target_context = context_of(target)
+    target_status = (((target.get("annotations") or {}).get("bwr") or {}).get("status"))
+    if caller.get("mode") != "construction" or caller.get("job") != "controller" \
+            or target_context.get("mode") != "construction" \
+            or target_context.get("job") != "implementer" \
+            or caller.get("lot") != target_context.get("lot") \
+            or target_status != "failed":
+        fail("the orphan-launch terminal requires its exact failed construction owner")
+    entries = journal_entries()
+    validate_construction_verdict_history(entries)
+    data = construction_launch_abandonment_account(
+        entries, len(entries), args.session_id,
+        "the orphan-launch terminal", live=True,
+    )
+    append_event(
+        me["session_id"], "note", kind="attempt.launch.abandoned",
+        mode="construction", lot=data["lot"], task=data["task"],
+        attempt=data["attempt"], job="controller", data=data,
+    )
+
+
+def cmd_construction_launch_check(args):
+    validate_construction_launch_candidate(
+        journal_entries(), args.lot, args.task, args.attempt,
+        "the construction attempt start",
+    )
+    print(args.attempt)
 
 
 def cmd_session_status(args):
@@ -9032,6 +9384,16 @@ def build_parser():
     sp = sub.add_parser("session-started", help="record a session the caller just created")
     sp.add_argument("session_id")
     sp.set_defaults(func=cmd_session_started)
+
+    sp = sub.add_parser("construction-launch-abandoned", help=argparse.SUPPRESS)
+    sp.add_argument("session_id")
+    sp.set_defaults(func=cmd_construction_launch_abandoned)
+
+    sp = sub.add_parser("construction-launch-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("attempt", type=positive_int)
+    sp.set_defaults(func=cmd_construction_launch_check)
 
     sp = sub.add_parser("session-status", help="change a session's bwr.status, and record it")
     sp.add_argument("session_id")

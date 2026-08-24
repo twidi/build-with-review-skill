@@ -171,8 +171,10 @@ Nothing was marked and no session exists."
 # journals a line carrying the lot, the task and the attempt: a rewound
 # success (attempt.succeeded — the task ref has no K and the rewind moves it
 # aside), an untouched pause or abort (paused/aborted — no try ref was
-# posted), a reportless failure (attempt.failed — the report never landed).
-# Any of those lines is a used K, and without this check the next launch
+# posted), a reportless failure (attempt.failed — the report never landed),
+# or a physical implementer whose missing identity was closed through the
+# helper-owned attempt.launch.abandoned terminal. Any of those lines is a used K,
+# and without this check the next launch
 # would re-allocate it and inherit the old attempt's bounded spends. One
 # pass, one process — never `grep | grep -q`: under pipefail a successful
 # lookup would read false. The attempt token is matched with its closing
@@ -226,6 +228,10 @@ $RESULT
 Only that closer or the exact tail it printed may remove the identity. Never replace it.
 Nothing was marked and no session exists."
 fi
+"$PROGRESS" construction-launch-check "$LOT" "$N" "$K" >/dev/null \
+    || die "the attempt number does not follow one complete prior implementer lifecycle.
+Retire and durably abandon any session whose attempt identity was never published before
+starting the next number. Nothing was marked and no session exists."
 # The MARK first, the identity SECOND — the order is load-bearing. The identity
 # is the durable claim that a start completed; written before the mark, a cut
 # between the two leaves the new identity beside the PREVIOUS attempt's

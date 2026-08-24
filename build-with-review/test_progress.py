@@ -1695,6 +1695,262 @@ def session_started_unknown_target_fails_loudly():
 
 
 @test
+def construction_session_started_requires_the_exact_attempt_identity():
+    cfg = default_config()
+    cfg["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1, "job": "implementer", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "task": 3,
+        "attempt": 1, "status": "working",
+    }
+    set_config(cfg)
+
+    refused(run_progress("session-started", TARGET))
+
+    seed_active_attempt(attempt=1)
+    started = run_progress("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+    line = journal_lines()[-1]
+    check(line["event"] == "session-started" and line["session"] == TARGET, line)
+    check(line["data"]["schema"] == 1, line)
+    check(line["data"]["attempt_identity"]["attempt"] == 1, line)
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse", "refs/bwr/test-run/lot-1/attempt-base",
+    ], text=True).strip()
+    check(line["data"]["attempt_base"] == base, line)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+    changed = journal_lines()
+    changed[0]["data"]["attempt_base_tree"] = "0" * 40
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_after(
+        run_progress("construction-verdict-check", "history"),
+        len(changed), "a changed historical implementer start",
+    )
+
+
+@test
+def construction_orphan_launch_requires_retirement_and_one_exact_abandonment():
+    seed_active_attempt()
+    os.remove(os.path.join(WORKSPACE, "attempt-in-flight"))
+    cfg = default_config()
+    cfg["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1, "job": "implementer", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "task": 3,
+        "attempt": 2, "status": "working",
+    }
+    set_config(cfg)
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        target.write(json.dumps({
+            "ts": "t", "by": CALLER, "event": "session-started", "session": TARGET,
+            "mode": "construction", "lot": "lot-1", "task": 3, "attempt": 2,
+            "job": "implementer",
+        }, separators=(",", ":")) + "\n")
+
+    before = len(journal_lines())
+    refused_after(
+        run_progress("construction-launch-check", "lot-1", "3", "3"),
+        before, "a replacement before the orphan owner is retired",
+    )
+    retired = run_progress("session-retired", TARGET, "failed", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    before = len(journal_lines())
+    refused_after(
+        run_progress("construction-launch-check", "lot-1", "3", "3"),
+        before, "a replacement before the orphan launch is durably abandoned",
+    )
+
+    cfg["sessions"][TARGET]["annotations"]["bwr"]["status"] = "failed"
+    set_config(cfg)
+    refused_after(
+        run_progress(
+            "note", "attempt.launch.abandoned",
+            "--data", '{"reason":"missing-attempt-identity"}',
+        ),
+        len(journal_lines()), "a generic orphan-launch terminal",
+    )
+    abandoned = run_progress("construction-launch-abandoned", TARGET)
+    check(abandoned.returncode == 0, abandoned.stdout + abandoned.stderr)
+    terminal = journal_lines()[-1]
+    check(terminal.get("kind") == "attempt.launch.abandoned", terminal)
+    check(terminal["data"]["session"] == TARGET
+          and terminal["data"]["attempt"] == 2
+          and terminal["data"]["started"] is not None
+          and terminal["data"]["retired"] is not None, terminal)
+    admitted = run_progress("construction-launch-check", "lot-1", "3", "3")
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    refused_after(
+        run_progress("construction-launch-check", "lot-1", "3", "2"),
+        len(journal_lines()), "reuse of the abandoned attempt number",
+    )
+    refused_after(
+        run_progress("construction-launch-abandoned", TARGET),
+        len(journal_lines()), "a duplicate orphan-launch terminal",
+    )
+
+    durable = journal_lines()
+    retired_index = next(
+        index for index, entry in enumerate(durable)
+        if entry.get("event") == "session-retired" and entry.get("session") == TARGET
+    )
+    durable[retired_index]["status"] = "cancelled"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in durable:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_after(
+        run_progress("construction-launch-check", "lot-1", "3", "3"),
+        len(durable), "a changed historical orphan retirement",
+    )
+
+
+@test
+def construction_unrecorded_orphan_launch_can_only_end_as_abandoned():
+    seed_active_attempt()
+    os.remove(os.path.join(WORKSPACE, "attempt-in-flight"))
+    cfg = default_config()
+    cfg["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1, "job": "implementer", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "task": 3,
+        "attempt": 2, "status": "working",
+    }
+    set_config(cfg)
+    retired = run_progress("session-retired", TARGET, "failed", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    cfg["sessions"][TARGET]["annotations"]["bwr"]["status"] = "failed"
+    set_config(cfg)
+
+    abandoned = run_progress("construction-launch-abandoned", TARGET)
+    check(abandoned.returncode == 0, abandoned.stdout + abandoned.stderr)
+    terminal = journal_lines()[-1]
+    check(terminal["data"]["started"] is None, terminal)
+    admitted = run_progress("construction-launch-check", "lot-1", "3", "3")
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+
+
+@test
+def construction_orphan_launch_refuses_any_owned_attempt_work():
+    seed_active_attempt()
+    cfg = default_config()
+    cfg["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1, "job": "implementer", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "task": 3,
+        "attempt": 2, "status": "working",
+    }
+    set_config(cfg)
+    retired = run_progress("session-retired", TARGET, "failed", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    cfg["sessions"][TARGET]["annotations"]["bwr"]["status"] = "failed"
+    set_config(cfg)
+    before = len(journal_lines())
+
+    refused_after(
+        run_progress("construction-launch-abandoned", TARGET),
+        before, "an orphan abandonment while the attempt marker exists",
+    )
+    os.remove(os.path.join(WORKSPACE, "attempt-in-flight"))
+
+    candidate = write_project("orphan-candidate.txt", "unowned candidate\n")
+    refused_after(
+        run_progress("construction-launch-abandoned", TARGET),
+        before, "an orphan abandonment with a dirty candidate",
+    )
+    os.remove(candidate)
+
+    report_relative = "reports/construction/lot-1-task-3-try-2.md"
+    write_report(report_relative, "attempt work\n")
+    report = os.path.join(WORKSPACE, *report_relative.split("/"))
+    refused_after(
+        run_progress("construction-launch-abandoned", TARGET),
+        before, "an orphan abandonment with an attempt report",
+    )
+    os.remove(report)
+
+    append_subagent(
+        "subagent-started", "design-checker",
+        mode="construction", lot="lot-1", task=3, attempt=2, round=1,
+    )
+    refused_after(
+        run_progress("construction-launch-abandoned", TARGET),
+        before + 1, "an orphan abandonment after a checker opening",
+    )
+
+
+def seed_two_physical_orphan_owners():
+    other = "other-session-00000000-0000-0000-0000-000000000003"
+    seed_active_attempt()
+    os.remove(os.path.join(WORKSPACE, "attempt-in-flight"))
+    owner = {
+        "schema": 1, "job": "implementer", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "task": 3,
+        "attempt": 2, "status": "working",
+    }
+    cfg = default_config()
+    cfg["sessions"][TARGET]["annotations"]["bwr"] = dict(owner)
+    cfg["sessions"][other] = {"id": other, "annotations": {"bwr": dict(owner)}}
+    set_config(cfg)
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        target.write(json.dumps({
+            "ts": "t", "by": CALLER, "event": "session-started", "session": TARGET,
+            "mode": "construction", "lot": "lot-1", "task": 3, "attempt": 2,
+            "job": "implementer",
+        }, separators=(",", ":")) + "\n")
+    for session in (TARGET, other):
+        retired = run_progress("session-retired", session, "failed", "--archive", "--hide")
+        check(retired.returncode == 0, retired.stdout + retired.stderr)
+        cfg["sessions"][session]["annotations"]["bwr"]["status"] = "failed"
+    set_config(cfg)
+    return other
+
+
+@test
+def construction_orphan_launch_closes_each_physical_owner_a_then_b():
+    other = seed_two_physical_orphan_owners()
+    first = run_progress("construction-launch-abandoned", TARGET)
+    check(first.returncode == 0, first.stdout + first.stderr)
+    refused_after(
+        run_progress("construction-launch-check", "lot-1", "3", "3"),
+        len(journal_lines()), "reuse of A's terminal for physical owner B",
+    )
+    second = run_progress("construction-launch-abandoned", other)
+    check(second.returncode == 0, second.stdout + second.stderr)
+    admitted = run_progress("construction-launch-check", "lot-1", "3", "3")
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    changed = journal_lines()
+    first_terminal = next(
+        entry for entry in changed
+        if entry.get("kind") == "attempt.launch.abandoned"
+        and entry.get("data", {}).get("session") == TARGET
+    )
+    first_terminal["data"]["session"] = other
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_after(
+        run_progress("construction-verdict-check", "history"),
+        len(changed), "a changed physical-owner identity",
+    )
+
+
+@test
+def construction_orphan_launch_closes_each_physical_owner_b_then_a():
+    other = seed_two_physical_orphan_owners()
+    first = run_progress("construction-launch-abandoned", other)
+    check(first.returncode == 0, first.stdout + first.stderr)
+    refused_after(
+        run_progress("construction-launch-check", "lot-1", "3", "3"),
+        len(journal_lines()), "reuse of B's terminal for physical owner A",
+    )
+    second = run_progress("construction-launch-abandoned", TARGET)
+    check(second.returncode == 0, second.stdout + second.stderr)
+    admitted = run_progress("construction-launch-check", "lot-1", "3", "3")
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+
+
+@test
 def session_status_changes_and_records():
     line = the_line(run_progress("session-status", TARGET, "blocked"))
     check(line["event"] == "session-status" and line["status"] == "blocked", line)

@@ -41,6 +41,11 @@ bounded wait still refuses, keep the exact id, create no replacement, and retry 
 same `session-started` call after the child becomes readable. The refused call journals
 nothing.
 
+A Construction implementer's `session-started` also requires the exact live
+`attempt-in-flight` identity. It freezes that identity and its attempt-base account. If
+the physical session exists without the marker, do not recreate the marker. Stop and
+retire that session. The Construction mode gives the one helper-owned abandonment route.
+
 ---
 
 ## Two things you never pass

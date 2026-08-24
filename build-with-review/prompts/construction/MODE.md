@@ -966,8 +966,10 @@ one** — a failure, a pause, a stop, a silent replacement, **or a success whose
 was later rewound**. A number is never reused: the try ref and the failure report
 carry a preserved attempt's number, **and every closer journals a line carrying the
 lot, the task and the attempt** — `attempt.succeeded`, `attempt.failed`, `paused`,
-`aborted` — which is the only trace left by a rewound success, an untouched stop, or
-a reportless failure. The start script refuses a number that left any of those traces.
+`aborted`, or helper-owned `attempt.launch.abandoned` — which is the only trace left by a
+rewound success, an untouched stop, a reportless failure, or a physical session that
+never acquired a valid attempt identity. The start script refuses a reused or skipped
+number and any prior implementer lifecycle without one exact terminal retirement.
 
 **Mark where the attempt begins first, before the session that will run it exists:**
 
@@ -1111,6 +1113,10 @@ the repository copy is `plan-publish.sh`'s business, and a past task is read wit
 ```
 progress.py session-started <id>
 ```
+
+For a Construction implementer, `session-started` first consumes the exact
+`attempt-in-flight` identity and freezes its attempt-base account in the journal. A
+physical implementer without that marker never becomes a valid attempt owner.
 
 **A `create_session` whose result was lost resolves by `SKILL.md`'s query rule** —
 the exact annotations, and route on the count. What is specific here: the mark and
@@ -1570,6 +1576,25 @@ The **missing start marker** row is a non-routine human judgement. Before its wi
 `SKILL.md`'s **human-judgment presentation rule** with a workflow orientation. Name the
 task, session, observed branch and tree, absent identity boundary, attribution risk, and
 the consequence of every available answer. Do not infer or recreate the missing marker.
+
+When the human selects safe abandonment, do not attach the existing session to a
+retroactive marker. Stop its process first. Then retire that exact session and publish the
+one helper-owned terminal:
+
+```sh
+progress.py session-retired <id> failed --archive --hide
+progress.py construction-launch-abandoned <id>
+```
+
+The helper requires no marker or temporary marker, no checker opening, no failure report,
+no result ref, a clean tree, and `HEAD` equal to the unclaimed attempt-base. It binds the
+exact optional `session-started`, required retirement, commit, tree and attempt number.
+It never attributes work to the orphan session. A generic note cannot replace it.
+
+The abandoned number is spent. Run `attempt-started.sh` with the next number. Use the
+retry proof selected by `construction-retry-check`; use `-` when the preceding real
+failure carries no accepted checker obligation. Create a fresh implementer. Never resume
+the abandoned session.
 
 **The dirty-tree row grants one return, and the grant is journaled as it is given** —
 `progress.py note bound.spent --task <N> --text "dirty Done sent back - attempt <K>"` —
