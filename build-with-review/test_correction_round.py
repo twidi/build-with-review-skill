@@ -9,6 +9,7 @@ import pathlib
 import pickle
 import re
 import stat
+import sys
 import tempfile
 import traceback
 
@@ -20,7 +21,11 @@ TESTS = []
 def load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -672,6 +677,436 @@ def review_generation_digest_has_one_finite_exact_preimage():
             pass
         else:
             raise AssertionError("accepted an invalid built-generation preimage")
+
+
+def correction_obligation_source(module, *, checker="design", accepted_ids=None):
+    return module.source_account({
+        "source_proof": f"12:{'a' * 64}",
+        "source_unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+        "source_contract_authority_sha256": "b" * 64,
+        "source_execution_authority_sha256": "c" * 64,
+        "owner_task": 2,
+        "checker": checker,
+        "accepted_ids": accepted_ids or [1, 3],
+        "result_sha256": "d" * 64,
+        "settlement": f"13:{'e' * 64}",
+        "required_consumer_phase": f"first-{checker}-manifest",
+    })
+
+
+def correction_contract_map_assignment(module):
+    return {
+        "unit": {
+            "kind": "task-contract-map",
+            "operation": "f" * 64,
+            "work_unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+            "target_task": 2,
+            "document_kind": "correction-artifact",
+        },
+        "task": None,
+        "phase": "publish-task-contract",
+        "owner": "task-contract-map",
+    }
+
+
+@test
+def final_checker_transition_has_one_finite_exact_preimage():
+    module = load_module(
+        "final_checker_obligations",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    empty = module.empty_set()
+    source = correction_obligation_source(module)
+    assignment = correction_contract_map_assignment(module)
+    transition, output = module.materialize_transition(
+        empty,
+        additions=[{"source": source, "assignment": assignment}],
+        dispositions=[],
+        transfer_kind="final-checker-source",
+    )
+
+    replay = module.validate_transition(
+        json.loads(json.dumps(empty)),
+        json.loads(json.dumps(transition)),
+        transfer_kind="final-checker-source",
+    )
+    check(replay == output, "independent transition replay changed the output set")
+    check(transition["input_sha256"] == module.set_sha256(empty), transition)
+    check(transition["output_sha256"] == module.set_sha256(output), transition)
+    check(
+        output["entries"][0]["assignment"]["mapping_proof"]
+        == transition["transition_id"],
+        output,
+    )
+    check(output["entries"][0]["transfers"] == [{
+        "kind": "addition",
+        "transition_id": transition["transition_id"],
+        "from": None,
+        "to": output["entries"][0]["assignment"],
+    }], output)
+
+    mutations = []
+    for path, value in (
+        (("transition_id",), "0" * 64),
+        (("output_sha256",), "1" * 64),
+        (("additions", 0, "assignment", "mapping_proof"), "2" * 64),
+        (("dispositions",), [{"foreign": True}]),
+    ):
+        changed = json.loads(json.dumps(transition))
+        cursor = changed
+        for key in path[:-1]:
+            cursor = cursor[key]
+        cursor[path[-1]] = value
+        mutations.append(changed)
+    mutations.append({**transition, "payload_sha256": "3" * 64})
+    for changed in mutations:
+        try:
+            module.validate_transition(empty, changed, transfer_kind="final-checker-source")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted a changed final-checker transition")
+
+
+@test
+def final_checker_transition_composes_assignment_and_consumption():
+    module = load_module(
+        "final_checker_obligations_composition",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    source = correction_obligation_source(module, checker="code", accepted_ids=[2])
+    first, mapped = module.materialize_transition(
+        module.empty_set(),
+        additions=[{
+            "source": source,
+            "assignment": correction_contract_map_assignment(module),
+        }],
+        dispositions=[],
+        transfer_kind="final-checker-source",
+    )
+    obligation_id = source["obligation_id"]
+    task_assignment = {
+        "unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+        "task": 2,
+        "phase": "first-code-manifest",
+        "owner": "task",
+        "task_contract_sha256": "4" * 64,
+    }
+    second, assigned = module.materialize_transition(
+        mapped,
+        additions=[],
+        dispositions=[{
+            "obligation_id": obligation_id,
+            "outcome": "deferred",
+            "assignment": task_assignment,
+            "evidence": None,
+        }],
+        transfer_kind="contract-mapped",
+    )
+    entry = assigned["entries"][0]
+    check(entry["source"] == source, "the immutable obligation source changed")
+    check(len(entry["transfers"]) == 2, entry)
+    check(entry["transfers"][1]["from"] == mapped["entries"][0]["assignment"], entry)
+    check(entry["transfers"][1]["to"] == entry["assignment"], entry)
+    check(entry["assignment"]["mapping_proof"] == second["transition_id"], entry)
+
+    evidence = {
+        "manifest": f"20:{'5' * 64}",
+        "success": f"21:{'6' * 64}",
+    }
+    third, consumed = module.materialize_transition(
+        assigned,
+        additions=[],
+        dispositions=[{
+            "obligation_id": obligation_id,
+            "outcome": "consumed",
+            "assignment": None,
+            "evidence": evidence,
+        }],
+        transfer_kind="retry-consumed",
+    )
+    check(consumed == module.empty_set(), consumed)
+    check(
+        module.validate_transition(assigned, third, transfer_kind="retry-consumed")
+        == consumed,
+        third,
+    )
+
+    stale = json.loads(json.dumps(second))
+    stale["dispositions"][0]["assignment"]["mapping_proof"] = first["transition_id"]
+    try:
+        module.validate_transition(mapped, stale, transfer_kind="contract-mapped")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted a stale changed-assignment mapping proof")
+
+
+@test
+def future_final_checker_assignment_owners_refuse_until_their_producers_exist():
+    module = load_module(
+        "final_checker_obligations_future_owners",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    source = correction_obligation_source(module)
+    empty = module.empty_set()
+    future_assignments = [
+        {
+            "unit": {"foreign": "unit"},
+            "task": None,
+            "phase": "anything",
+            "owner": "escalation-tail",
+        },
+        {
+            "unit": {"kind": "escalation-tail"},
+            "task": None,
+            "phase": "publish-escalation-tail",
+            "owner": "escalation-tail",
+        },
+        {
+            "unit": {"kind": "escalation-tail", "lot": "lot-1", "foreign": True},
+            "task": None,
+            "phase": "wrong-phase",
+            "owner": "escalation-tail",
+            "consumer_requirement": {"foreign": True},
+        },
+        {
+            "unit": {"x": 1},
+            "task": None,
+            "phase": "wrong-phase",
+            "owner": "sublot-plan",
+            "consumer_requirement": {"foreign": True},
+        },
+        {
+            "unit": {"kind": "sublot-plan"},
+            "task": None,
+            "phase": "publish-sublot-plan",
+            "owner": "sublot-plan",
+        },
+        {
+            "unit": {"kind": "sublot-plan", "lot": "lot-1", "extra": 1},
+            "task": None,
+            "phase": "publish-sublot-plan",
+            "owner": "sublot-plan",
+            "consumer_requirement": {"kind": "unknown"},
+        },
+    ]
+
+    for assignment in future_assignments:
+        for materialized in (False, True):
+            candidate = json.loads(json.dumps(assignment))
+            if materialized:
+                candidate["mapping_proof"] = "9" * 64
+            try:
+                module.validate_assignment(candidate, materialized=materialized)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(
+                    f"accepted future {assignment['owner']} assignment: {candidate}"
+                )
+
+    for assignment in future_assignments[:1] + future_assignments[3:4]:
+        transition_id = "8" * 64
+        materialized = {**json.loads(json.dumps(assignment)), "mapping_proof": transition_id}
+        output = {
+            "schema": 1,
+            "entries": [{
+                "source": source,
+                "assignment": materialized,
+                "transfers": [{
+                    "kind": "addition",
+                    "transition_id": transition_id,
+                    "from": None,
+                    "to": materialized,
+                }],
+            }],
+        }
+        try:
+            module.validate_set(output)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted materialized future {assignment['owner']} set")
+
+        try:
+            module.materialize_transition(
+                empty,
+                additions=[{"source": source, "assignment": assignment}],
+                dispositions=[],
+                transfer_kind="future-owner",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"materialized future {assignment['owner']} transition")
+
+        semantic = {
+            "schema": 1,
+            "input_sha256": module.set_sha256(empty),
+            "additions": [{"source": source, "assignment": assignment}],
+            "dispositions": [],
+        }
+        legacy_transition_id = module.canonical_sha256(semantic)
+        legacy_assignment = {
+            **json.loads(json.dumps(assignment)),
+            "mapping_proof": legacy_transition_id,
+        }
+        legacy_output = {
+            "schema": 1,
+            "entries": [{
+                "source": source,
+                "assignment": legacy_assignment,
+                "transfers": [{
+                    "kind": "addition",
+                    "transition_id": legacy_transition_id,
+                    "from": None,
+                    "to": legacy_assignment,
+                }],
+            }],
+        }
+        legacy_transition = {
+            **semantic,
+            "transition_id": legacy_transition_id,
+            "additions": [{"source": source, "assignment": legacy_assignment}],
+            "output_sha256": module.canonical_sha256(legacy_output),
+        }
+        try:
+            module.validate_transition(
+                empty, legacy_transition, transfer_kind="future-owner",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"replayed future {assignment['owner']} transition")
+
+    compatible = [
+        {
+            "unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+            "task": 2,
+            "phase": "first-design-manifest",
+            "owner": "task",
+            "task_contract_sha256": "4" * 64,
+        },
+        correction_contract_map_assignment(module),
+        {
+            "unit": {"kind": "amendment", "number": 2},
+            "task": None,
+            "phase": "publish-post-amendment-return",
+            "owner": "amendment-return",
+        },
+    ]
+    for assignment in compatible:
+        check(
+            module.validate_assignment(assignment, materialized=False) == assignment,
+            assignment,
+        )
+        materialized = {**assignment, "mapping_proof": "7" * 64}
+        check(module.semantic_assignment(materialized) == assignment, materialized)
+
+
+@test
+def amendment_return_consumer_requirement_refuses_until_its_producer_defines_it():
+    module = load_module(
+        "final_checker_obligations_amendment_return_requirement",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    source = correction_obligation_source(module)
+    empty = module.empty_set()
+    assignment = {
+        "unit": {"kind": "amendment", "number": 2},
+        "task": None,
+        "phase": "publish-post-amendment-return",
+        "owner": "amendment-return",
+        "consumer_requirement": {"foreign": {"shape": True}},
+    }
+
+    try:
+        module.validate_assignment(assignment, materialized=False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted semantic amendment-return consumer requirement")
+
+    transition_id = "8" * 64
+    materialized = {**assignment, "mapping_proof": transition_id}
+    output = {
+        "schema": 1,
+        "entries": [{
+            "source": source,
+            "assignment": materialized,
+            "transfers": [{
+                "kind": "addition",
+                "transition_id": transition_id,
+                "from": None,
+                "to": materialized,
+            }],
+        }],
+    }
+    try:
+        module.validate_set(output)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted materialized amendment-return consumer requirement")
+
+    try:
+        module.materialize_transition(
+            empty,
+            additions=[{"source": source, "assignment": assignment}],
+            dispositions=[],
+            transfer_kind="amendment-return",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("materialized amendment-return consumer requirement")
+
+    semantic = {
+        "schema": 1,
+        "input_sha256": module.set_sha256(empty),
+        "additions": [{"source": source, "assignment": assignment}],
+        "dispositions": [],
+    }
+    legacy_transition_id = module.canonical_sha256(semantic)
+    legacy_assignment = {
+        **json.loads(json.dumps(assignment)),
+        "mapping_proof": legacy_transition_id,
+    }
+    legacy_output = {
+        "schema": 1,
+        "entries": [{
+            "source": source,
+            "assignment": legacy_assignment,
+            "transfers": [{
+                "kind": "addition",
+                "transition_id": legacy_transition_id,
+                "from": None,
+                "to": legacy_assignment,
+            }],
+        }],
+    }
+    legacy_transition = {
+        **semantic,
+        "transition_id": legacy_transition_id,
+        "additions": [{"source": source, "assignment": legacy_assignment}],
+        "output_sha256": module.canonical_sha256(legacy_output),
+    }
+    try:
+        module.validate_transition(
+            empty, legacy_transition, transfer_kind="amendment-return",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("replayed amendment-return consumer requirement")
+
+    compatible = {key: value for key, value in assignment.items()
+                  if key != "consumer_requirement"}
+    check(
+        module.validate_assignment(compatible, materialized=False) == compatible,
+        compatible,
+    )
 
 
 def main():

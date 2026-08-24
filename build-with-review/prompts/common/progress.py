@@ -58,6 +58,7 @@ from correction_authority import (
     EMPTY_FINAL_CHECKER_SET_SHA256,
     CorrectionAuthorityLease,
     WorkspaceFileAnchor,
+    empty_retry_transition,
     generation_sha256,
     normalize_allocation,
     normalize_controller_successor,
@@ -65,6 +66,13 @@ from correction_authority import (
     product_report_path,
     publish_content_object,
     validate_content_object,
+)
+from final_checker_obligations import (
+    empty_set as empty_final_checker_set,
+    materialize_transition as materialize_final_checker_transition,
+    set_sha256 as final_checker_set_sha256,
+    source_account as final_checker_source_account,
+    validate_transition as validate_final_checker_transition,
 )
 
 # The two closed vocabularies. An unknown name is refused: a vocabulary that
@@ -90,7 +98,8 @@ NOTE_KINDS = {
     "design.review.blocked",
     "code.review.resolved", "code.review.blocked",
     "correction.round.allocated", "correction.round.allocation.superseded",
-    "correction.round.opened",
+    "correction.round.opened", "correction.round.revised", "correction.round.built",
+    "final-checker.contract-mapped",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -181,6 +190,9 @@ CORRECTION_AUTHORITY_NOTE_KINDS = {
     "correction.round.allocated",
     "correction.round.allocation.superseded",
     "correction.round.opened",
+    "correction.round.revised",
+    "correction.round.built",
+    "final-checker.contract-mapped",
     "decision.batch.supplemented",
     "decision.conflict.opened",
     "decision.conflict.sourced",
@@ -211,12 +223,23 @@ CORRECTION_PRODUCT_AUTHORITY_NOTE_KINDS = {
 }
 
 HELPER_OWNED_CORRECTION_NOTE_MARKERS = {
+    "attempt.failed": {"correction-attempt-failure-in-progress"},
+    "attempt.succeeded": {"attempt-in-flight"},
+    "rewind.done": {"correction-rewind-in-progress"},
+    "paused": {"correction-attempt-stop-in-progress"},
+    "aborted": {"correction-attempt-stop-in-progress"},
     "correction.round.opened": {"correction-round-open-in-progress"},
+    "correction.round.revised": {"correction-round-revision-in-progress"},
+    "correction.round.built": {"correction-round-built-in-progress"},
+    "final-checker.contract-mapped": {"final-checker-contract-map-in-progress"},
     "correction.round.allocation.superseded": {
         "correction-allocation-supersede-in-progress",
         "correction-product-authority-in-progress",
     },
 }
+HELPER_OWNED_CORRECTION_NOTE_MARKERS["correction.round.revised"].add(
+    "final-checker-contract-map-in-progress"
+)
 CORRECTION_VOID_MARKER = "correction-round-void-in-progress"
 
 
@@ -2775,11 +2798,12 @@ def construction_positive_integer(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def active_attempt_identity(context, subject, *, allow_closer=False):
+def active_attempt_identity(
+    context, subject, *, allow_closer=False, include_completion=False,
+):
     lot, task, attempt_number = context.get("lot"), context.get("task"), context.get("attempt")
     if not isinstance(lot, str) or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot) \
-            or not construction_positive_integer(task) \
-            or not construction_positive_integer(attempt_number):
+            or not construction_positive_integer(task):
         fail(f"{subject} has no exact construction attempt context")
     path = os.path.join(WORKSPACE, "attempt-in-flight")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -2803,19 +2827,29 @@ def active_attempt_identity(context, subject, *, allow_closer=False):
             fail(f"{subject}'s correction attempt identity is malformed", exc)
         required = {
             "schema", "unit", "unit_authority_sha256", "tree_authority", "task", "attempt",
-            "document", "retry", "design_proof_authority",
+            "attempt_predecessor", "document", "retry", "design_proof_authority",
             "outstanding_final_checker_set_sha256", "assigned_final_checker_obligations",
         }
         unit = marker.get("unit") if isinstance(marker, dict) else None
+        if attempt_number is None and isinstance(marker, dict):
+            attempt_number = marker.get("attempt")
         correction = context.get("correction")
+        if correction is None and isinstance(unit, dict) \
+                and unit.get("kind") == "correction" and unit.get("built") == lot:
+            correction = unit.get("round")
         if set(marker) != required or marker.get("schema") != 2 \
                 or unit != {"kind": "correction", "built": lot, "round": correction} \
                 or not construction_positive_integer(correction) \
+                or not construction_positive_integer(attempt_number) \
                 or marker.get("task") != task or marker.get("attempt") != attempt_number \
-                or marker.get("retry") != "-" or marker.get("design_proof_authority") is not None \
-                or marker.get("outstanding_final_checker_set_sha256") \
-                != EMPTY_FINAL_CHECKER_SET_SHA256 \
-                or marker.get("assigned_final_checker_obligations") != []:
+                or marker.get("retry") != "-" \
+                or marker.get("design_proof_authority") is not None \
+                and not isinstance(marker.get("design_proof_authority"), dict) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(marker.get("outstanding_final_checker_set_sha256")),
+                ) \
+                or not isinstance(marker.get("assigned_final_checker_obligations"), list):
             fail(f"{subject} does not match the exact correction attempt-in-flight identity")
         resolver = subprocess.run(
             [sys.executable, os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py"),
@@ -2831,6 +2865,18 @@ def active_attempt_identity(context, subject, *, allow_closer=False):
             fail(f"{subject}'s Correction Round resolver returned malformed JSON")
         document = marker.get("document")
         current_task = resolved.get("task") or {}
+        current_entries = journal_entries()
+        current_set = outstanding_final_checker_set(
+            current_entries, len(current_entries), lot, correction, subject,
+        )
+        assigned = assigned_final_checker_obligations(
+            current_set, unit, task, current_task, subject,
+        )
+        _design_authority_index, expected_design_authority = \
+            design_proof_authority_for_assigned_code(
+                current_entries, len(current_entries), current_set, unit, task,
+                current_task, subject,
+            )
         expected_document = {
             "path": resolved.get("workspace_document"),
             "manifest_sha256": resolved.get("task_manifest_sha256"),
@@ -2843,28 +2889,75 @@ def active_attempt_identity(context, subject, *, allow_closer=False):
             if isinstance(document, dict) else None,
         }
         tree_authority = marker.get("tree_authority")
-        if document != expected_document \
-                or marker.get("unit_authority_sha256") != resolved.get("authority", {}).get("sha256") \
-                or tree_authority != resolved.get("tree_authority"):
-            fail(f"{subject}'s correction attempt authority changed")
+        valid_tree_authority = isinstance(tree_authority, dict) \
+            and set(tree_authority) == {"rewind", "commit", "tree", "gate"} \
+            and tree_authority == resolved.get("tree_authority") \
+            and re.fullmatch(r"[0-9a-f]{40,64}", str(tree_authority.get("commit"))) \
+            and re.fullmatch(r"[0-9a-f]{40,64}", str(tree_authority.get("tree"))) \
+            and (tree_authority.get("rewind") is None or re.fullmatch(
+                r"(?:0|[1-9][0-9]*):[0-9a-f]{64}", str(tree_authority.get("rewind")),
+            )) \
+            and (tree_authority.get("gate") is None or re.fullmatch(
+                r"[0-9a-f]{64}", str(tree_authority.get("gate")),
+            ))
+        if document != expected_document:
+            fail(f"{subject}'s correction attempt document authority changed")
+        if marker["outstanding_final_checker_set_sha256"] \
+                != final_checker_set_sha256(current_set) \
+                or marker["assigned_final_checker_obligations"] != assigned:
+            fail(f"{subject}'s correction attempt obligation set changed")
+        if marker["design_proof_authority"] != expected_design_authority:
+            fail(f"{subject}'s correction attempt Design-proof authority changed")
+        if marker.get("unit_authority_sha256") \
+                != resolved.get("authority", {}).get("sha256"):
+            fail(f"{subject}'s correction attempt contract authority changed")
+        if not valid_tree_authority:
+            fail(f"{subject}'s correction attempt tree authority changed")
+        attempt_predecessor = correction_attempt_predecessor_account(
+            current_entries, len(current_entries), lot, correction, task, subject,
+        )
+        if marker.get("attempt_predecessor") != attempt_predecessor:
+            fail(f"{subject}'s correction attempt predecessor changed")
         base_ref = f"{resolved['ref_root']}/attempt-base"
         base = subprocess.run(
             ["git", "-C", REPO, "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
             capture_output=True, text=True,
         )
-        if base.returncode != 0 or base.stdout.strip() != tree_authority.get("commit"):
-            fail(f"{subject} has no exact correction attempt-base ref")
-        return {
+        if base.returncode != 0 or base.stdout.strip() != attempt_predecessor["commit"]:
+            fail(f"{subject} has no exact frozen correction attempt-base ref")
+        execution_authority = {
+            "schema": 1,
+            "contract_authority": marker["unit_authority_sha256"],
+            "tree_authority": tree_authority,
+        }
+        execution_authority_sha256 = hashlib.sha256(json.dumps(
+            execution_authority, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        identity = {
             "lot": lot, "correction": correction, "task": task, "attempt": attempt_number,
             "unit": unit,
             "unit_authority_sha256": marker["unit_authority_sha256"],
-            "execution_authority_sha256": resolved["execution_authority_sha256"],
+            "execution_authority_sha256": execution_authority_sha256,
+            "attempt_predecessor": attempt_predecessor,
             "plan_manifest": document["manifest_sha256"],
             "plan_tasks": resolved["task_count"],
             "plan_ownership_sha256": document["controller_sha256"],
             "contract_sha256": document["task_contract_sha256"],
             "retry": None,
         }
+        if include_completion:
+            identity.update({
+                "design_proof_authority": marker["design_proof_authority"],
+                "outstanding_final_checker_set_sha256": marker[
+                    "outstanding_final_checker_set_sha256"
+                ],
+                "assigned_final_checker_obligations": marker[
+                    "assigned_final_checker_obligations"
+                ],
+            })
+        return identity
+    if not construction_positive_integer(attempt_number):
+        fail(f"{subject} has no exact construction attempt context")
     allowed_lines = {2, 4} if allow_closer else {2}
     match = re.fullmatch(
         r"plan ([0-9a-f]{40,64}) ([1-9][0-9]*) ownership ([0-9a-f]{64}) "
@@ -2908,7 +3001,13 @@ def construction_logical_identity(entries, context, check, round_number, subject
         round_limit = CONSTRUCTION_CHECKER_ROUNDS[check]
         if not construction_positive_integer(round_number) or round_number > round_limit:
             fail(f"{subject} requires a logical round from 1 through {round_limit}")
-        identity = active_attempt_identity(context, subject)
+        identity = active_attempt_identity(context, subject, include_completion=True)
+        if check == "code" and identity.get("correction") is not None:
+            generation = construction_plan_generation(identity, subject)
+            _proof_index, design_proof_authority = code_design_proof_authority(
+                entries, len(entries), identity, generation, subject,
+            )
+            identity["design_proof_authority"] = design_proof_authority
         return {"check": check, **identity, "round": round_number}
     if check == "diagnostic":
         if round_number is not None:
@@ -2933,7 +3032,8 @@ def construction_plan_generation(identity, subject):
             fail(f"{subject}'s correction-state helper returned malformed JSON")
         required = {
             "plan", "plan_sha256", "plan_projection_sha256", "plan_ownership_sha256",
-            "contract_sha256", "design_sha256", "disagreement_sha256",
+            "contract_sha256", "design_contract_sha256", "consumer_account_sha256",
+            "design_sha256", "disagreement_sha256",
         }
         if not isinstance(state, dict) or set(state) != required \
                 or state.get("contract_sha256") != identity.get("contract_sha256") \
@@ -2942,6 +3042,8 @@ def construction_plan_generation(identity, subject):
             fail(f"{subject} does not use the frozen correction contract and one complete Design")
         return {
             "contract_sha256": state["contract_sha256"],
+            "design_contract_sha256": state["design_contract_sha256"],
+            "consumer_account_sha256": state["consumer_account_sha256"],
             "design_sha256": state["design_sha256"],
             "plan_projection_sha256": state["plan_projection_sha256"],
             "plan_ownership_sha256": state["plan_ownership_sha256"],
@@ -3056,6 +3158,99 @@ def construction_design_proof(entries, before, identity, generation, subject):
     return index
 
 
+def current_design_proof_authority(
+        entries, before, identity, generation, proof_index, subject,
+):
+    if identity.get("correction") is None:
+        fail(f"{subject} requires one Correction Round Design proof")
+    if not isinstance(proof_index, int) or proof_index < 0 or proof_index >= before:
+        fail(f"{subject} has no exact Design verdict proof")
+    verdict = entries[proof_index]
+    verdict_data = note_data(verdict)
+    if verdict.get("kind") != "verdict.consumed" \
+            or verdict_data.get("check") != "design" \
+            or verdict_data.get("outcome") != "clean":
+        fail(f"{subject} has no clean Design result for code work")
+    state = current_correction_contract_state(
+        entries, before, identity["lot"], identity["correction"], subject,
+    )
+    expected = {
+        "schema": 1,
+        "root": {
+            "proof": journal_line_proof(proof_index),
+            "result_sha256": verdict_data.get("report_sha256"),
+            "manifest_sha256": state["artifact"].get("manifest_sha256"),
+            "design_contract_sha256": generation.get("design_contract_sha256"),
+            "source_consumer_account_sha256": generation.get("consumer_account_sha256"),
+            "source_task_contract_sha256": generation.get("contract_sha256"),
+            "design_sha256": generation.get("design_sha256"),
+            "disagreement_sha256": generation.get("disagreement_sha256"),
+            "contract_authority_sha256": identity.get("unit_authority_sha256"),
+            "execution_authority_sha256": identity.get("execution_authority_sha256"),
+        },
+        "carries": [],
+    }
+    root = expected["root"]
+    hash_fields = set(root) - {"proof", "disagreement_sha256"}
+    if any(not re.fullmatch(r"[0-9a-f]{64}", str(root.get(key))) for key in hash_fields) \
+            or not re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{64}", root["proof"]) \
+            or root["disagreement_sha256"] is not None and not re.fullmatch(
+                r"[0-9a-f]{64}", str(root["disagreement_sha256"]),
+            ):
+        fail(f"{subject} has a malformed current Design-proof root")
+    if root["design_contract_sha256"] != generation.get("design_contract_sha256") \
+            or root["source_consumer_account_sha256"] \
+            != generation.get("consumer_account_sha256") \
+            or root["source_task_contract_sha256"] != generation.get("contract_sha256") \
+            or root["design_sha256"] != generation.get("design_sha256") \
+            or root["disagreement_sha256"] != generation.get("disagreement_sha256"):
+        fail(f"{subject} changes the Design result's exact controller contract")
+    return expected
+
+
+def code_design_proof_authority(entries, before, identity, generation, subject):
+    carried = identity.get("design_proof_authority")
+    if identity.get("correction") is not None and isinstance(carried, dict) \
+            and carried.get("carries"):
+        state = current_correction_contract_state(
+            entries, before, identity["lot"], identity["correction"], subject,
+        )
+        task_state = state["artifact"]["tasks"][identity["task"] - 1]
+        current = outstanding_final_checker_set(
+            entries, before, identity["lot"], identity["correction"], subject,
+        )
+        mapping_index, expected = design_proof_authority_for_assigned_code(
+            entries, before, current, identity["unit"], identity["task"],
+            task_state, subject,
+        )
+        if carried != expected:
+            fail(f"{subject} changes its mapped Design-proof authority")
+        root = carried.get("root")
+        latest = carried.get("carries", [])[-1].get("carry") \
+            if carried.get("carries") else None
+        if not isinstance(root, dict) or not isinstance(latest, dict) \
+                or root.get("manifest_sha256") != state["artifact"].get("manifest_sha256") \
+                or root.get("design_contract_sha256") \
+                != generation.get("design_contract_sha256") \
+                or root.get("design_sha256") != generation.get("design_sha256") \
+                or root.get("disagreement_sha256") \
+                != generation.get("disagreement_sha256") \
+                or latest.get("to", {}).get("document_authority") != state["proof"] \
+                or latest.get("to", {}).get("execution_authority_sha256") \
+                != state["execution_authority_sha256"]:
+            fail(f"{subject}'s mapped Design proof does not reach the current code contract")
+        return mapping_index, carried
+
+    proof_index = construction_design_proof(
+        entries, before, identity, generation, subject,
+    )
+    if identity.get("correction") is None:
+        return proof_index, None
+    return proof_index, current_design_proof_authority(
+        entries, before, identity, generation, proof_index, subject,
+    )
+
+
 def construction_review_gate(entries, before, base, gate, tree, subject):
     matches = [(index, note_data(entry)) for index, entry in enumerate(entries[:before])
                if entry.get("event") == "subagent-ended" and entry.get("kind") == "gate-runner"
@@ -3064,11 +3259,20 @@ def construction_review_gate(entries, before, base, gate, tree, subject):
     if len(matches) != 1:
         fail(f"{subject} has no one exact ordinary gate terminal")
     index, data = matches[0]
-    owner = f"{base['lot']}/task-{base['task']}/attempt-{base['attempt']}/code-round-{base['round']}"
-    if data.get("scope") != "review" or data.get("owner") != owner \
+    if base.get("correction") is not None:
+        scope = "correction-review"
+        owner = (
+            f"{base['lot']}/correction-{base['correction']}/task-{base['task']}/"
+            f"attempt-{base['attempt']}/code-round-{base['round']}"
+        )
+    else:
+        scope = "review"
+        owner = f"{base['lot']}/task-{base['task']}/attempt-{base['attempt']}/code-round-{base['round']}"
+    if data.get("scope") != scope or data.get("owner") != owner \
             or (data.get("lot"), data.get("task"), data.get("attempt")) != (
                 base["lot"], base["task"], base["attempt"],
-            ) or data.get("tree") != tree or data.get("code") != "-" \
+            ) or data.get("correction") != base.get("correction") \
+            or data.get("tree") != tree or data.get("code") != "-" \
             or data.get("green") is not True or data.get("surface") != "unchanged":
         fail(f"{subject}'s ordinary gate belongs to another candidate or round")
     return index
@@ -3134,10 +3338,19 @@ def construction_review_generation(entries, base, gate, subject):
     if not isinstance(gate, str) or not re.fullmatch(r"[0-9a-f]{64}", gate):
         fail(f"{subject} requires one exact ordinary green-gate operation")
     generation = construction_plan_generation(base, subject)
-    design_index = construction_design_proof(entries, len(entries), base, generation, subject)
+    design_index, design_proof_authority = code_design_proof_authority(
+        entries, len(entries), base, generation, subject,
+    )
+    if base.get("correction") is not None:
+        generation["design_proof_authority"] = design_proof_authority
+    gate_command = [
+        "bash", GATE_CHECK, "require-review", gate, base["lot"],
+        str(base["task"]), str(base["attempt"]),
+    ]
+    if base.get("correction") is not None:
+        gate_command.append(str(base["correction"]))
     gate_check = subprocess.run(
-        ["bash", GATE_CHECK, "require-review", gate, base["lot"],
-         str(base["task"]), str(base["attempt"])],
+        gate_command,
         capture_output=True, text=True,
     )
     if gate_check.returncode != 0:
@@ -3149,6 +3362,7 @@ def construction_review_generation(entries, base, gate, subject):
     prior = [note_data(entry) for entry in entries
              if entry.get("event") == "subagent-started" and entry.get("kind") == "code-checker"
              and entry.get("lot") == base["lot"] and entry.get("task") == base["task"]
+             and entry.get("correction") == base.get("correction")
              and entry.get("attempt") == base["attempt"] and note_data(entry).get("call") == 1]
     if any(item.get("gate") == gate for item in prior):
         fail(f"{subject}'s ordinary gate was already consumed by another code round")
@@ -3158,22 +3372,44 @@ def construction_review_generation(entries, base, gate, subject):
     prior_verdicts = [(index, entry) for index, entry in enumerate(entries)
                       if entry.get("event") == "note" and entry.get("kind") == "verdict.consumed"
                       and entry.get("lot") == base["lot"] and entry.get("task") == base["task"]
+                      and entry.get("correction") == base.get("correction")
                       and entry.get("attempt") == base["attempt"]
                       and note_data(entry).get("check") == "code"]
     previous, resolution_index = previous_code_batch(entries, base, subject)
     predecessor = resolution_index if resolution_index is not None else design_index
     if gate_index <= predecessor:
         fail(f"{subject}'s ordinary gate predates the result that authorizes this round")
-    base_ref = f"refs/bwr/{Path(WORKSPACE).name}/{base['lot']}/attempt-base"
+    if base.get("correction") is not None:
+        base_ref = (
+            f"refs/bwr/{Path(WORKSPACE).name}/{base['lot']}/"
+            f"correction-{base['correction']}/attempt-base"
+        )
+    else:
+        base_ref = f"refs/bwr/{Path(WORKSPACE).name}/{base['lot']}/attempt-base"
     base_commit = subprocess.run(
         ["git", "-C", REPO, "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
         capture_output=True, text=True,
     )
     if base_commit.returncode != 0:
         fail(f"{subject} has no exact attempt-base commit", base_commit.stderr)
+    manifest_command = [sys.executable, CONSTRUCTION_REVIEW]
+    if base.get("correction") is not None:
+        manifest_command.extend([
+            "correction-manifest", base["lot"], str(base["correction"]),
+            str(base["task"]), str(base["attempt"]), str(base["round"]), gate,
+            base_commit.stdout.strip(), tree, base["unit_authority_sha256"],
+            base["execution_authority_sha256"], json.dumps(
+                generation["design_proof_authority"],
+                sort_keys=True, separators=(",", ":"),
+            ),
+        ])
+    else:
+        manifest_command.extend([
+            "manifest", base["lot"], str(base["task"]), str(base["attempt"]),
+            str(base["round"]), gate, base_commit.stdout.strip(), tree,
+        ])
     manifest = subprocess.run(
-        [sys.executable, CONSTRUCTION_REVIEW, "manifest", base["lot"], str(base["task"]),
-         str(base["attempt"]), str(base["round"]), gate, base_commit.stdout.strip(), tree],
+        manifest_command,
         input=json.dumps(previous, ensure_ascii=False, separators=(",", ":")) if previous else "",
         capture_output=True, text=True,
     )
@@ -3202,10 +3438,30 @@ def validate_code_generation_history(entries, before, logical, subject):
         "plan_projection_sha256", "disagreement_sha256", "gate", "tree", "manifest",
         "manifest_sha256", "retry",
     }
+    if logical.get("correction") is not None:
+        expected_keys |= {
+            "correction", "unit", "unit_authority_sha256", "execution_authority_sha256",
+            "attempt_predecessor",
+            "design_proof_authority", "outstanding_final_checker_set_sha256",
+            "assigned_final_checker_obligations", "design_contract_sha256",
+            "consumer_account_sha256",
+        }
     if set(logical) != expected_keys \
             or any(not re.fullmatch(r"[0-9a-f]{64}", logical.get(key, ""))
                    for key in ("plan_ownership_sha256", "contract_sha256", "design_sha256",
                                "plan_projection_sha256", "gate", "manifest_sha256")) \
+            or logical.get("correction") is not None and (
+                logical.get("unit") != {
+                    "kind": "correction", "built": logical["lot"],
+                    "round": logical["correction"],
+                }
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", logical.get("unit_authority_sha256", ""),
+                )
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", logical.get("execution_authority_sha256", ""),
+                )
+            ) \
             or logical.get("disagreement_sha256") is not None \
             and not re.fullmatch(r"[0-9a-f]{64}", logical.get("disagreement_sha256", "")) \
             or not re.fullmatch(r"[0-9a-f]{40,64}", logical.get("tree", "")):
@@ -3213,11 +3469,21 @@ def validate_code_generation_history(entries, before, logical, subject):
     gate_index = construction_review_gate(
         entries, start_index, logical, logical["gate"], logical["tree"], subject,
     )
-    design_index = construction_design_proof(
+    design_index, expected_design_proof = code_design_proof_authority(
         entries, start_index, logical, logical, subject,
     )
+    if logical.get("correction") is not None:
+        expected_predecessor = correction_attempt_predecessor_account(
+            entries, start_index, logical["lot"], logical["correction"], logical["task"],
+            subject,
+        )
+        if logical.get("attempt_predecessor") != expected_predecessor:
+            fail(f"{subject} changes its frozen attempt predecessor")
+        if logical.get("design_proof_authority") != expected_design_proof:
+            fail(f"{subject} changes its exact current Design-proof authority")
     prior = [(index, entry) for index, entry in code_verdicts(
         entries, start_index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )]
     if len(prior) != logical["round"] - 1:
         fail(f"{subject} has the wrong number of prior code-review generations")
@@ -3238,6 +3504,19 @@ def validate_code_generation_history(entries, before, logical, subject):
             if manifest_previous.returncode == 0 else object()
     except ValueError:
         frozen_previous = object()
+    if logical.get("correction") is not None:
+        manifest_path = exact_real_file(
+            WORKSPACE, logical["manifest"], f"{subject}'s code-review manifest",
+        )
+        try:
+            manifest_document = json.loads(Path(manifest_path).read_bytes())
+        except (UnicodeError, ValueError) as exc:
+            fail(f"{subject}'s code-review manifest is malformed", exc)
+        if manifest_document.get("attempt_predecessor") \
+                != logical["attempt_predecessor"] \
+                or manifest_document.get("base") \
+                != logical["attempt_predecessor"]["commit"]:
+            fail(f"{subject}'s code-review manifest changes its frozen predecessor")
     if frozen_previous != previous:
         fail(f"{subject}'s manifest does not carry its exact prior findings account", {
             "lot": logical["lot"], "task": logical["task"],
@@ -3248,6 +3527,7 @@ def validate_code_generation_history(entries, before, logical, subject):
         })
     reused = [entry for entry in entries[:start_index]
               if entry.get("event") == "subagent-started" and entry.get("kind") == "code-checker"
+              and entry.get("correction") == logical.get("correction")
               and note_data(entry).get("gate") == logical["gate"]]
     if reused:
         fail(f"{subject} reuses another code round's ordinary gate")
@@ -3265,12 +3545,26 @@ def validate_design_generation_history(entries, before, logical, subject):
         "plan_projection_sha256", "disagreement_sha256", "manifest",
         "manifest_sha256", "retry",
     }
+    if logical.get("correction") is not None:
+        expected_keys |= {
+            "correction", "unit", "unit_authority_sha256", "execution_authority_sha256",
+            "attempt_predecessor",
+            "design_proof_authority", "outstanding_final_checker_set_sha256",
+            "assigned_final_checker_obligations", "design_contract_sha256",
+            "consumer_account_sha256",
+        }
     if set(logical) != expected_keys or any(
         not re.fullmatch(r"[0-9a-f]{64}", logical.get(key, ""))
         for key in (
             "plan_ownership_sha256", "contract_sha256", "design_sha256",
             "plan_projection_sha256", "manifest_sha256",
         )
+    ) or logical.get("correction") is not None and (
+        logical.get("unit") != {
+            "kind": "correction", "built": logical["lot"], "round": logical["correction"],
+        }
+        or not re.fullmatch(r"[0-9a-f]{64}", logical.get("unit_authority_sha256", ""))
+        or not re.fullmatch(r"[0-9a-f]{64}", logical.get("execution_authority_sha256", ""))
     ) or logical.get("disagreement_sha256") is not None and not re.fullmatch(
         r"[0-9a-f]{64}", logical.get("disagreement_sha256", ""),
     ):
@@ -3294,6 +3588,29 @@ def validate_design_generation_history(entries, before, logical, subject):
         "plan_projection_sha256": logical["plan_projection_sha256"],
         "disagreement_sha256": logical["disagreement_sha256"],
     }
+    if logical.get("correction") is not None:
+        expected_predecessor = correction_attempt_predecessor_account(
+            entries, start_index, logical["lot"], logical["correction"], logical["task"],
+            subject,
+        )
+        if logical.get("attempt_predecessor") != expected_predecessor:
+            fail(f"{subject} changes its frozen attempt predecessor")
+        expected_manifest.update({
+            "correction": logical["correction"],
+            "unit": logical["unit"],
+            "unit_authority_sha256": logical["unit_authority_sha256"],
+            "execution_authority_sha256": logical["execution_authority_sha256"],
+            "attempt_predecessor": logical["attempt_predecessor"],
+            "final_checker_set_sha256": logical[
+                "outstanding_final_checker_set_sha256"
+            ],
+            "assigned_final_checker_obligations": logical[
+                "assigned_final_checker_obligations"
+            ],
+            "design_proof_authority": logical["design_proof_authority"],
+            "design_contract_sha256": logical["design_contract_sha256"],
+            "consumer_account_sha256": logical["consumer_account_sha256"],
+        })
     if not isinstance(manifest, dict) or any(
         manifest.get(key) != value for key, value in expected_manifest.items()
     ):
@@ -3706,6 +4023,8 @@ def validate_construction_verdict_entry(entries, index, entry):
     if check not in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
         fail("a durable construction verdict has an unknown checker identity")
     base = {key: data.get(key) for key in ("check", "lot", "task", "attempt")}
+    if entry.get("correction") is not None:
+        base["correction"] = entry.get("correction")
     if check in CONSTRUCTION_CHECKERS:
         base["round"] = data.get("round")
     if not isinstance(base["lot"], str) \
@@ -3759,6 +4078,7 @@ def validate_construction_verdict_entry(entries, index, entry):
                     if candidate.get("kind") == "verdict.consumed"
                     and candidate.get("lot") == logical["lot"]
                     and candidate.get("task") == logical["task"]
+                    and candidate.get("correction") == logical.get("correction")
                     and candidate.get("attempt") == logical["attempt"]
                     and note_data(candidate).get("check") == check]
         if logical["round"] != len(previous) + 1:
@@ -3933,8 +4253,8 @@ def journal_entry_from_proof(entries, proof, subject):
     return index, entries[index]
 
 
-def design_failure_handoff(entries, before, lot, task, attempt, subject):
-    blockers = design_blockers(entries, before, lot, task, attempt)
+def design_failure_handoff(entries, before, lot, task, attempt, subject, correction=None):
+    blockers = design_blockers(entries, before, lot, task, attempt, correction)
     if blockers:
         if len(blockers) != 1:
             fail(f"{subject} has more than one Design controller-contract blocker")
@@ -3942,10 +4262,10 @@ def design_failure_handoff(entries, before, lot, task, attempt, subject):
         blocker_data = note_data(blocker)
         round_number = blocker_data.get("round")
         verdicts = [(index, entry) for index, entry in design_verdicts(
-            entries, blocker_index, lot, task, attempt,
+            entries, blocker_index, lot, task, attempt, correction,
         ) if note_data(entry).get("round") == round_number]
         resolutions = [(index, entry) for index, entry in design_resolutions(
-            entries, blocker_index, lot, task, attempt,
+            entries, blocker_index, lot, task, attempt, correction,
         ) if note_data(entry).get("round") == round_number]
         if resolutions:
             fail(f"{subject} has both settlement and blocker terminals for one Design batch")
@@ -3983,13 +4303,13 @@ def design_failure_handoff(entries, before, lot, task, attempt, subject):
         }
 
     intermediate_verdicts = [(index, entry) for index, entry in design_verdicts(
-        entries, before, lot, task, attempt,
+        entries, before, lot, task, attempt, correction,
     ) if note_data(entry).get("round") < CONSTRUCTION_CHECKER_ROUNDS["design"]
        and note_data(entry).get("outcome") == "findings"]
     for verdict_index, verdict in intermediate_verdicts:
         round_number = note_data(verdict).get("round")
         resolutions = [(index, entry) for index, entry in design_resolutions(
-            entries, before, lot, task, attempt,
+            entries, before, lot, task, attempt, correction,
         ) if note_data(entry).get("round") == round_number]
         if not resolutions:
             return {"unresolved": True}
@@ -3999,7 +4319,7 @@ def design_failure_handoff(entries, before, lot, task, attempt, subject):
             fail(f"{subject}'s intermediate Design resolution belongs to another verdict")
 
     verdicts = [(index, entry) for index, entry in design_verdicts(
-        entries, before, lot, task, attempt,
+        entries, before, lot, task, attempt, correction,
     ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
     if not verdicts:
         return None
@@ -4010,7 +4330,7 @@ def design_failure_handoff(entries, before, lot, task, attempt, subject):
     if verdict_data.get("outcome") != "findings":
         return None
     resolutions = [(index, entry) for index, entry in design_resolutions(
-        entries, before, lot, task, attempt,
+        entries, before, lot, task, attempt, correction,
     ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["design"]]
     if not resolutions:
         return {"unresolved": True}
@@ -4045,11 +4365,11 @@ def design_failure_handoff(entries, before, lot, task, attempt, subject):
     return {"unresolved": False, "handoff": handoff, "accepted": accepted}
 
 
-def final_code_failure_handoff(entries, before, lot, task, attempt, subject):
-    if code_blockers(entries, before, lot, task, attempt):
+def final_code_failure_handoff(entries, before, lot, task, attempt, subject, correction=None):
+    if code_blockers(entries, before, lot, task, attempt, correction):
         return None
     verdicts = [(index, entry) for index, entry in code_verdicts(
-        entries, before, lot, task, attempt,
+        entries, before, lot, task, attempt, correction,
     ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["code"]]
     if not verdicts:
         return None
@@ -4060,7 +4380,7 @@ def final_code_failure_handoff(entries, before, lot, task, attempt, subject):
     if verdict_data.get("outcome") != "findings":
         return None
     resolutions = [(index, entry) for index, entry in code_resolutions(
-        entries, before, lot, task, attempt,
+        entries, before, lot, task, attempt, correction,
     ) if note_data(entry).get("round") == CONSTRUCTION_CHECKER_ROUNDS["code"]]
     if not resolutions:
         return {"unresolved": True}
@@ -4106,8 +4426,10 @@ def final_code_failure_handoff(entries, before, lot, task, attempt, subject):
     return {"unresolved": False, "handoff": handoff, "accepted": accepted}
 
 
-def code_contract_failure_handoff(entries, before, lot, task, attempt, subject):
-    blockers = code_blockers(entries, before, lot, task, attempt)
+def code_contract_failure_handoff(
+        entries, before, lot, task, attempt, subject, correction=None,
+):
+    blockers = code_blockers(entries, before, lot, task, attempt, correction)
     if not blockers:
         return None
     if len(blockers) != 1:
@@ -4116,7 +4438,7 @@ def code_contract_failure_handoff(entries, before, lot, task, attempt, subject):
     blocker_data = note_data(blocker)
     round_number = blocker_data.get("round")
     matches = [(index, entry) for index, entry in code_verdicts(
-        entries, blocker_index, lot, task, attempt,
+        entries, blocker_index, lot, task, attempt, correction,
     ) if note_data(entry).get("round") == round_number]
     if len(matches) != 1:
         fail(f"{subject}'s code-review blocker has no exact checker verdict")
@@ -4154,10 +4476,18 @@ def code_contract_failure_handoff(entries, before, lot, task, attempt, subject):
     }
 
 
-def failure_report_state(entries, before, lot, task, attempt, classification, subject):
-    design_state = design_failure_handoff(entries, before, lot, task, attempt, subject)
-    code_state = final_code_failure_handoff(entries, before, lot, task, attempt, subject)
-    code_blocked = code_contract_failure_handoff(entries, before, lot, task, attempt, subject)
+def failure_report_state(
+        entries, before, lot, task, attempt, classification, subject, correction=None,
+):
+    design_state = design_failure_handoff(
+        entries, before, lot, task, attempt, subject, correction,
+    )
+    code_state = final_code_failure_handoff(
+        entries, before, lot, task, attempt, subject, correction,
+    )
+    code_blocked = code_contract_failure_handoff(
+        entries, before, lot, task, attempt, subject, correction,
+    )
     states = [state for state in (design_state, code_state, code_blocked) if state is not None]
     if len(states) > 1:
         fail(f"{subject} has conflicting checker failure obligations")
@@ -4177,7 +4507,13 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
         return {"code_review": compact_code_review_obligation(state)}
     if review == "design" and classification == "C3.9a":
         fail(f"{subject} cannot classify an accepted pre-implementation Design defect as C3.9a")
-    relative = f"reports/construction/{lot}-task-{task}-try-{attempt}.md"
+    if correction is None:
+        relative = f"reports/construction/{lot}-task-{task}-try-{attempt}.md"
+    else:
+        relative = (
+            f"reports/construction/{lot}/correction-{correction}/"
+            f"task-{task}-attempt-{attempt}-failure.md"
+        )
     path = exact_real_file(WORKSPACE, relative, f"{subject}'s failure report")
     try:
         with open(path, "rb") as source:
@@ -4295,6 +4631,88 @@ def attempt_stop_code_state(entries, before, lot, task, attempt, subject):
 
 def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=None):
     data = note_data(entry)
+    if data.get("schema") == 2 or entry.get("correction") is not None:
+        required = {
+            "schema", "unit", "unit_authority_sha256", "execution_authority_sha256",
+            "attempt", "sha", "preserved_ref", "design_proof_authority",
+            "final_checker_set_sha256", "final_checker_assignments",
+            "spares", "spare_snapshot",
+        }
+        correction = entry.get("correction")
+        unit = {"kind": "correction", "built": entry.get("lot"), "round": correction}
+        if set(data) != required or data.get("schema") != 2 or data.get("unit") != unit \
+                or not construction_positive_integer(correction) \
+                or not construction_positive_integer(entry.get("task")) \
+                or not construction_positive_integer(data.get("attempt")) \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("sha"))) \
+                or data.get("preserved_ref") is not None and not isinstance(
+                    data.get("preserved_ref"), str,
+                ) \
+                or data.get("design_proof_authority") is not None \
+                and not isinstance(data.get("design_proof_authority"), dict) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(data.get("final_checker_set_sha256")),
+                ) \
+                or not isinstance(data.get("final_checker_assignments"), list) \
+                or not isinstance(data.get("spares"), list) \
+                or data.get("spares") != sorted(set(data.get("spares"))) \
+                or any(
+                    not isinstance(path, str)
+                    or PurePosixPath(path).is_absolute()
+                    or any(part in {"", ".", ".."}
+                           for part in PurePosixPath(path).parts)
+                    for path in data.get("spares")
+                ) \
+                or bool(data.get("spares")) \
+                != bool(re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("spare_snapshot")))):
+            fail(f"{subject} has malformed Correction Round stop authority")
+        state = current_correction_contract_state(
+            entries, before, entry.get("lot"), correction, subject,
+        )
+        current = outstanding_final_checker_set(
+            entries, before, entry.get("lot"), correction, subject,
+        )
+        task_state = state["artifact"]["tasks"][entry["task"] - 1]
+        assigned = assigned_final_checker_obligations(
+            current, unit, entry["task"], task_state, subject,
+        )
+        _mapping_index, design_proof_authority = \
+            design_proof_authority_for_assigned_code(
+                entries, before, current, unit, entry["task"], task_state, subject,
+            )
+        if data.get("unit_authority_sha256") != state["authority_sha256"] \
+                or data.get("execution_authority_sha256") \
+                != state["execution_authority_sha256"] \
+                or data.get("final_checker_set_sha256") \
+                != final_checker_set_sha256(current) \
+                or data.get("final_checker_assignments") != assigned \
+                or data.get("design_proof_authority") != design_proof_authority:
+            fail(f"{subject} changes its Correction Round execution authority")
+        preserved_ref = data.get("preserved_ref")
+        if preserved_ref is not None:
+            expected_prefix = (
+                f"refs/bwr/{Path(WORKSPACE).name}/{entry['lot']}/correction-{correction}/"
+                f"task-{entry['task']}-try-{data['attempt']}"
+            )
+            if preserved_ref != expected_prefix:
+                fail(f"{subject} changes its correction try ref")
+            preserved = subprocess.run(
+                ["git", "-C", project_root(), "rev-parse", "--verify",
+                 f"{preserved_ref}^{{commit}}"], capture_output=True, text=True,
+            )
+            if preserved.returncode != 0:
+                fail(f"{subject} has no exact preserved correction candidate")
+            if data.get("spares"):
+                parent = subprocess.run(
+                    ["git", "-C", project_root(), "rev-parse", f"{preserved_ref}^1"],
+                    capture_output=True, text=True,
+                )
+                if parent.returncode != 0 \
+                        or parent.stdout.strip() != data.get("spare_snapshot"):
+                    fail(f"{subject} changes its spared-input snapshot")
+        elif data.get("spares"):
+            fail(f"{subject} loses its spared-input preserve ref")
+        return data
     attempt_number = data.get("attempt")
     base = {"sha": data.get("sha"), "attempt": attempt_number}
     if not re.fullmatch(r"[0-9a-f]{40,64}", str(base["sha"])) \
@@ -4323,6 +4741,257 @@ def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=
         accepted_retry_from_proof(entries, retry, f"{subject}'s inherited retry obligation")
         expected["retry"] = retry
     return expected
+
+
+CORRECTION_STOP_AUTHORITY_KINDS = {
+    "attempt.started", "attempt.failed", "attempt.succeeded",
+    "correction.round.revised", "rewind.done", "final-checker.contract-mapped",
+    "correction.round.built", "correction.round.resolved", "correction.round.escalated",
+}
+
+
+def correction_resume_account(entries, index, entry, stop, subject):
+    """Validate one schema-2 resume against the preceding projected stop."""
+    stop_index, stop_entry, stopped = stop
+    if stop_entry.get("kind") == "aborted":
+        fail(f"{subject} resumes an aborted Correction Round")
+    unit = stopped["unit"]
+    for candidate in entries[stop_index + 1:index]:
+        data = note_data(candidate)
+        if candidate.get("kind") in CORRECTION_STOP_AUTHORITY_KINDS \
+                and (data.get("unit") == unit or (
+                    candidate.get("lot") == unit["built"]
+                    and candidate.get("correction") == unit["round"]
+                )):
+            fail(f"{subject} follows a Correction Round authority mutation")
+    expected = {
+        "schema": 2,
+        "unit": unit,
+        "stop": journal_line_proof(stop_index),
+        "unit_authority_sha256": stopped["unit_authority_sha256"],
+        "execution_authority_sha256": stopped["execution_authority_sha256"],
+        "final_checker_set_sha256": stopped["final_checker_set_sha256"],
+        "final_checker_assignments": stopped["final_checker_assignments"],
+        "design_proof_authority": stopped["design_proof_authority"],
+    }
+    if entry.get("event") != "note" or entry.get("kind") != "resumed" \
+            or entry.get("lot") != unit["built"] \
+            or entry.get("correction") != unit["round"] \
+            or note_data(entry) != expected:
+        fail(f"{subject} changes its exact Correction Round resume", expected)
+    return expected
+
+
+def current_correction_stop_state(entries, before, subject, *, unit=None):
+    """Project schema-2 stop and resume events once in journal order."""
+    active = None
+    for index, entry in enumerate(entries[:before]):
+        data = note_data(entry)
+        if entry.get("kind") in {"paused", "aborted"} and data.get("schema") == 2:
+            if active is not None:
+                fail(f"{subject} has several unconsumed Correction Round stops")
+            if isinstance(data.get("attempt"), int):
+                expected = expected_attempt_stop_data(entries, index, entry, subject)
+            else:
+                expected = expected_correction_bare_stop_data(entries, index, entry, subject)
+            if data != expected:
+                fail(f"{subject} changes its exact Correction Round stop")
+            active = (index, entry, expected)
+        elif entry.get("kind") == "resumed" and data.get("schema") == 2:
+            if active is None:
+                fail(f"{subject} has a Correction Round resume without one current stop")
+            correction_resume_account(entries, index, entry, active, subject)
+            active = None
+    if active is None:
+        return None
+    if unit is not None and active[2]["unit"] != unit:
+        return None
+    return active
+
+
+def require_no_current_correction_stop(entries, before, built, correction, subject):
+    """Refuse an authority transition while one Correction Round stop owns the unit."""
+    unit = {"kind": "correction", "built": built, "round": correction}
+    if current_correction_stop_state(
+        entries, before, subject, unit=unit,
+    ) is not None:
+        fail(f"{subject} follows an unconsumed Correction Round stop")
+
+
+def correction_stop_current_commit(entries, before, state, subject):
+    accepted = accepted_correction_task_entries_at_prefix(
+        entries, before, state["built"], state["round"], state["opening_index"],
+    )
+    return accepted[-1][2]["sha"] if accepted else state["execution_commit"]
+
+
+def correction_bare_design_proof_authority(entries, before, state, current, subject):
+    """Return every applicable task-local Design-proof authority for a bare stop."""
+    unit = {"kind": "correction", "built": state["built"], "round": state["round"]}
+    tasks = []
+    for task, task_state in enumerate(state["artifact"]["tasks"], 1):
+        assigned = assigned_final_checker_obligations(
+            current, unit, task, task_state, subject,
+        )
+        code_ids = sorted(
+            member["source"]["obligation_id"] for member in current["entries"]
+            if member["source"]["obligation_id"] in set(assigned)
+            and member["source"]["checker"] == "code"
+        )
+        if not code_ids:
+            continue
+        _mapping_index, authority = design_proof_authority_for_assigned_code(
+            entries, before, current, unit, task, task_state, subject,
+        )
+        tasks.append({
+            "task": task,
+            "obligation_ids": code_ids,
+            "authority": authority,
+        })
+    if not tasks:
+        return None
+    return {"schema": 1, "tasks": tasks}
+
+
+def expected_correction_bare_stop_data(entries, before, entry, subject):
+    data = note_data(entry)
+    unit = data.get("unit") if isinstance(data, dict) else None
+    built = unit.get("built") if isinstance(unit, dict) else None
+    correction = unit.get("round") if isinstance(unit, dict) else None
+    required = {
+        "schema", "unit", "unit_authority_sha256", "execution_authority_sha256",
+        "sha", "op", "final_checker_set_sha256", "final_checker_assignments",
+        "design_proof_authority",
+    }
+    if set(data) != required or data.get("schema") != 2 \
+            or unit != {"kind": "correction", "built": built, "round": correction} \
+            or not isinstance(built, str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built) \
+            or not construction_positive_integer(correction) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("sha"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("op"))) \
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(data.get("final_checker_set_sha256")),
+            ) or not isinstance(data.get("final_checker_assignments"), list) \
+            or data.get("design_proof_authority") is not None \
+            and not isinstance(data.get("design_proof_authority"), dict):
+        fail(f"{subject} has malformed bare Correction Round stop authority")
+    state = current_correction_contract_state(entries, before, built, correction, subject)
+    current = outstanding_final_checker_set(entries, before, built, correction, subject)
+    assignments = [
+        member["source"]["obligation_id"] for member in current["entries"]
+    ]
+    design_proof_authority = correction_bare_design_proof_authority(
+        entries, before, state, current, subject,
+    )
+    if any(candidate.get("kind") in {
+        "correction.round.built", "correction.round.resolved", "correction.round.escalated",
+    } and note_data(candidate).get("built") == built
+        and note_data(candidate).get("round") == correction
+        for candidate in entries[state["opening_index"] + 1:before]):
+        fail(f"{subject} follows a Correction Round terminal")
+    expected = {
+        "schema": 2,
+        "unit": unit,
+        "unit_authority_sha256": state["authority_sha256"],
+        "execution_authority_sha256": state["execution_authority_sha256"],
+        "sha": correction_stop_current_commit(entries, before, state, subject),
+        "op": data["op"],
+        "final_checker_set_sha256": final_checker_set_sha256(current),
+        "final_checker_assignments": assignments,
+        "design_proof_authority": design_proof_authority,
+    }
+    if data != expected:
+        fail(f"{subject} changes its exact bare Correction Round stop account", expected)
+    return expected
+
+
+def normalize_correction_bare_stop(entries, kind, data, context):
+    if not isinstance(data, dict) or set(data) != {"sha", "op"}:
+        return None
+    built, correction = context.get("lot"), context.get("correction")
+    if not isinstance(built, str) or not construction_positive_integer(correction):
+        return None
+    state = current_correction_contract_state(
+        entries, len(entries), built, correction, f"the bare {kind}",
+    )
+    current = outstanding_final_checker_set(
+        entries, len(entries), built, correction, f"the bare {kind}",
+    )
+    expected = {
+        "schema": 2,
+        "unit": {"kind": "correction", "built": built, "round": correction},
+        "unit_authority_sha256": state["authority_sha256"],
+        "execution_authority_sha256": state["execution_authority_sha256"],
+        "sha": data.get("sha"),
+        "op": data.get("op"),
+        "final_checker_set_sha256": final_checker_set_sha256(current),
+        "final_checker_assignments": [
+            member["source"]["obligation_id"] for member in current["entries"]
+        ],
+        "design_proof_authority": correction_bare_design_proof_authority(
+            entries, len(entries), state, current, f"the bare {kind}",
+        ),
+    }
+    candidate = {
+        "event": "note", "kind": kind, "lot": built, "correction": correction,
+        "data": expected,
+    }
+    expected_correction_bare_stop_data(
+        entries + [candidate], len(entries), candidate, f"the bare {kind}",
+    )
+    if current_correction_stop_state(
+        entries, len(entries), f"the bare {kind}", unit=expected["unit"],
+    ) is not None:
+        fail(f"the Correction Round already has an unconsumed stop")
+    return expected
+
+
+def normalize_correction_resume(entries, data, context):
+    if data not in (None, {}):
+        fail("a Correction Round resume derives its exact stopped authority")
+    stop = current_correction_stop_state(
+        entries, len(entries), "the Correction Round resume",
+    )
+    if stop is None:
+        return None
+    stop_index, stop_entry, stopped = stop
+    if stop_entry.get("kind") == "aborted":
+        fail("an aborted Correction Round has no resume route")
+    unit = stopped["unit"]
+    if context.get("lot") not in {None, unit["built"]} \
+            or context.get("correction") not in {None, unit["round"]}:
+        fail("the Correction Round resume changes its controller context")
+    expected = {
+        "schema": 2,
+        "unit": unit,
+        "stop": journal_line_proof(stop_index),
+        "unit_authority_sha256": stopped["unit_authority_sha256"],
+        "execution_authority_sha256": stopped["execution_authority_sha256"],
+        "final_checker_set_sha256": stopped["final_checker_set_sha256"],
+        "final_checker_assignments": stopped["final_checker_assignments"],
+        "design_proof_authority": stopped["design_proof_authority"],
+    }
+    candidate = {
+        "event": "note", "kind": "resumed", "lot": unit["built"],
+        "correction": unit["round"], "data": expected,
+    }
+    correction_resume_account(
+        entries + [candidate], len(entries), candidate, stop,
+        "the Correction Round resume",
+    )
+    return expected
+
+
+def validate_correction_resume_entry(entries, index, entry):
+    stop = current_correction_stop_state(
+        entries, index, "the durable Correction Round resume",
+    )
+    if stop is None:
+        fail("the durable Correction Round resume has no current stop")
+    correction_resume_account(
+        entries, index, entry, stop, "the durable Correction Round resume",
+    )
 
 
 def accepted_stop_from_proof(entries, proof, subject):
@@ -4659,12 +5328,15 @@ def normalize_design_blocker(entries, data, text, context, round_number):
     )
     if any(note_data(entry).get("round") == logical["round"] for _, entry in design_resolutions(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )) or any(note_data(entry).get("round") == logical["round"] for _, entry in design_blockers(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("this Design batch already has a terminal account")
     matches = [(index, entry) for index, entry in design_verdicts(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     ) if note_data(entry).get("round") == logical["round"]]
     if len(matches) != 1:
         fail("a Design blocker has no exact current-round verdict")
@@ -4687,6 +5359,8 @@ def normalize_design_blocker(entries, data, text, context, round_number):
 def validate_design_blocker_entry(entries, index, entry):
     data = note_data(entry)
     base = {key: data.get(key) for key in ("check", "lot", "task", "attempt", "round")}
+    if entry.get("correction") is not None:
+        base["correction"] = entry["correction"]
     if base["check"] != "design" or not isinstance(base["lot"], str) \
             or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", base["lot"]) \
             or not construction_positive_integer(base["task"]) \
@@ -4698,19 +5372,25 @@ def validate_design_blocker_entry(entries, index, entry):
     logical = construction_frozen_logical(
         entries, index, base, "a durable Design blocker",
     )
-    if design_resolutions(entries, index, logical["lot"], logical["task"], logical["attempt"]):
+    if design_resolutions(
+        entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
+    ):
         final = [candidate for _, candidate in design_resolutions(
             entries, index, logical["lot"], logical["task"], logical["attempt"],
+            logical.get("correction"),
         ) if note_data(candidate).get("round") == logical["round"]]
         if final:
             fail("a Design batch has both settlement and blocker terminals")
     prior = [candidate for _, candidate in design_blockers(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     ) if note_data(candidate).get("round") == logical["round"]]
     if prior:
         fail("a Design batch has more than one blocker terminal")
     matches = [(position, candidate) for position, candidate in design_verdicts(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     ) if note_data(candidate).get("round") == logical["round"]]
     if len(matches) != 1:
         fail("a durable Design blocker has no exact checker verdict")
@@ -4738,14 +5418,17 @@ def normalize_design_resolution(entries, data, text, context, round_number):
     )
     if any(note_data(entry).get("round") == logical["round"] for _, entry in design_resolutions(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("this design-review round already has a resolution")
     if any(note_data(entry).get("round") == logical["round"] for _, entry in design_blockers(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("this design-review round already has a controller-owned blocker terminal")
     matches = [(index, entry) for index, entry in design_verdicts(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     ) if note_data(entry).get("round") == logical["round"]]
     if len(matches) != 1:
         fail("a design-review resolution has no exact round verdict")
@@ -4816,6 +5499,8 @@ def normalize_design_resolution(entries, data, text, context, round_number):
 def validate_design_resolution_entry(entries, index, entry):
     data = note_data(entry)
     base = {key: data.get(key) for key in ("check", "lot", "task", "attempt", "round")}
+    if entry.get("correction") is not None:
+        base["correction"] = entry["correction"]
     if base["check"] != "design" or not isinstance(base["lot"], str) \
             or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", base["lot"]) \
             or not construction_positive_integer(base["task"]) \
@@ -4829,14 +5514,17 @@ def validate_design_resolution_entry(entries, index, entry):
     )
     if any(note_data(candidate).get("round") == logical["round"] for _, candidate in design_resolutions(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("a design-review round has more than one durable resolution")
     if any(note_data(candidate).get("round") == logical["round"] for _, candidate in design_blockers(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("a design-review settlement follows a controller-owned blocker terminal")
     matches = [(position, candidate) for position, candidate in design_verdicts(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     ) if note_data(candidate).get("round") == logical["round"]]
     if len(matches) != 1:
         fail("a durable design-review resolution has no exact checker verdict")
@@ -4844,7 +5532,11 @@ def validate_design_resolution_entry(entries, index, entry):
     verdict_data = note_data(verdict)
     if verdict_data.get("outcome") != "findings" \
             or not construction_positive_integer(verdict_data.get("findings")):
-        fail("a durable design-review resolution does not follow exact findings")
+        fail("a durable design-review resolution does not follow exact findings", {
+            "outcome": verdict_data.get("outcome"),
+            "findings": verdict_data.get("findings"),
+            "correction": verdict_data.get("correction"),
+        })
     items = data.get("items")
     allowed = DESIGN_FINAL_RESOLUTION_STATUSES \
         if logical["round"] == CONSTRUCTION_CHECKER_ROUNDS["design"] \
@@ -4899,14 +5591,17 @@ def normalize_code_resolution(entries, data, text, context, round_number):
     )
     if any(note_data(entry).get("round") == logical["round"] for _, entry in code_resolutions(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("this code-review round already has a resolution")
     if any(note_data(entry).get("round") == logical["round"] for _, entry in code_blockers(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("this code-review round already has a controller-contract blocker")
     verdicts = code_verdicts(
         entries, len(entries), logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )
     if not verdicts:
         fail("a final code-review resolution has no consumed checker verdict")
@@ -4959,6 +5654,8 @@ def normalize_code_resolution(entries, data, text, context, round_number):
 def validate_code_resolution_entry(entries, index, entry):
     data = note_data(entry)
     base = {key: data.get(key) for key in ("check", "lot", "task", "attempt", "round")}
+    if entry.get("correction") is not None:
+        base["correction"] = entry["correction"]
     if base["check"] != "code" \
             or not isinstance(base["lot"], str) \
             or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", base["lot"]) \
@@ -4973,15 +5670,18 @@ def validate_code_resolution_entry(entries, index, entry):
     )
     prior = code_resolutions(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )
     if any(note_data(candidate).get("round") == logical["round"] for _, candidate in prior):
         fail("a code-review round has more than one durable resolution")
     if any(note_data(candidate).get("round") == logical["round"] for _, candidate in code_blockers(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )):
         fail("a code-review settlement follows a controller-contract blocker")
     verdicts = code_verdicts(
         entries, index, logical["lot"], logical["task"], logical["attempt"],
+        logical.get("correction"),
     )
     if not verdicts:
         fail("a durable final code-review resolution has no checker verdict")
@@ -5077,6 +5777,8 @@ def normalize_code_blocker(entries, data, text, context, round_number):
 def validate_code_blocker_entry(entries, index, entry):
     data = note_data(entry)
     base = {key: data.get(key) for key in ("check", "lot", "task", "attempt", "round")}
+    if entry.get("correction") is not None:
+        base["correction"] = entry["correction"]
     if base["check"] != "code" or not isinstance(base["lot"], str) \
             or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", base["lot"]) \
             or not construction_positive_integer(base["task"]) \
@@ -5117,20 +5819,454 @@ def validate_code_blocker_entry(entries, index, entry):
         fail("a durable code-review blocker changes its immutable batch", expected)
 
 
+def correction_retry_transition_kind(entry):
+    kind = entry.get("kind")
+    data = note_data(entry)
+    if kind == "attempt.failed":
+        return "final-checker-source", data.get("final_checker_transition")
+    if kind == "attempt.succeeded":
+        return "retry-consumed", data.get("final_checker_transition")
+    if kind == "final-checker.contract-mapped":
+        return "contract-mapped", data.get("retry_transition")
+    if kind == "correction.round.revised":
+        return "contract-map-document", data.get("retry_transition")
+    return None, None
+
+
+_FINAL_CHECKER_PROJECTOR_CONTEXT = None
+
+
+def validate_final_checker_transition_producer(entries, index, entry, subject):
+    """Authenticate one retry-set producer once within the current replay."""
+    global _FINAL_CHECKER_PROJECTOR_CONTEXT
+    context = _FINAL_CHECKER_PROJECTOR_CONTEXT
+    if context is None:
+        fail(f"{subject} has no active final-checker replay context")
+    identity = (
+        index,
+        hashlib.sha256(json.dumps(
+            entry, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest(),
+    )
+    if identity in context["validated"]:
+        return
+    if identity in context["active"]:
+        fail(f"{subject} has a recursive final-checker producer")
+    context["active"].add(identity)
+    try:
+        if entry.get("kind") == "attempt.failed":
+            validate_attempt_failed_entry(entries, index, entry)
+        elif entry.get("kind") == "attempt.succeeded":
+            validate_attempt_succeeded_entry(entries, index, entry)
+        elif entry.get("kind") == "final-checker.contract-mapped":
+            validate_final_checker_contract_mapped_entry(entries, index, entry)
+        elif entry.get("kind") == "correction.round.revised":
+            validate_correction_round_revision_entry(entries, index, entry)
+        else:
+            fail(f"{subject} has an unsupported final-checker producer")
+    finally:
+        context["active"].remove(identity)
+    context["validated"].add(identity)
+
+
+def outstanding_final_checker_set(entries, before, built, correction, subject):
+    global _FINAL_CHECKER_PROJECTOR_CONTEXT
+    owns_context = _FINAL_CHECKER_PROJECTOR_CONTEXT is None
+    if owns_context:
+        _FINAL_CHECKER_PROJECTOR_CONTEXT = {"active": set(), "validated": set()}
+    try:
+        current = empty_final_checker_set()
+        for index, entry in enumerate(entries[:before]):
+            if entry.get("lot") != built or entry.get("correction") != correction:
+                continue
+            transfer_kind, transition = correction_retry_transition_kind(entry)
+            if entry.get("kind") not in {
+                "attempt.failed", "attempt.succeeded", "final-checker.contract-mapped",
+                "correction.round.revised",
+            }:
+                continue
+            validate_final_checker_transition_producer(entries, index, entry, subject)
+            if transition is None:
+                fail(f"{subject} has a final-checker producer without its transition")
+            try:
+                current = validate_final_checker_transition(
+                    current, transition, transfer_kind=transfer_kind,
+                )
+            except ValueError as exc:
+                fail(
+                    f"{subject} has an invalid final-checker transition at line {index + 1}",
+                    exc,
+                )
+        return current
+    finally:
+        if owns_context:
+            _FINAL_CHECKER_PROJECTOR_CONTEXT = None
+
+
+def assigned_final_checker_obligations(current, unit, task, task_state, subject):
+    assigned = []
+    for member in current["entries"]:
+        source = member["source"]
+        assignment = member["assignment"]
+        if assignment["owner"] == "task-contract-map" \
+                and assignment["unit"].get("work_unit") == unit \
+                and assignment["unit"].get("target_task") == task:
+            fail(f"{subject} crosses an unfinished task-contract map")
+        if assignment["owner"] != "task" \
+                or assignment["unit"] != unit or assignment["task"] != task:
+            continue
+        if assignment["task_contract_sha256"] != task_state["task_contract_sha256"] \
+                or assignment["phase"] != source["required_consumer_phase"]:
+            fail(f"{subject} changes an assigned final-checker consumer")
+        assigned.append(source["obligation_id"])
+    if assigned != task_state["obligation_ids"]:
+        fail(f"{subject}'s controller document and assigned obligations disagree")
+    return assigned
+
+
+def correction_revision_retry_transition(entries, before, state, artifact, subject):
+    """Preserve one complete set while a bounded revision updates task contracts."""
+    current = outstanding_final_checker_set(
+        entries, before, state["built"], state["round"], subject,
+    )
+    unit = {"kind": "correction", "built": state["built"], "round": state["round"]}
+    prior_tasks = state["artifact"]["tasks"]
+    next_tasks = artifact["tasks"]
+    dispositions = []
+    for member in current["entries"]:
+        source = member["source"]
+        assignment = {
+            key: value for key, value in member["assignment"].items()
+            if key != "mapping_proof"
+        }
+        if assignment["owner"] == "task":
+            if assignment["unit"] == unit:
+                task = assignment["task"]
+                if task > len(prior_tasks) or task > len(next_tasks) \
+                        or assignment["phase"] != source["required_consumer_phase"] \
+                        or assignment["task_contract_sha256"] \
+                        != prior_tasks[task - 1]["task_contract_sha256"]:
+                    fail(f"{subject} changes an existing task assignment")
+                assignment["task_contract_sha256"] = next_tasks[task - 1][
+                    "task_contract_sha256"
+                ]
+            outcome = "deferred"
+        else:
+            outcome = "carried"
+        dispositions.append({
+            "obligation_id": source["obligation_id"],
+            "outcome": outcome,
+            "assignment": assignment,
+            "evidence": None,
+        })
+    transition, _output = materialize_final_checker_transition(
+        current, additions=[], dispositions=dispositions,
+        transfer_kind="contract-map-document",
+    )
+    return transition
+
+
+def final_checker_map_operation(identity, source):
+    account = {
+        "schema": 1,
+        "source": source["obligation_id"],
+        "unit": identity["unit"],
+        "unit_authority_sha256": identity["unit_authority_sha256"],
+        "execution_authority_sha256": identity["execution_authority_sha256"],
+        "target_task": identity["task"],
+        "task_contract_sha256": identity["contract_sha256"],
+    }
+    return hashlib.sha256(json.dumps(
+        account, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def correction_final_checker_source(identity, report):
+    reviews = [
+        (checker, report.get(f"{checker}_review"))
+        for checker in ("design", "code")
+        if isinstance(report, dict) and isinstance(report.get(f"{checker}_review"), dict)
+        and report[f"{checker}_review"].get("accepted")
+    ]
+    if not reviews:
+        return None
+    if len(reviews) != 1:
+        fail("a correction failure has conflicting accepted final-checker sources")
+    checker, review = reviews[0]
+    return final_checker_source_account({
+        "source_proof": review["verdict"],
+        "source_unit": identity["unit"],
+        "source_contract_authority_sha256": identity["unit_authority_sha256"],
+        "source_execution_authority_sha256": identity["execution_authority_sha256"],
+        "owner_task": identity["task"],
+        "checker": checker,
+        "accepted_ids": review["accepted"],
+        "result_sha256": review["result_sha256"],
+        "settlement": review["resolution"],
+        "required_consumer_phase": f"first-{checker}-manifest",
+    })
+
+
+def correction_attempt_failed_account(entries, before, identity, base, report):
+    current = outstanding_final_checker_set(
+        entries, before, identity["lot"], identity["correction"],
+        "the correction attempt failure",
+    )
+    if final_checker_set_sha256(current) != identity["outstanding_final_checker_set_sha256"]:
+        fail("the correction attempt failure changed its outstanding final-checker set")
+    source = correction_final_checker_source(identity, report)
+    design_proof_authority = identity["design_proof_authority"]
+    if source is not None and source["checker"] == "code":
+        _verdict_index, code_logical = correction_success_code_logical(
+            entries, before, identity, "the correction final code-checker failure",
+        )
+        design_proof_authority = code_logical.get("design_proof_authority")
+        if not isinstance(design_proof_authority, dict):
+            fail("the correction final code-checker failure has no Design-proof authority")
+    additions = []
+    if source is not None:
+        operation = final_checker_map_operation(identity, source)
+        additions.append({
+            "source": source,
+            "assignment": {
+                "unit": {
+                    "kind": "task-contract-map",
+                    "operation": operation,
+                    "work_unit": identity["unit"],
+                    "target_task": identity["task"],
+                    "document_kind": "correction-artifact",
+                },
+                "task": None,
+                "phase": "publish-task-contract",
+                "owner": "task-contract-map",
+            },
+        })
+    dispositions = [{
+        "obligation_id": entry["source"]["obligation_id"],
+        "outcome": "deferred" if entry["assignment"]["owner"] == "task" else "carried",
+        "assignment": {
+            key: value for key, value in entry["assignment"].items()
+            if key != "mapping_proof"
+        },
+        "evidence": None,
+    } for entry in current["entries"]]
+    transition, _ = materialize_final_checker_transition(
+        current, additions=additions, dispositions=dispositions,
+        transfer_kind="final-checker-source",
+    )
+    return {
+        "schema": 2,
+        "unit": identity["unit"],
+        "unit_authority_sha256": identity["unit_authority_sha256"],
+        "execution_authority_sha256": identity["execution_authority_sha256"],
+        **base,
+        "checker_obligation": report,
+        "design_proof_authority": design_proof_authority,
+        "final_checker_input_set_sha256": identity["outstanding_final_checker_set_sha256"],
+        "final_checker_assignments": identity["assigned_final_checker_obligations"],
+        "final_checker_transition": transition,
+        "final_checker_output_set_sha256": transition["output_sha256"],
+    }
+
+
+def correction_success_code_logical(entries, before, identity, subject):
+    verdicts = code_verdicts(
+        entries, before, identity["lot"], identity["task"], identity["attempt"],
+        identity["correction"],
+    )
+    if not verdicts:
+        fail(f"{subject} has no accepted code verdict")
+    verdict_index, verdict = verdicts[-1]
+    validate_construction_verdict_entry(entries, verdict_index, verdict)
+    verdict_data = note_data(verdict)
+    base = {
+        "check": "code", "lot": identity["lot"], "task": identity["task"],
+        "attempt": identity["attempt"], "round": verdict_data.get("round"),
+        "correction": identity["correction"],
+    }
+    logical = construction_frozen_logical(entries, verdict_index, base, subject)
+    if logical.get("unit") != identity["unit"] \
+            or logical.get("unit_authority_sha256") \
+            != identity["unit_authority_sha256"] \
+            or logical.get("execution_authority_sha256") \
+            != identity["execution_authority_sha256"]:
+        fail(f"{subject} changes its accepted code authority")
+    return verdict_index, logical
+
+
+def final_checker_consumption_manifest(
+        entries, before, identity, current, obligation, subject,
+):
+    source = obligation["source"]
+    checker = source["checker"]
+    kind = f"{checker}-checker"
+    starts = [
+        (index, entry) for index, entry in enumerate(entries[:before])
+        if entry.get("event") == "subagent-started" and entry.get("kind") == kind
+        and entry.get("lot") == identity["lot"]
+        and entry.get("correction") == identity["correction"]
+        and entry.get("task") == identity["task"]
+        and entry.get("attempt") == identity["attempt"]
+        and entry.get("round") == 1
+    ]
+    if not starts:
+        fail(f"{subject} has no first matching {checker} manifest")
+    opening_index, opening = starts[0]
+    logical = note_data(opening)
+    assigned = logical.get("assigned_final_checker_obligations")
+    if logical.get("call") != 1 or not isinstance(assigned, list) \
+            or source["obligation_id"] not in assigned \
+            or logical.get("outstanding_final_checker_set_sha256") \
+            != final_checker_set_sha256(current) \
+            or source["required_consumer_phase"] != f"first-{checker}-manifest" \
+            or checker == "design" and logical.get("design_proof_authority") is not None:
+        fail(f"{subject}'s first {checker} manifest does not own its obligation")
+    manifest = exact_real_file(
+        WORKSPACE, logical.get("manifest"), f"{subject}'s first {checker} manifest",
+    )
+    manifest_payload = Path(manifest).read_bytes()
+    if sha256_bytes(manifest_payload) != logical.get("manifest_sha256"):
+        fail(f"{subject}'s first {checker} manifest changed")
+    return {
+        "checker": checker,
+        "opening": journal_line_proof(opening_index),
+        "path": logical["manifest"],
+        "sha256": logical["manifest_sha256"],
+        "attempt": identity["attempt"],
+        "round": 1,
+        "final_checker_set_sha256": logical["outstanding_final_checker_set_sha256"],
+        "assigned_final_checker_obligations": assigned,
+    }
+
+
+def correction_attempt_succeeded_account(entries, before, identity, commit, gate, subject):
+    if not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(gate)):
+        fail(f"{subject} has malformed commit or gate identity")
+    predecessor = correction_attempt_predecessor_account(
+        entries, before, identity["lot"], identity["correction"], identity["task"],
+        subject,
+    )
+    if identity.get("attempt_predecessor") is not None \
+            and identity["attempt_predecessor"] != predecessor:
+        fail(f"{subject} changes its exact attempt predecessor")
+    parent = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{commit}^"],
+        capture_output=True, text=True,
+    )
+    if parent.returncode != 0 or parent.stdout.strip() != predecessor["commit"]:
+        fail(f"{subject}'s task commit is not a direct child of its frozen predecessor")
+    _verdict_index, code_logical = correction_success_code_logical(
+        entries, before, identity, subject,
+    )
+    design_proof_authority = code_logical.get("design_proof_authority")
+    if not isinstance(design_proof_authority, dict):
+        fail(f"{subject} has no current Design-proof authority")
+    current = outstanding_final_checker_set(
+        entries, before, identity["lot"], identity["correction"], subject,
+    )
+    if final_checker_set_sha256(current) \
+            != identity["outstanding_final_checker_set_sha256"]:
+        fail(f"{subject} changes its outstanding final-checker set")
+    state = current_correction_contract_state(
+        entries, before, identity["lot"], identity["correction"], subject,
+    )
+    task_state = state["artifact"]["tasks"][identity["task"] - 1]
+    assigned = assigned_final_checker_obligations(
+        current, identity["unit"], identity["task"], task_state, subject,
+    )
+    if assigned != identity["assigned_final_checker_obligations"]:
+        fail(f"{subject} changes its assigned final-checker obligations")
+    assigned_set = set(assigned)
+    success_evidence = {
+        "schema": 1,
+        "unit": identity["unit"],
+        "task": identity["task"],
+        "attempt": identity["attempt"],
+        "commit": commit,
+        "gate": gate,
+        "contract_authority_sha256": identity["unit_authority_sha256"],
+        "execution_authority_sha256": identity["execution_authority_sha256"],
+        "attempt_predecessor_sha256": hashlib.sha256(json.dumps(
+            predecessor, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest(),
+        "design_proof_authority_sha256": hashlib.sha256(json.dumps(
+            design_proof_authority, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest(),
+    }
+    dispositions = []
+    for member in current["entries"]:
+        obligation_id = member["source"]["obligation_id"]
+        if obligation_id in assigned_set:
+            manifest = final_checker_consumption_manifest(
+                entries, before, identity, current, member, subject,
+            )
+            dispositions.append({
+                "obligation_id": obligation_id,
+                "outcome": "consumed",
+                "assignment": None,
+                "evidence": {
+                    "consumer_phase": member["source"]["required_consumer_phase"],
+                    "manifest": manifest,
+                    "success": success_evidence,
+                },
+            })
+            continue
+        assignment = {
+            key: value for key, value in member["assignment"].items()
+            if key != "mapping_proof"
+        }
+        dispositions.append({
+            "obligation_id": obligation_id,
+            "outcome": "deferred" if member["assignment"]["owner"] == "task" else "carried",
+            "assignment": assignment,
+            "evidence": None,
+        })
+    transition, _output = materialize_final_checker_transition(
+        current, additions=[], dispositions=dispositions, transfer_kind="retry-consumed",
+    )
+    return {
+        "schema": 2,
+        "unit": identity["unit"],
+        "unit_authority_sha256": identity["unit_authority_sha256"],
+        "execution_authority_sha256": identity["execution_authority_sha256"],
+        "attempt_predecessor": predecessor,
+        "attempt": identity["attempt"],
+        "sha": commit,
+        "gate": gate,
+        "retry": "-",
+        "design_proof_authority": design_proof_authority,
+        "final_checker_input_set_sha256": identity[
+            "outstanding_final_checker_set_sha256"
+        ],
+        "final_checker_assignments": assigned,
+        "final_checker_transition": transition,
+        "final_checker_output_set_sha256": transition["output_sha256"],
+    }
+
+
 def normalize_attempt_failed(entries, data, context):
     if not isinstance(data, dict):
         fail("attempt.failed requires structured failure data")
     identity_context = {**context, "attempt": data.get("attempt")}
     identity = active_attempt_identity(
         identity_context, "the attempt failure", allow_closer=True,
+        include_completion=True,
     )
     base = {"attempt": identity["attempt"], "classification": data.get("classification")}
     if base["classification"] not in CONSTRUCTION_CLASSIFICATIONS:
         fail("attempt.failed has an unknown C3.9 classification")
     report = failure_report_state(
         entries, len(entries), identity["lot"], identity["task"], identity["attempt"],
-        base["classification"], "the attempt failure",
+        base["classification"], "the attempt failure", identity.get("correction"),
     )
+    if identity.get("correction") is not None:
+        expected = correction_attempt_failed_account(
+            entries, len(entries), identity, base, report,
+        )
+        if data != expected:
+            fail("attempt.failed changes its exact Correction Round failure account", expected)
+        return expected
     expected = {**base, **(report or {})}
     if identity.get("retry"):
         accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
@@ -5144,7 +6280,33 @@ def normalize_attempt_succeeded(entries, data, context):
     if not isinstance(data, dict):
         fail("attempt.succeeded requires structured success data")
     identity_context = {**context, "attempt": data.get("attempt")}
-    identity = active_attempt_identity(identity_context, "the attempt success")
+    identity = active_attempt_identity(
+        identity_context, "the attempt success", include_completion=True,
+    )
+    if identity.get("correction") is not None:
+        expected = correction_attempt_succeeded_account(
+            entries, len(entries), identity, data.get("sha"), data.get("gate"),
+            "the correction attempt success",
+        )
+        if data != expected:
+            fail("attempt.succeeded changes its exact Correction Round completion account", expected)
+        reference = (
+            f"refs/bwr/{Path(WORKSPACE).name}/{identity['lot']}/"
+            f"correction-{identity['correction']}/task-{identity['task']}"
+        )
+        stable = subprocess.run(
+            ["git", "-C", REPO, "rev-parse", "--verify", f"{reference}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if stable.returncode != 0 or stable.stdout.strip() != expected["sha"]:
+            fail("attempt.succeeded precedes its exact stable Correction Round task ref")
+        candidate = {
+            "event": "note", "kind": "attempt.succeeded", "lot": identity["lot"],
+            "correction": identity["correction"], "task": identity["task"],
+            "data": expected,
+        }
+        validate_attempt_succeeded_entry(entries + [candidate], len(entries), candidate)
+        return expected
     expected = {
         "attempt": identity["attempt"], "lot": identity["lot"],
         "sha": data.get("sha"), "gate": data.get("gate"),
@@ -5169,7 +6331,35 @@ def normalize_attempt_stop(entries, kind, data, context):
     identity_context = {**context, "attempt": data.get("attempt")}
     identity = active_attempt_identity(
         identity_context, f"the {kind} attempt stop", allow_closer=True,
+        include_completion=True,
     )
+    if identity.get("correction") is not None:
+        expected = {
+            "schema": 2,
+            "unit": identity["unit"],
+            "unit_authority_sha256": identity["unit_authority_sha256"],
+            "execution_authority_sha256": identity["execution_authority_sha256"],
+            "attempt": identity["attempt"],
+            "sha": data.get("sha"),
+            "preserved_ref": data.get("preserved_ref"),
+            "design_proof_authority": identity["design_proof_authority"],
+            "final_checker_set_sha256": identity["outstanding_final_checker_set_sha256"],
+            "final_checker_assignments": identity["assigned_final_checker_obligations"],
+            "spares": data.get("spares"),
+            "spare_snapshot": data.get("spare_snapshot"),
+        }
+        candidate = {
+            "event": "note", "kind": kind, "lot": identity["lot"],
+            "correction": identity["correction"], "task": identity["task"],
+            "data": expected,
+        }
+        if data != expected:
+            fail(f"{kind} changes its exact Correction Round stop account", expected)
+        expected_attempt_stop_data(
+            entries + [candidate], len(entries), candidate,
+            f"the {kind} correction attempt stop",
+        )
+        return expected
     base = {"sha": data.get("sha"), "attempt": identity["attempt"]}
     if data != base:
         fail(f"{kind} accepts only its stop SHA and attempt number")
@@ -5185,6 +6375,72 @@ def normalize_attempt_stop(entries, kind, data, context):
 
 def validate_attempt_failed_entry(entries, index, entry):
     data = note_data(entry)
+    if data.get("schema") == 2 or entry.get("correction") is not None:
+        correction = entry.get("correction")
+        unit = {"kind": "correction", "built": entry.get("lot"), "round": correction}
+        required = {
+            "schema", "unit", "unit_authority_sha256", "execution_authority_sha256",
+            "attempt", "classification", "checker_obligation", "design_proof_authority",
+            "final_checker_input_set_sha256", "final_checker_assignments",
+            "final_checker_transition", "final_checker_output_set_sha256",
+        }
+        if set(data) != required or data.get("schema") != 2 or data.get("unit") != unit \
+                or not construction_positive_integer(correction) \
+                or not construction_positive_integer(entry.get("task")) \
+                or not construction_positive_integer(data.get("attempt")) \
+                or data.get("classification") not in CONSTRUCTION_CLASSIFICATIONS \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("unit_authority_sha256"))) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(data.get("execution_authority_sha256")),
+                ) or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(data.get("final_checker_input_set_sha256")),
+                ) or not isinstance(data.get("final_checker_assignments"), list) \
+                or not isinstance(data.get("final_checker_transition"), dict) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(data.get("final_checker_output_set_sha256")),
+                ):
+            fail("a durable correction attempt.failed has malformed exact authority")
+        state = current_correction_contract_state(
+            entries, index, entry["lot"], correction,
+            "the durable correction attempt failure",
+        )
+        if data["unit_authority_sha256"] != state["authority_sha256"] \
+                or data["execution_authority_sha256"] \
+                != state["execution_authority_sha256"]:
+            fail("a durable correction attempt.failed changes its execution authority")
+        report = failure_report_state(
+            entries, index, entry["lot"], entry["task"], data["attempt"],
+            data["classification"], "the durable correction attempt failure", correction,
+        )
+        current = outstanding_final_checker_set(
+            entries, index, entry["lot"], correction,
+            "the durable correction attempt failure",
+        )
+        task_state = state["artifact"]["tasks"][entry["task"] - 1]
+        assigned = sorted(
+            member["source"]["obligation_id"] for member in current["entries"]
+            if member["assignment"]["owner"] == "task"
+            and member["assignment"]["task"] == entry["task"]
+        )
+        identity = {
+            "lot": entry["lot"], "correction": correction, "task": entry["task"],
+            "attempt": data["attempt"],
+            "unit": unit,
+            "unit_authority_sha256": data["unit_authority_sha256"],
+            "execution_authority_sha256": data["execution_authority_sha256"],
+            "contract_sha256": task_state["task_contract_sha256"],
+            "design_proof_authority": data["design_proof_authority"],
+            "outstanding_final_checker_set_sha256": final_checker_set_sha256(current),
+            "assigned_final_checker_obligations": assigned,
+        }
+        expected = correction_attempt_failed_account(
+            entries, index, identity,
+            {"attempt": data["attempt"], "classification": data["classification"]},
+            report,
+        )
+        if data != expected:
+            fail("a durable correction attempt.failed changes its exact account", expected)
+        return
     attempt_number, classification = data.get("attempt"), data.get("classification")
     if not construction_positive_integer(attempt_number) \
             or classification not in CONSTRUCTION_CLASSIFICATIONS \
@@ -5207,6 +6463,77 @@ def validate_attempt_failed_entry(entries, index, entry):
 
 def validate_attempt_succeeded_entry(entries, index, entry):
     data = note_data(entry)
+    if data.get("schema") == 2 or entry.get("correction") is not None:
+        expected_keys = {
+            "schema", "unit", "unit_authority_sha256", "execution_authority_sha256",
+            "attempt_predecessor", "attempt", "sha", "gate", "retry",
+            "design_proof_authority",
+            "final_checker_input_set_sha256", "final_checker_assignments",
+            "final_checker_transition", "final_checker_output_set_sha256",
+        }
+        correction = entry.get("correction")
+        unit = {"kind": "correction", "built": entry.get("lot"), "round": correction}
+        if set(data) != expected_keys or data.get("schema") != 2 \
+                or not construction_positive_integer(correction) \
+                or not construction_positive_integer(entry.get("task")) \
+                or not construction_positive_integer(data.get("attempt")) \
+                or data.get("unit") != unit \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("unit_authority_sha256"))) \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("execution_authority_sha256"))) \
+                or not isinstance(data.get("attempt_predecessor"), dict) \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("sha"))) \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))) \
+                or data.get("retry") != "-" \
+                or not isinstance(data.get("design_proof_authority"), dict) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(data.get("final_checker_input_set_sha256")),
+                ) or not isinstance(data.get("final_checker_assignments"), list) \
+                or not isinstance(data.get("final_checker_transition"), dict) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(data.get("final_checker_output_set_sha256")),
+                ):
+            fail("a durable correction attempt.succeeded has malformed exact authority")
+        state = current_correction_contract_state(
+            entries, index, entry["lot"], correction,
+            "the durable correction attempt success",
+        )
+        current = outstanding_final_checker_set(
+            entries, index, entry["lot"], correction,
+            "the durable correction attempt success",
+        )
+        task_state = state["artifact"]["tasks"][entry["task"] - 1]
+        assigned = assigned_final_checker_obligations(
+            current, unit, entry["task"], task_state,
+            "the durable correction attempt success",
+        )
+        identity = {
+            "lot": entry["lot"], "correction": correction, "task": entry["task"],
+            "attempt": data["attempt"], "unit": unit,
+            "unit_authority_sha256": state["authority_sha256"],
+            "execution_authority_sha256": state["execution_authority_sha256"],
+            "attempt_predecessor": data["attempt_predecessor"],
+            "outstanding_final_checker_set_sha256": final_checker_set_sha256(current),
+            "assigned_final_checker_obligations": assigned,
+        }
+        expected = correction_attempt_succeeded_account(
+            entries, index, identity, data["sha"], data["gate"],
+            "the durable correction attempt success",
+        )
+        if data != expected:
+            fail("a durable correction attempt.succeeded changes its exact account", expected)
+        verdict_index, _logical = correction_success_code_logical(
+            entries, index, identity, "the durable correction attempt success",
+        )
+        gate = subprocess.run(
+            ["bash", GATE_CHECK, "require-task-history", data["gate"], entry["lot"],
+             str(entry["task"]), str(data["attempt"]), data["sha"],
+             journal_line_proof(verdict_index), str(correction)],
+            capture_output=True, text=True,
+        )
+        if gate.returncode != 0:
+            fail("a durable correction attempt.succeeded has no exact final gate",
+                 gate.stderr or gate.stdout)
+        return
     retry = data.get("retry")
     if retry is None:
         return
@@ -5255,12 +6582,16 @@ def validate_construction_verdict_history(entries):
         elif entry.get("event") == "note" and entry.get("kind") == "attempt.succeeded":
             validate_attempt_succeeded_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") in {"paused", "aborted"} \
-                and isinstance(note_data(entry).get("attempt"), int):
+                and isinstance(note_data(entry).get("attempt"), int) \
+                and note_data(entry).get("schema") != 2:
             expected = expected_attempt_stop_data(
                 entries, index, entry, "the durable stopped attempt",
             )
             if note_data(entry) != expected:
                 fail("the durable stopped attempt changed its retry obligation", expected)
+    current_correction_stop_state(
+        entries, len(entries), "the durable Correction Round stop history",
+    )
 
 
 def normalize_consolidation_started(entries, data, round_number):
@@ -5611,8 +6942,23 @@ def validate_gate_subagent(event, data):
         "op", "scope", "owner", "lot", "task", "attempt", "head", "base",
         "tree", "gate", "code",
     }
+    correction_authority_keys = {
+        "contract_authority_sha256", "execution_authority_sha256",
+        "final_checker_set_sha256",
+    }
+    correction_attempt_authority_keys = correction_authority_keys | {"attempt_marker_sha256"}
     result_keys = {"green", "surface", "report", "report_sha256", "commands"}
-    identity_keys = base_keys | ({"execution"} if isinstance(data, dict) and "execution" in data else set())
+    correction_scope = isinstance(data, dict) \
+        and data.get("scope") in {
+            "correction-task", "correction-review", "correction-baseline",
+        }
+    correction_baseline = correction_scope and data.get("scope") == "correction-baseline"
+    identity_keys = base_keys \
+        | ({"correction"} | (
+            correction_authority_keys if correction_baseline
+            else correction_attempt_authority_keys
+        ) if correction_scope else set()) \
+        | ({"execution"} if isinstance(data, dict) and "execution" in data else set())
     expected_shapes = (identity_keys,) if event == "subagent-started" else (
         identity_keys | result_keys, identity_keys | {"unusable"},
     )
@@ -5620,13 +6966,78 @@ def validate_gate_subagent(event, data):
         fail(f"{event} gate-runner has an incomplete logical-check identity", data)
     if not isinstance(data.get("op"), str) or not re.fullmatch(r"[0-9a-f]{64}", data["op"]):
         fail(f"{event} gate-runner has an invalid operation identity")
-    if data.get("scope") not in {"task", "review", "baseline"}:
+    if data.get("scope") not in {
+        "task", "review", "baseline", "correction-task", "correction-review",
+        "correction-baseline",
+    }:
         fail(f"{event} gate-runner has an invalid scope")
     if "execution" in data and not re.fullmatch(r"[0-9a-f]{64}", str(data["execution"])):
         fail(f"{event} gate-runner has an invalid execution identity")
     if not isinstance(data.get("task"), int) or isinstance(data.get("task"), bool) \
             or not isinstance(data.get("attempt"), int) or isinstance(data.get("attempt"), bool):
         fail(f"{event} gate-runner has an invalid task identity")
+    if correction_scope:
+        correction = data.get("correction")
+        if not construction_positive_integer(correction):
+            fail(f"{event} gate-runner has no correction-round identity")
+        if correction_baseline:
+            if data.get("task") != 0 or data.get("attempt") != 0 \
+                    or not re.fullmatch(
+                        rf"correction/{re.escape(data['lot'])}/c{correction}/.+",
+                        data.get("owner", ""),
+                    ):
+                fail(f"{event} gate-runner has a malformed correction baseline owner")
+            entries = journal_entries()
+            state = current_correction_contract_state(
+                entries, len(entries), data["lot"], correction,
+                f"{event} correction baseline gate-runner",
+            )
+            current_set = outstanding_final_checker_set(
+                entries, len(entries), data["lot"], correction,
+                f"{event} correction baseline gate-runner",
+            )
+            expected_authority = {
+                "contract_authority_sha256": state["authority_sha256"],
+                "execution_authority_sha256": state["execution_authority_sha256"],
+                "final_checker_set_sha256": final_checker_set_sha256(current_set),
+            }
+        else:
+            owner_prefix = (
+                f"{data['lot']}/correction-{correction}/task-{data['task']}/"
+                f"attempt-{data['attempt']}"
+            )
+            expected_owner = owner_prefix if data["scope"] == "correction-task" \
+                else f"{owner_prefix}/code-round-"
+            if data["scope"] == "correction-task" and data.get("owner") != expected_owner \
+                    or data["scope"] == "correction-review" \
+                    and not re.fullmatch(
+                        re.escape(expected_owner) + r"[1-9][0-9]*", data.get("owner", ""),
+                    ):
+                fail(f"{event} gate-runner has a malformed correction owner")
+            identity = active_attempt_identity({
+                "lot": data["lot"], "correction": correction,
+                "task": data["task"], "attempt": data["attempt"],
+            }, f"{event} gate-runner", include_completion=True)
+            marker_path = os.path.join(WORKSPACE, "attempt-in-flight")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(marker_path, flags)
+                with os.fdopen(descriptor, "rb") as source:
+                    attempt_payload = source.read()
+            except OSError as exc:
+                fail(f"{event} gate-runner has no exact attempt marker", exc)
+            expected_authority = {
+                "contract_authority_sha256": identity["unit_authority_sha256"],
+                "execution_authority_sha256": identity["execution_authority_sha256"],
+                "final_checker_set_sha256": identity[
+                    "outstanding_final_checker_set_sha256"
+                ],
+                "attempt_marker_sha256": hashlib.sha256(attempt_payload).hexdigest(),
+            }
+        if any(data.get(key) != value for key, value in expected_authority.items()):
+            fail(f"{event} gate-runner changes its Correction authority", expected_authority)
+    elif isinstance(data, dict) and "correction" in data:
+        fail(f"{event} ordinary gate-runner carries a correction identity")
     if event == "subagent-ended" and "unusable" in data:
         if data["unusable"] not in CONSTRUCTION_UNUSABLE_RESULTS:
             fail("subagent-ended gate-runner has an invalid unusable result")
@@ -5644,19 +7055,26 @@ def validate_gate_subagent(event, data):
     marker = {}
     with open(GATE_MARKER, encoding="utf-8") as handle:
         lines = handle.read().splitlines()
-    if len(lines) not in {11, 12}:
+    if len(lines) < 11:
         fail("the live gate-check marker is malformed", {"lines": len(lines)})
     for line in lines:
         key, separator, value = line.partition(" ")
         if not separator or not value or key in marker:
             fail("the live gate-check marker is malformed", line)
         marker[key] = value
-    if set(marker) not in (base_keys, base_keys | {"execution"}):
+    marker_keys = base_keys \
+        | ({"correction"} | (
+            correction_authority_keys if correction_baseline
+            else correction_attempt_authority_keys
+        ) if correction_scope else set())
+    if set(marker) not in (marker_keys, marker_keys | {"execution"}):
         fail("the live gate-check marker has an incomplete identity", marker)
     normalized = dict(marker)
     try:
         normalized["task"] = int(normalized["task"])
         normalized["attempt"] = int(normalized["attempt"])
+        if "correction" in normalized:
+            normalized["correction"] = int(normalized["correction"])
     except ValueError:
         fail("the live gate-check marker has a non-numeric task identity")
     if "execution" in marker:
@@ -5669,7 +7087,7 @@ def validate_gate_subagent(event, data):
         if execution.returncode != 0:
             fail("the live gate-check marker has an invalid frozen execution", execution.stderr)
         normalized["execution"] = execution.stdout.strip()
-    identity_keys = base_keys | ({"execution"} if "execution" in marker else set())
+    identity_keys = marker_keys | ({"execution"} if "execution" in marker else set())
     if set(data) != (identity_keys if event == "subagent-started" else identity_keys | result_keys):
         if event != "subagent-ended" or set(data) != identity_keys | {"unusable"}:
             fail("the gate-runner event and marker disagree about execution identity", data)
@@ -8344,6 +9762,1664 @@ def normalize_correction_round_opening(entries, data, subject, *, historical=Fal
     return expected
 
 
+def correction_execution_account(authority_sha256, commit, tree, *, rewind=None, gate=None):
+    account = {
+        "schema": 1,
+        "contract_authority": authority_sha256,
+        "tree_authority": {
+            "rewind": rewind,
+            "commit": commit,
+            "tree": tree,
+            "gate": gate,
+        },
+    }
+    return account, hashlib.sha256(json.dumps(
+        account, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def git_commit_is_ancestor(ancestor, descendant):
+    return subprocess.run(
+        ["git", "-C", project_root(), "merge-base", "--is-ancestor", ancestor, descendant],
+        capture_output=True,
+    ).returncode == 0
+
+
+def retained_authority_chain(entries, before, state, base_commit, subject):
+    """Return retained controller transitions missing from one rewind base.
+
+    Stage 4 can produce post-task Correction artifact revisions. Later stages add
+    AMENDMENT, rebase, and controller-successor members to this same projector.
+    """
+    transitions = []
+    current_projection = subprocess.run(
+        ["git", "-C", project_root(), "show", f"{base_commit}:{state['path']}"],
+        capture_output=True,
+    )
+    current_projection_sha256 = (
+        hashlib.sha256(current_projection.stdout).hexdigest()
+        if current_projection.returncode == 0 else None
+    )
+    for index, entry in enumerate(entries[state["opening_index"] + 1:before],
+                                  state["opening_index"] + 1):
+        data = note_data(entry)
+        if entry.get("kind") != "correction.round.revised" \
+                or data.get("built") != state["built"] \
+                or data.get("round") != state["round"]:
+            continue
+        commit = data.get("commit")
+        if not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)):
+            fail(f"{subject}'s retained revision has no exact commit")
+        if git_commit_is_ancestor(commit, base_commit):
+            continue
+        source_projection = subprocess.run(
+            ["git", "-C", project_root(), "show", f"{commit}:{state['path']}"],
+            capture_output=True,
+        )
+        if source_projection.returncode != 0:
+            fail(f"{subject}'s retained revision has no exact artifact projection")
+        source_projection_sha256 = hashlib.sha256(source_projection.stdout).hexdigest()
+        if source_projection_sha256 == current_projection_sha256:
+            current_projection_sha256 = source_projection_sha256
+            continue
+        parent = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify", f"{commit}^"],
+            capture_output=True, text=True,
+        )
+        if parent.returncode != 0:
+            fail(f"{subject}'s retained revision has no exact parent")
+        semantic = {
+            "schema": 1,
+            "kind": "revision",
+            "proof": journal_line_proof(index),
+            "source_parent": parent.stdout.strip(),
+            "source_commit": commit,
+            "source_tree": data.get("tree"),
+            "artifact_sha256": data.get("artifact_sha256"),
+            "controller_sha256": data.get("controller_sha256"),
+        }
+        semantic["transition_sha256"] = hashlib.sha256(json.dumps(
+            semantic, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        transitions.append(semantic)
+        current_projection_sha256 = source_projection_sha256
+    return transitions
+
+
+def correction_rewind_pending_owner_sha256(data):
+    semantic = {key: value for key, value in data.items() if key != "pending_owner_sha256"}
+    return hashlib.sha256(json.dumps({
+        "schema": 1,
+        "disposition": "rewind",
+        "event": semantic,
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_correction_reland(transition, reland, onto, path, subject):
+    required = {
+        "authority", "onto_commit", "result_commit", "result_tree", "transition_sha256",
+    }
+    if not isinstance(reland, dict) or set(reland) != required \
+            or reland.get("authority") != transition["proof"] \
+            or reland.get("onto_commit") != onto \
+            or reland.get("transition_sha256") != transition["transition_sha256"] \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(reland.get("result_commit"))) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(reland.get("result_tree"))):
+        fail(f"{subject} has a malformed retained-authority re-land")
+    parent = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{reland['result_commit']}^"], capture_output=True, text=True,
+    )
+    tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{reland['result_commit']}^{{tree}}"], capture_output=True, text=True,
+    )
+    names = subprocess.run(
+        ["git", "-C", project_root(), "diff-tree", "--no-commit-id", "--name-only",
+         "-r", reland["result_commit"]], capture_output=True, text=True,
+    )
+    source_blob = subprocess.run(
+        ["git", "-C", project_root(), "show", f"{transition['source_commit']}:{path}"],
+        capture_output=True,
+    )
+    result_blob = subprocess.run(
+        ["git", "-C", project_root(), "show", f"{reland['result_commit']}:{path}"],
+        capture_output=True,
+    )
+    if parent.returncode != 0 or parent.stdout.strip() != onto \
+            or tree.returncode != 0 or tree.stdout.strip() != reland["result_tree"] \
+            or names.returncode != 0 or names.stdout.splitlines() != [path] \
+            or source_blob.returncode != 0 or result_blob.returncode != 0 \
+            or source_blob.stdout != result_blob.stdout:
+        fail(f"{subject}'s retained-authority re-land changes its exact projection")
+    return reland["result_commit"]
+
+
+def validate_correction_rewind_transition(
+        entries, index, entry, state, subject, *, candidate=False, pending=False,
+):
+    require_no_current_correction_stop(
+        entries, index, state["built"], state["round"], subject,
+    )
+    data = note_data(entry)
+    required = {
+        "schema", "unit", "unit_authority_sha256", "cause", "previous_rewind",
+        "ref_root", "rewind", "target", "attempt", "moved", "crossed_authorities",
+        "relands", "result_commit", "result_tree", "gate",
+        "outstanding_retry_set_sha256", "pending_owner_sha256",
+    }
+    unit = {"kind": "correction", "built": state["built"], "round": state["round"]}
+    expected_root = f"refs/bwr/{Path(WORKSPACE).name}/{state['built']}/correction-{state['round']}"
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 2 \
+            or data.get("unit") != unit \
+            or data.get("unit_authority_sha256") != state["authority_sha256"] \
+            or data.get("previous_rewind") != state.get("rewind_proof") \
+            or data.get("ref_root") != expected_root \
+            or data.get("rewind") != state.get("rewind_ordinal", 0) + 1 \
+            or not construction_positive_integer(data.get("attempt")) \
+            or data.get("outstanding_retry_set_sha256") != final_checker_set_sha256(
+                outstanding_final_checker_set(
+                    entries, index, state["built"], state["round"], subject,
+                )
+            ) \
+            or data.get("pending_owner_sha256") != correction_rewind_pending_owner_sha256(data):
+        fail(f"{subject} has malformed Correction Round rewind authority")
+
+    cause = data.get("cause")
+    if not isinstance(cause, dict) or set(cause) != {"kind", "proof"} \
+            or cause.get("kind") != "attempt-failure":
+        fail(f"{subject} has an unsupported correction rewind cause")
+    failure_index, failure = journal_entry_from_proof(
+        entries, cause.get("proof"), f"{subject}'s attempt failure",
+    )
+    failure_data = note_data(failure)
+    if failure_index >= index or failure.get("kind") != "attempt.failed" \
+            or failure.get("lot") != state["built"] \
+            or failure.get("correction") != state["round"] \
+            or failure_data.get("schema") != 2 \
+            or failure_data.get("classification") != "C3.9c" \
+            or data["attempt"] != failure_data.get("attempt", 0) + 1:
+        fail(f"{subject} does not consume one exact correction C3.9c failure")
+    validate_attempt_failed_entry(entries, failure_index, failure)
+
+    target = data.get("target")
+    earliest = target.get("earliest_task") if isinstance(target, dict) else None
+    base_ref = f"{expected_root}/task-{earliest - 1}" if construction_positive_integer(earliest) else None
+    if not isinstance(target, dict) or set(target) != {
+        "earliest_task", "base_ref", "base_commit", "base_tree",
+    } or not construction_positive_integer(earliest) \
+            or earliest > failure.get("task", 0) or target.get("base_ref") != base_ref \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(target.get("base_commit"))) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(target.get("base_tree"))):
+        fail(f"{subject} has a malformed correction rewind target")
+    base_tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{target['base_commit']}^{{tree}}"], capture_output=True, text=True,
+    )
+    if base_tree.returncode != 0 or base_tree.stdout.strip() != target["base_tree"]:
+        fail(f"{subject}'s correction rewind base tree changed")
+
+    accepted_before_failure = accepted_correction_tasks_at_prefix(
+        entries, failure_index + 1, state["built"], state["round"], state["opening_index"],
+    )
+    accepted_by_task = dict(accepted_before_failure)
+    expected_base_commit = (
+        state["opening"]["base_commit"] if earliest == 1
+        else accepted_by_task.get(earliest - 1)
+    )
+    if expected_base_commit is None or target["base_commit"] != expected_base_commit:
+        fail(f"{subject} changes its selected accepted rewind base")
+
+    moved = data.get("moved")
+    if not isinstance(moved, list):
+        fail(f"{subject} has no correction rewind ref account")
+    moved_tasks = []
+    for member in moved:
+        task = member.get("task") if isinstance(member, dict) else None
+        expected_from = f"{expected_root}/task-{task}"
+        expected_to = f"{expected_root}/rewound/r-{data['rewind']}/task-{task}"
+        if not isinstance(member, dict) or set(member) != {"task", "commit", "from", "to"} \
+                or not construction_positive_integer(task) or task < earliest \
+                or member.get("from") != expected_from or member.get("to") != expected_to \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(member.get("commit"))):
+            fail(f"{subject} has a malformed moved correction ref")
+        source = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{expected_from}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        destination = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify", f"{expected_to}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        source_commit = source.stdout.strip() if source.returncode == 0 else None
+        destination_commit = destination.stdout.strip() if destination.returncode == 0 else None
+        if pending:
+            if source_commit not in {None, member["commit"]} \
+                    or destination_commit not in {None, member["commit"]} \
+                    or source_commit is None and destination_commit is None:
+                fail(f"{subject}'s pending correction ref prefix changed")
+        elif source_commit is not None or destination_commit != member["commit"]:
+            fail(f"{subject}'s immutable rewound correction ref changed")
+        moved_tasks.append(task)
+    if moved_tasks != sorted(set(moved_tasks)):
+        fail(f"{subject}'s moved correction refs are not ordered and unique")
+    expected_moved = [
+        {
+            "task": task,
+            "commit": commit,
+            "from": f"{expected_root}/task-{task}",
+            "to": f"{expected_root}/rewound/r-{data['rewind']}/task-{task}",
+        }
+        for task, commit in accepted_before_failure if task >= earliest
+    ]
+    if moved != expected_moved:
+        fail(f"{subject} changes its complete accepted correction suffix")
+
+    expected_crossed = retained_authority_chain(
+        entries, index, state, target["base_commit"], subject,
+    )
+    if data.get("crossed_authorities") != expected_crossed:
+        fail(f"{subject} changes its complete retained authority chain")
+    relands = data.get("relands")
+    if not isinstance(relands, list) or len(relands) != len(expected_crossed):
+        fail(f"{subject} has no exact retained-authority re-land account")
+    result = target["base_commit"]
+    for transition, reland in zip(expected_crossed, relands, strict=True):
+        result = validate_correction_reland(
+            transition, reland, result, state["path"], subject,
+        )
+    result_tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{result}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    if data.get("result_commit") != result or result_tree.returncode != 0 \
+            or data.get("result_tree") != result_tree.stdout.strip():
+        fail(f"{subject} changes its exact rewind result tree")
+    if expected_crossed:
+        if pending and data.get("gate") is None:
+            pass
+        elif not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))):
+            fail(f"{subject} has no retained-authority baseline gate")
+        else:
+            gate = subprocess.run(
+                [
+                    "bash", GATE_CHECK, "require-correction-baseline",
+                    data["gate"], result, state["built"], str(state["round"]),
+                ],
+                capture_output=True, text=True,
+            )
+            if gate.returncode != 0:
+                fail(
+                    f"{subject} has no exact retained-authority baseline",
+                    gate.stderr or gate.stdout,
+                )
+    elif data.get("gate") is not None:
+        fail(f"{subject} invents a gate for an empty retained authority chain")
+
+    proof = state.get("rewind_proof") if candidate else journal_line_proof(index)
+    execution, execution_sha256 = correction_execution_account(
+        state["authority_sha256"], result, data["result_tree"],
+        rewind=proof, gate=data["gate"],
+    )
+    return {
+        **state,
+        "rewind_proof": proof,
+        "rewind_ordinal": data["rewind"],
+        "execution_commit": result,
+        "execution_tree": data["result_tree"],
+        "execution_gate": data["gate"],
+        "execution_authority": execution,
+        "execution_authority_sha256": execution_sha256,
+    }
+
+
+def correction_revision_baseline_owner(built, correction, revision, commit):
+    return f"correction/{built}/c{correction}/revision-{revision}/{commit}"
+
+
+def correction_artifact_from_object(built, correction, relative, digest, subject):
+    expected_relative = f"corrections/{built}/objects/sha256-{digest}.md"
+    if relative != expected_relative:
+        fail(f"{subject} changes its content-addressed artifact path")
+    try:
+        path = validate_content_object(WORKSPACE, built, digest, ".md")
+        artifact = load_correction_round_parser().parse_artifact(
+            path, expected_built=built, expected_round=correction,
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable correction artifact", exc)
+    if str(path.relative_to(WORKSPACE)) != relative \
+            or artifact.get("artifact_sha256") != digest:
+        fail(f"{subject}'s immutable correction artifact changes its identity")
+    return artifact
+
+
+def accepted_correction_task_entries_at_prefix(entries, before, built, correction, opening_index):
+    accepted = {}
+    for index, entry in enumerate(entries[opening_index + 1:before], opening_index + 1):
+        data = note_data(entry)
+        if entry.get("kind") == "attempt.succeeded" \
+                and entry.get("lot") == built and entry.get("correction") == correction:
+            task = entry.get("task")
+            if construction_positive_integer(task):
+                validate_attempt_succeeded_entry(entries, index, entry)
+                accepted[task] = (index, data)
+        elif entry.get("kind") == "rewind.done" and data.get("schema") == 2 \
+                and data.get("unit") == {
+                    "kind": "correction", "built": built, "round": correction,
+                }:
+            for member in data.get("moved", []):
+                task = member.get("task") if isinstance(member, dict) else None
+                current = accepted.get(task)
+                if current is not None and current[1].get("sha") == member.get("commit"):
+                    del accepted[task]
+    tasks = sorted(accepted)
+    if tasks != list(range(1, len(tasks) + 1)):
+        fail("accepted Correction Round tasks are not one sequential prefix")
+    return [(task, accepted[task][0], accepted[task][1]) for task in tasks]
+
+
+def accepted_correction_tasks_at_prefix(entries, before, built, correction, opening_index):
+    return [
+        (task, data["sha"])
+        for task, _index, data in accepted_correction_task_entries_at_prefix(
+            entries, before, built, correction, opening_index,
+        )
+    ]
+
+
+def correction_attempt_predecessor_account(
+        entries, before, built, correction, task, subject,
+        *, require_first_missing=False,
+):
+    if not construction_positive_integer(task):
+        fail(f"{subject} has no positive Correction Round task")
+    state = current_correction_contract_state(
+        entries, before, built, correction, subject,
+    )
+    accepted = accepted_correction_task_entries_at_prefix(
+        entries, before, built, correction, state["opening_index"],
+    )
+    if require_first_missing and task != len(accepted) + 1:
+        fail(f"{subject} does not name the first missing Correction Round task", {
+            "expected": len(accepted) + 1, "actual": task,
+        })
+    later = [accepted_task for accepted_task, _index, _data in accepted
+             if accepted_task > task]
+    if later:
+        fail(f"{subject} follows a later active Correction Round task", later)
+    accepted = [member for member in accepted if member[0] < task]
+    accepted_tasks = [accepted_task for accepted_task, _index, _data in accepted]
+    if accepted_tasks != list(range(1, task)):
+        fail(f"{subject} has another active Correction Round task prefix", {
+            "expected": list(range(1, task)), "actual": accepted_tasks,
+        })
+    ref_root = f"refs/bwr/{Path(WORKSPACE).name}/{built}/correction-{correction}"
+    prefix = []
+    for accepted_task, success_index, success in accepted:
+        stable = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{ref_root}/task-{accepted_task}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if stable.returncode != 0 or stable.stdout.strip() != success["sha"]:
+            fail(f"{subject}'s stable correction task-{accepted_task} ref changed")
+        prefix.append({
+            "task": accepted_task,
+            "success": journal_line_proof(success_index),
+            "commit": success["sha"],
+        })
+    if accepted:
+        predecessor = correction_revision_parent(
+            state, [(accepted_task, success["sha"])
+                    for accepted_task, _index, success in accepted], subject,
+        )
+    else:
+        predecessor = state["execution_commit"]
+    tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{predecessor}^{{tree}}"], capture_output=True, text=True,
+    )
+    if tree.returncode != 0:
+        fail(f"{subject} has no exact Correction Round predecessor tree")
+    tree_authority = {
+        "rewind": state.get("rewind_proof"),
+        "commit": state["execution_commit"],
+        "tree": state["execution_tree"],
+        "gate": state["execution_gate"],
+    }
+    return {
+        "schema": 1,
+        "unit": {"kind": "correction", "built": built, "round": correction},
+        "task": task,
+        "accepted_prefix": prefix,
+        "contract_authority": state["proof"],
+        "contract_authority_sha256": state["authority_sha256"],
+        "tree_authority": tree_authority,
+        "execution_authority_sha256": state["execution_authority_sha256"],
+        "commit": predecessor,
+        "tree": tree.stdout.strip(),
+    }
+
+
+def validate_correction_revision_projection(
+        entries, index, state, data, subject, *, artifact=None,
+):
+    if artifact is None:
+        artifact = correction_artifact_from_object(
+            state["built"], state["round"], data.get("artifact_object"),
+            data.get("artifact_sha256"), subject,
+        )
+    elif artifact.get("artifact_sha256") != data.get("artifact_sha256"):
+        fail(f"{subject} changes its validated artifact identity")
+    accepted = accepted_correction_tasks_at_prefix(
+        entries, index, state["built"], state["round"], state["opening_index"],
+    )
+    if accepted and data.get("from_task", 0) <= accepted[-1][0]:
+        fail(f"{subject} changes an accepted correction task contract")
+    for task, commit_sha in accepted:
+        matches = [(success_index, success) for success_index, success in enumerate(
+            entries[state["opening_index"] + 1:index], state["opening_index"] + 1,
+        ) if success.get("kind") == "attempt.succeeded"
+            and success.get("lot") == state["built"]
+            and success.get("correction") == state["round"]
+            and success.get("task") == task
+            and note_data(success).get("sha") == commit_sha]
+        if len(matches) != 1:
+            fail(f"{subject}'s accepted task {task} has no one exact success proof")
+        validate_attempt_succeeded_entry(entries, matches[0][0], matches[0][1])
+    previous = state["artifact"]
+    if accepted:
+        committed = subprocess.run(
+            ["git", "-C", project_root(), "show", f"{accepted[-1][1]}:{state['path']}"],
+            capture_output=True,
+        )
+        if committed.returncode != 0:
+            fail(f"{subject}'s accepted predecessor has no correction artifact")
+        try:
+            previous = load_correction_round_parser().parse_artifact_bytes(
+                committed.stdout, expected_built=state["built"], expected_round=state["round"],
+            )
+        except ValueError as exc:
+            fail(f"{subject}'s accepted predecessor artifact is malformed", exc)
+        accepted_artifact = previous
+        current_artifact = state["artifact"]
+        root_keys = (
+            "schema", "state", "identity", "route", "source_findings",
+            "source_finding_coverage", "finding_coverage",
+            "amendment", "amendment_opening", "amendment_commit", "absorbed_findings",
+            "accepted_contributions",
+        )
+        if any(accepted_artifact[key] != current_artifact[key] for key in root_keys) \
+                or len(accepted_artifact["tasks"]) != len(current_artifact["tasks"]):
+            fail(f"{subject}'s accepted predecessor changes its current contract authority")
+        previous = {
+            **current_artifact,
+            "tasks": [
+                accepted_artifact["tasks"][task - 1]
+                if any(accepted_task == task for accepted_task, _commit in accepted)
+                else current_artifact["tasks"][task - 1]
+                for task in range(1, len(current_artifact["tasks"]) + 1)
+            ],
+        }
+
+    if artifact["schema"] != previous["schema"] \
+            or artifact["state"] != previous["state"] \
+            or artifact["identity"] != previous["identity"] \
+            or artifact["route"] != previous["route"] \
+            or artifact["source_findings"] != previous["source_findings"] \
+            or artifact["source_finding_coverage"] != previous["source_finding_coverage"] \
+            or artifact["finding_coverage"] != previous["finding_coverage"] \
+            or artifact["manifest_sha256"] != previous["manifest_sha256"] \
+            or len(artifact["tasks"]) != len(previous["tasks"]):
+        fail(f"{subject} changes Correction Round decomposition or route authority")
+    changed = []
+    for old_task, new_task in zip(previous["tasks"], artifact["tasks"], strict=True):
+        immutable = (
+            "task", "title", "covers", "depends_on", "obligation_ids",
+            "design_sha256", "disagreement_sha256",
+        )
+        if any(new_task[key] != old_task[key] for key in immutable):
+            fail(f"{subject} changes task-owned or structural bytes in task {old_task['task']}")
+        if new_task["design_contract_sha256"] != old_task["design_contract_sha256"]:
+            changed.append(old_task["task"])
+        elif new_task["task_contract_sha256"] != old_task["task_contract_sha256"]:
+            fail(f"{subject} changes an unsupported task consumer account")
+    if not changed or min(changed) != data.get("from_task") \
+            or any(task < data.get("from_task", 0) for task in changed):
+        fail(f"{subject} does not name the earliest changed task contract")
+    return artifact, accepted
+
+
+def correction_revision_parent(state, accepted, subject):
+    """Select the newest authenticated commit after the accepted task prefix."""
+    accepted_commit = accepted[-1][1]
+    authority_commit = state["execution_commit"]
+    if accepted_commit == authority_commit:
+        return accepted_commit
+    if git_commit_is_ancestor(accepted_commit, authority_commit):
+        return authority_commit
+    if git_commit_is_ancestor(authority_commit, accepted_commit):
+        return accepted_commit
+    fail(f"{subject} has divergent task and controller-document authority")
+
+
+def validate_correction_revision_transition(
+        entries, index, entry, state, subject, *, candidate=False,
+):
+    require_no_current_correction_stop(
+        entries, index, state["built"], state["round"], subject,
+    )
+    data = note_data(entry)
+    if data.get("schema") == 2:
+        return validate_final_checker_contract_map_revision(
+            entries, index, entry, state, subject, candidate=candidate,
+        )
+    required = {
+        "schema", "built", "round", "revision", "previous",
+        "previous_execution_authority_sha256", "reason", "from_task",
+        "artifact_sha256", "artifact_object", "controller_sha256",
+        "manifest_sha256", "commit", "tree", "gate", "retry_transition",
+    }
+    if set(data) != required or data.get("schema") != 1 \
+            or data.get("built") != state["built"] \
+            or data.get("round") != state["round"] \
+            or data.get("revision") != state["revision"] + 1 \
+            or data.get("previous") != state["proof"] \
+            or data.get("previous_execution_authority_sha256") \
+            != state["execution_authority_sha256"] \
+            or data.get("reason") != "task-contract-correction" \
+            or not construction_positive_integer(data.get("from_task")) \
+            or data["from_task"] > len(state["artifact"]["tasks"]) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("artifact_sha256"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("controller_sha256"))) \
+            or data.get("manifest_sha256") != state["artifact"]["manifest_sha256"] \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("commit"))) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("tree"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))) \
+            or not isinstance(data.get("retry_transition"), dict):
+        fail(f"{subject} has a malformed bounded revision authority", data)
+    artifact, accepted = validate_correction_revision_projection(
+        entries, index, state, data, subject,
+    )
+    expected_retry_transition = correction_revision_retry_transition(
+        entries, index, state, artifact, subject,
+    )
+    if data["retry_transition"] != expected_retry_transition:
+        fail(f"{subject} changes its final-checker preservation transition")
+
+    commit = subprocess.run(
+        ["git", "-C", project_root(), "cat-file", "-e", f"{data['commit']}^{{commit}}"],
+        capture_output=True,
+    )
+    tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{data['commit']}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0 or tree.returncode != 0 or tree.stdout.strip() != data["tree"]:
+        fail(f"{subject} has no exact revision commit and tree")
+    if not accepted:
+        if data["commit"] != state["commit"] or data["tree"] != state["tree"] \
+                or data["gate"] != state["gate"]:
+            fail(f"{subject}'s pre-task revision changes the accepted correction base")
+    else:
+        expected_parent = correction_revision_parent(state, accepted, subject)
+        parent = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify", f"{data['commit']}^"],
+            capture_output=True, text=True,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != expected_parent:
+            fail(f"{subject}'s controller document commit has another parent")
+        names = subprocess.run(
+            ["git", "-C", project_root(), "diff-tree", "--no-commit-id", "--name-only",
+             "-r", data["commit"]], capture_output=True, text=True,
+        )
+        blob = subprocess.run(
+            ["git", "-C", project_root(), "show", f"{data['commit']}:{state['path']}"],
+            capture_output=True,
+        )
+        if names.returncode != 0 or names.stdout.splitlines() != [state["path"]] \
+                or blob.returncode != 0 or hashlib.sha256(blob.stdout).hexdigest() \
+                != data["artifact_sha256"]:
+            fail(f"{subject}'s controller document commit changes another path or bytes")
+        gate = subprocess.run(
+            [
+                "bash", GATE_CHECK, "require-correction-baseline",
+                data["gate"], data["commit"], state["built"], str(state["round"]),
+            ],
+            capture_output=True, text=True,
+        )
+        if gate.returncode != 0:
+            fail(f"{subject} has no exact fresh controller-document baseline",
+                 gate.stderr or gate.stdout)
+        owner = correction_revision_baseline_owner(
+            state["built"], state["round"], data["revision"], data["commit"],
+        )
+        accepted_gates = [note_data(candidate) for candidate in entries[:index]
+                          if candidate.get("event") == "subagent-ended"
+                          and candidate.get("kind") == "gate-runner"
+                          and note_data(candidate).get("op") == data["gate"]
+                          and "unusable" not in note_data(candidate)]
+        if len(accepted_gates) != 1 \
+                or accepted_gates[0].get("scope") != "correction-baseline" \
+                or accepted_gates[0].get("owner") != owner \
+                or accepted_gates[0].get("head") != data["commit"] \
+                or accepted_gates[0].get("base") != data["commit"] \
+                or accepted_gates[0].get("green") is not True \
+                or accepted_gates[0].get("surface") != "unchanged":
+            fail(f"{subject} changes its controller-document baseline owner")
+    if data["controller_sha256"] != artifact["controller_sha256"]:
+        fail(f"{subject} changes its controller projection digest")
+    authority_sha256 = hashlib.sha256(json.dumps(
+        data, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    _, execution_sha256 = correction_execution_account(
+        authority_sha256, data["commit"], data["tree"],
+    )
+    return {
+        **state,
+        "proof": state["proof"] if candidate else journal_line_proof(index),
+        "kind": "correction.round.revised",
+        "authority_sha256": authority_sha256,
+        "revision": data["revision"],
+        "artifact": artifact,
+        "artifact_sha256": data["artifact_sha256"],
+        "artifact_object": data["artifact_object"],
+        "controller_sha256": data["controller_sha256"],
+        "commit": data["commit"],
+        "tree": data["tree"],
+        "gate": data["gate"],
+        "rewind_proof": None,
+        "execution_commit": data["commit"],
+        "execution_tree": data["tree"],
+        "execution_gate": None,
+        "execution_authority_sha256": execution_sha256,
+    }
+
+
+def validate_final_checker_contract_map_revision(
+        entries, index, entry, state, subject, *, candidate=False,
+):
+    data = note_data(entry)
+    required = {
+        "schema", "producer", "built", "round", "revision", "previous",
+        "previous_execution_authority_sha256", "mapping", "artifact_sha256",
+        "artifact_object", "controller_sha256", "manifest_sha256",
+        "design_contract_sha256", "consumer_account_sha256", "task_contract_sha256",
+        "design_sha256", "disagreement_sha256", "commit", "tree", "baseline",
+        "retry_transition",
+    }
+    mapping_keys = {
+        "operation", "source_failure", "task", "prior_ids", "added_ids", "next_ids",
+        "previous_consumer_account_sha256", "next_consumer_account_sha256",
+        "previous_task_contract_sha256", "next_task_contract_sha256",
+    }
+    mapping = data.get("mapping")
+    baseline = data.get("baseline")
+    if set(data) != required or data.get("schema") != 2 \
+            or data.get("producer") != "final-checker-contract-map" \
+            or data.get("built") != state["built"] or data.get("round") != state["round"] \
+            or data.get("revision") != state["revision"] + 1 \
+            or data.get("previous") != state["proof"] \
+            or data.get("previous_execution_authority_sha256") \
+            != state["execution_authority_sha256"] \
+            or not isinstance(mapping, dict) or set(mapping) != mapping_keys \
+            or not construction_positive_integer(mapping.get("task")) \
+            or mapping["task"] > len(state["artifact"]["tasks"]) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(mapping.get("operation"))) \
+            or not isinstance(baseline, dict) \
+            or set(baseline) != {"required", "reused_gate"} \
+            or not isinstance(baseline.get("required"), bool):
+        fail(f"{subject} has a malformed final-checker contract-map revision", data)
+
+    failure_index, failure = journal_entry_from_proof(
+        entries, mapping["source_failure"], f"{subject}'s source failure",
+    )
+    failure_data = note_data(failure)
+    if failure_index >= index or failure.get("kind") != "attempt.failed" \
+            or failure.get("lot") != state["built"] \
+            or failure.get("correction") != state["round"] \
+            or failure.get("task") != mapping["task"] \
+            or failure_data.get("schema") != 2:
+        fail(f"{subject} has no exact source correction failure")
+    additions = failure_data.get("final_checker_transition", {}).get("additions")
+    if not isinstance(additions, list) or not additions:
+        fail(f"{subject}'s source failure adds no final-checker obligation")
+    added_ids = [item.get("source", {}).get("obligation_id") for item in additions]
+    if mapping["added_ids"] != added_ids:
+        fail(f"{subject} maps another final-checker source set")
+    if len(additions) != 1 or not isinstance(additions[0].get("source"), dict):
+        fail(f"{subject} has no one exact final-checker source")
+    source = additions[0]["source"]
+    settlement_index, settlement = journal_entry_from_proof(
+        entries, source.get("settlement"), f"{subject}'s final-checker settlement",
+    )
+    if settlement_index >= failure_index:
+        fail(f"{subject}'s final-checker settlement follows its source failure")
+    settlement_data = note_data(settlement)
+    if source.get("checker") == "design":
+        validate_design_resolution_entry(entries, settlement_index, settlement)
+    elif source.get("checker") == "code":
+        validate_code_resolution_entry(entries, settlement_index, settlement)
+    else:
+        fail(f"{subject} has an unsupported final-checker source")
+
+    try:
+        artifact = correction_artifact_from_object(
+            state["built"], state["round"], data["artifact_object"],
+            data["artifact_sha256"], subject,
+        )
+    except (KeyError, ValueError) as exc:
+        fail(f"{subject} has no exact changed correction artifact", exc)
+    accepted = accepted_correction_task_entries_at_prefix(
+        entries, index, state["built"], state["round"], state["opening_index"],
+    )
+    previous = state["artifact"]
+    if accepted:
+        committed = subprocess.run(
+            ["git", "-C", project_root(), "show",
+             f"{accepted[-1][2]['sha']}:{state['path']}"],
+            capture_output=True,
+        )
+        if committed.returncode != 0:
+            fail(f"{subject}'s accepted predecessor has no correction artifact")
+        try:
+            previous = load_correction_round_parser().parse_artifact_bytes(
+                committed.stdout, expected_built=state["built"],
+                expected_round=state["round"],
+            )
+        except ValueError as exc:
+            fail(f"{subject}'s accepted predecessor artifact is malformed", exc)
+        if previous["controller_sha256"] != state["controller_sha256"] \
+                or previous["manifest_sha256"] != state["artifact"]["manifest_sha256"]:
+            fail(f"{subject}'s accepted predecessor changes its current contract authority")
+    root_keys = (
+        "schema", "state", "identity", "route", "source_findings",
+        "source_finding_coverage", "finding_coverage", "manifest_sha256",
+        "amendment", "amendment_opening", "amendment_commit", "absorbed_findings",
+        "accepted_contributions", "task_projection",
+    )
+    if any(artifact[key] != previous[key] for key in root_keys) \
+            or len(artifact["tasks"]) != len(previous["tasks"]):
+        fail(f"{subject} changes structural Correction Round authority")
+    target = mapping["task"]
+    for old_task, new_task in zip(previous["tasks"], artifact["tasks"], strict=True):
+        if old_task["task"] != target:
+            if new_task != old_task:
+                fail(f"{subject} changes a foreign correction task", {
+                    "task": old_task["task"],
+                    "fields": sorted(
+                        key for key in set(old_task) | set(new_task)
+                        if old_task.get(key) != new_task.get(key)
+                    ),
+                })
+            continue
+        stable = {
+            key for key in old_task
+            if key not in {
+                "obligation_ids", "consumer_account_sha256", "task_contract_sha256",
+                "design_sha256", "disagreement_sha256",
+            }
+        }
+        mismatches = []
+        changed_stable = sorted(
+            key for key in stable if new_task[key] != old_task[key]
+        )
+        if changed_stable:
+            mismatches.append(f"stable task bytes: {', '.join(changed_stable)}")
+        if old_task["obligation_ids"] != mapping["prior_ids"]:
+            mismatches.append("prior obligation identities")
+        if new_task["obligation_ids"] != mapping["next_ids"]:
+            mismatches.append("next obligation identities")
+        if sorted(set(mapping["prior_ids"] + mapping["added_ids"])) \
+                != mapping["next_ids"]:
+            mismatches.append("added obligation projection")
+        if old_task["consumer_account_sha256"] \
+                != mapping["previous_consumer_account_sha256"]:
+            mismatches.append("previous consumer account")
+        if new_task["consumer_account_sha256"] \
+                != mapping["next_consumer_account_sha256"]:
+            mismatches.append("next consumer account")
+        if old_task["task_contract_sha256"] \
+                != mapping["previous_task_contract_sha256"]:
+            mismatches.append("previous task contract")
+        if new_task["task_contract_sha256"] != mapping["next_task_contract_sha256"]:
+            mismatches.append("next task contract")
+        if mismatches:
+            fail(f"{subject} changes more than the target Consumes account", mismatches)
+        if new_task["design_sha256"] != settlement_data.get("design_sha256") \
+                or new_task["disagreement_sha256"] \
+                != settlement_data.get("disagreement_sha256"):
+            fail(f"{subject} changes the checker-settled task-owned document")
+        projected = {
+            "design_contract_sha256": new_task["design_contract_sha256"],
+            "consumer_account_sha256": new_task["consumer_account_sha256"],
+            "task_contract_sha256": new_task["task_contract_sha256"],
+            "design_sha256": new_task["design_sha256"],
+            "disagreement_sha256": new_task["disagreement_sha256"],
+        }
+        if any(data[key] != value for key, value in projected.items()):
+            fail(f"{subject} changes its target task projection")
+
+    if data["controller_sha256"] != artifact["controller_sha256"] \
+            or data["manifest_sha256"] != artifact["manifest_sha256"] \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("commit"))) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("tree"))):
+        fail(f"{subject} changes its document authority")
+    tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{data['commit']}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    if tree.returncode != 0 or tree.stdout.strip() != data["tree"]:
+        fail(f"{subject} has no exact document commit tree")
+    if any(task == target for task, _position, _success in accepted):
+        fail(f"{subject} changes an already accepted task consumer account")
+    if accepted:
+        if baseline["required"] is not True or baseline["reused_gate"] is not None:
+            fail(f"{subject}'s repository document change requires one fresh baseline")
+        parent = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify", f"{data['commit']}^"],
+            capture_output=True, text=True,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != accepted[-1][2]["sha"]:
+            fail(f"{subject}'s controller document commit has another parent")
+        names = subprocess.run(
+            ["git", "-C", project_root(), "diff-tree", "--no-commit-id", "--name-only",
+             "-r", data["commit"]], capture_output=True, text=True,
+        )
+        blob = subprocess.run(
+            ["git", "-C", project_root(), "show", f"{data['commit']}:{state['path']}"],
+            capture_output=True,
+        )
+        if names.returncode != 0 or names.stdout.splitlines() != [state["path"]] \
+                or blob.returncode != 0 or hashlib.sha256(blob.stdout).hexdigest() \
+                != data["artifact_sha256"]:
+            fail(f"{subject}'s controller document commit changes another path or bytes")
+    else:
+        if baseline != {"required": False, "reused_gate": state["gate"]} \
+                or data["commit"] != state["commit"] or data["tree"] != state["tree"]:
+            fail(f"{subject}'s pre-task map changes the accepted correction base")
+
+    current_set = outstanding_final_checker_set(
+        entries, index, state["built"], state["round"], subject,
+    )
+    try:
+        output_set = validate_final_checker_transition(
+            current_set, data["retry_transition"], transfer_kind="contract-map-document",
+        )
+    except ValueError as exc:
+        fail(f"{subject} has an invalid map-preservation transition", exc)
+    current_accounts = [
+        {"source": item["source"], "assignment": item["assignment"]}
+        for item in current_set["entries"]
+    ]
+    output_accounts = [
+        {"source": item["source"], "assignment": item["assignment"]}
+        for item in output_set["entries"]
+    ]
+    if output_accounts != current_accounts:
+        fail(f"{subject}'s document publication remaps an obligation")
+
+    authority_sha256 = hashlib.sha256(json.dumps(
+        data, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    gate = state["gate"] if not baseline["required"] else None
+    _, execution_sha256 = correction_execution_account(
+        authority_sha256, data["commit"], data["tree"], gate=gate,
+    )
+    return {
+        **state,
+        "proof": state["proof"] if candidate else journal_line_proof(index),
+        "kind": "correction.round.revised",
+        "authority_sha256": authority_sha256,
+        "revision": data["revision"],
+        "artifact": artifact,
+        "artifact_sha256": data["artifact_sha256"],
+        "artifact_object": data["artifact_object"],
+        "controller_sha256": data["controller_sha256"],
+        "commit": data["commit"],
+        "tree": data["tree"],
+        "gate": gate,
+        "rewind_proof": None,
+        "execution_commit": data["commit"],
+        "execution_tree": data["tree"],
+        "execution_gate": gate,
+        "execution_authority_sha256": execution_sha256,
+    }
+
+
+def final_checker_contract_mapping_account(
+        entries, before, built, correction, operation, source_failure, task, subject,
+):
+    require_no_current_correction_stop(
+        entries, before, built, correction, subject,
+    )
+    if not isinstance(built, str) or not construction_positive_integer(correction) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(operation)) \
+            or not construction_positive_integer(task):
+        fail(f"{subject} has a malformed mapping identity")
+    failure_index, failure = journal_entry_from_proof(
+        entries, source_failure, f"{subject}'s source failure",
+    )
+    failure_data = note_data(failure)
+    if failure_index >= before or failure.get("kind") != "attempt.failed" \
+            or failure.get("lot") != built or failure.get("correction") != correction \
+            or failure.get("task") != task or failure_data.get("schema") != 2:
+        fail(f"{subject} has no exact source correction failure")
+
+    state = current_correction_contract_state(entries, before, built, correction, subject)
+    if state["kind"] != "correction.round.revised" \
+            or state["artifact"]["tasks"][task - 1]["task"] != task:
+        fail(f"{subject} has no exact controller document revision")
+    revisions = [
+        (index, entry) for index, entry in enumerate(entries[:before])
+        if entry.get("kind") == "correction.round.revised"
+        and note_data(entry).get("built") == built
+        and note_data(entry).get("round") == correction
+        and note_data(entry).get("schema") == 2
+        and note_data(entry).get("producer") == "final-checker-contract-map"
+        and note_data(entry).get("mapping", {}).get("operation") == operation
+    ]
+    if len(revisions) != 1 or journal_line_proof(revisions[0][0]) != state["proof"]:
+        fail(f"{subject} has no one exact current map document revision")
+    revision_data = note_data(revisions[0][1])
+    if revision_data["mapping"]["source_failure"] != source_failure \
+            or revision_data["mapping"]["task"] != task:
+        fail(f"{subject}'s document revision maps another failure")
+
+    baseline = revision_data["baseline"]
+    if baseline["required"]:
+        owner = correction_revision_baseline_owner(
+            built, correction, revision_data["revision"], revision_data["commit"],
+        )
+        accepted_gates = [note_data(candidate) for candidate in entries[:before]
+                          if candidate.get("event") == "subagent-ended"
+                          and candidate.get("kind") == "gate-runner"
+                          and note_data(candidate).get("scope") == "correction-baseline"
+                          and note_data(candidate).get("owner") == owner
+                          and note_data(candidate).get("head") == revision_data["commit"]
+                          and note_data(candidate).get("base") == revision_data["commit"]
+                          and "unusable" not in note_data(candidate)]
+        if len(accepted_gates) != 1 or accepted_gates[0].get("green") is not True \
+                or accepted_gates[0].get("surface") != "unchanged":
+            fail(f"{subject} has no one exact fresh controller-document baseline")
+        gate = accepted_gates[0].get("op")
+        verified = subprocess.run(
+            [
+                "bash", GATE_CHECK, "require-correction-baseline",
+                gate, revision_data["commit"], built, str(correction),
+            ],
+            capture_output=True, text=True,
+        )
+        if verified.returncode != 0:
+            fail(f"{subject} has no accepted controller-document baseline",
+                 verified.stderr or verified.stdout)
+    else:
+        gate = baseline["reused_gate"]
+        if gate != state["gate"]:
+            fail(f"{subject} changes its exact reused correction gate")
+    _, mapped_execution_sha256 = correction_execution_account(
+        state["authority_sha256"], state["commit"], state["tree"], gate=gate,
+    )
+    document = {
+        "kind": "correction-artifact",
+        "authority": state["proof"],
+        "sha256": state["artifact_sha256"],
+        "controller_sha256": state["controller_sha256"],
+        "manifest_sha256": state["artifact"]["manifest_sha256"],
+        "design_contract_sha256": state["artifact"]["tasks"][task - 1][
+            "design_contract_sha256"
+        ],
+        "consumer_account_sha256": state["artifact"]["tasks"][task - 1][
+            "consumer_account_sha256"
+        ],
+        "task_contract_sha256": state["artifact"]["tasks"][task - 1][
+            "task_contract_sha256"
+        ],
+        "design_sha256": state["artifact"]["tasks"][task - 1]["design_sha256"],
+        "disagreement_sha256": state["artifact"]["tasks"][task - 1][
+            "disagreement_sha256"
+        ],
+        "commit": state["commit"],
+        "tree": state["tree"],
+        "gate": gate,
+        "consumer_map_check": None,
+    }
+
+    current = outstanding_final_checker_set(entries, before, built, correction, subject)
+    map_entries = [
+        member for member in current["entries"]
+        if member["assignment"]["owner"] == "task-contract-map"
+        and member["assignment"]["unit"].get("operation") == operation
+    ]
+    obligation_ids = [member["source"]["obligation_id"] for member in map_entries]
+    if not obligation_ids or obligation_ids != revision_data["mapping"]["added_ids"]:
+        fail(f"{subject} has no exact pending obligation set")
+    if any(
+        member["assignment"]["unit"] != {
+            "kind": "task-contract-map", "operation": operation,
+            "work_unit": {"kind": "correction", "built": built, "round": correction},
+            "target_task": task, "document_kind": "correction-artifact",
+        }
+        for member in map_entries
+    ):
+        fail(f"{subject} changes its pending map owner")
+
+    task_state = state["artifact"]["tasks"][task - 1]
+    expected_document_ids = sorted(
+        member["source"]["obligation_id"] for member in current["entries"]
+        if member["assignment"]["owner"] == "task"
+        and member["assignment"]["unit"] == {
+            "kind": "correction", "built": built, "round": correction,
+        } and member["assignment"]["task"] == task
+    )
+    expected_document_ids = sorted(set(expected_document_ids + obligation_ids))
+    if task_state["obligation_ids"] != expected_document_ids:
+        fail(f"{subject}'s controller document does not own the complete task assignment")
+
+    dispositions = []
+    for member in current["entries"]:
+        obligation_id = member["source"]["obligation_id"]
+        if obligation_id in obligation_ids:
+            assignment = {
+                "unit": {"kind": "correction", "built": built, "round": correction},
+                "task": task,
+                "phase": member["source"]["required_consumer_phase"],
+                "owner": "task",
+                "task_contract_sha256": task_state["task_contract_sha256"],
+            }
+            outcome = "deferred"
+        else:
+            assignment = {
+                key: value for key, value in member["assignment"].items()
+                if key != "mapping_proof"
+            }
+            if assignment.get("owner") == "task" \
+                    and assignment.get("unit") == {
+                        "kind": "correction", "built": built, "round": correction,
+                    } and assignment.get("task") == task:
+                assignment["task_contract_sha256"] = task_state[
+                    "task_contract_sha256"
+                ]
+            outcome = "deferred" if assignment["owner"] == "task" else "carried"
+        dispositions.append({
+            "obligation_id": obligation_id,
+            "outcome": outcome,
+            "assignment": assignment,
+            "evidence": None,
+        })
+    transition, _output = materialize_final_checker_transition(
+        current, additions=[], dispositions=dispositions,
+        transfer_kind="contract-mapped",
+    )
+    design_proof_carry = None
+    if any(member["source"]["checker"] == "code" for member in map_entries):
+        input_authority = failure_data.get("design_proof_authority")
+        if not isinstance(input_authority, dict) \
+                or set(input_authority) != {"schema", "root", "carries"} \
+                or input_authority.get("schema") != 1 \
+                or not isinstance(input_authority.get("root"), dict) \
+                or not isinstance(input_authority.get("carries"), list):
+            fail(f"{subject} has no exact input Design-proof authority")
+        previous_carry = None
+        if input_authority["carries"]:
+            previous = input_authority["carries"][-1]
+            if not isinstance(previous, dict) or set(previous) != {"event", "carry"} \
+                    or not isinstance(previous.get("carry"), dict) \
+                    or not re.fullmatch(
+                        r"[1-9][0-9]*:[0-9a-f]{64}", str(previous.get("event")),
+                    ) or not re.fullmatch(
+                        r"[0-9a-f]{64}", str(previous["carry"].get("carry_id")),
+                    ):
+                fail(f"{subject} has a malformed prior Design-proof carry")
+            previous_carry = {
+                "event": previous["event"],
+                "carry_id": previous["carry"]["carry_id"],
+            }
+        semantic_carry = {
+            "schema": 1,
+            "input_authority_sha256": hashlib.sha256(json.dumps(
+                input_authority, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest(),
+            "root": input_authority["root"],
+            "previous_carry": previous_carry,
+            "from": {
+                "document_authority": revision_data["previous"],
+                "execution_authority_sha256": revision_data[
+                    "previous_execution_authority_sha256"
+                ],
+                "consumer_account_sha256": revision_data["mapping"][
+                    "previous_consumer_account_sha256"
+                ],
+                "task_contract_sha256": revision_data["mapping"][
+                    "previous_task_contract_sha256"
+                ],
+            },
+            "to": {
+                "document_authority": state["proof"],
+                "execution_authority_sha256": mapped_execution_sha256,
+                "consumer_account_sha256": task_state["consumer_account_sha256"],
+                "task_contract_sha256": task_state["task_contract_sha256"],
+            },
+            "change": {
+                "field": "Consumes final-checker obligations",
+                "prior_ids": revision_data["mapping"]["prior_ids"],
+                "added_ids": revision_data["mapping"]["added_ids"],
+                "next_ids": revision_data["mapping"]["next_ids"],
+            },
+        }
+        design_proof_carry = {
+            **semantic_carry,
+            "carry_id": hashlib.sha256(json.dumps(
+                semantic_carry, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest(),
+        }
+    return {
+        "schema": 1,
+        "operation": operation,
+        "source_failure": source_failure,
+        "built": built,
+        "round": correction,
+        "task": task,
+        "document_revision": state["proof"],
+        "document_authority_sha256": state["authority_sha256"],
+        "obligation_ids": obligation_ids,
+        "consumer_account_sha256": task_state["consumer_account_sha256"],
+        "task_contract_sha256": task_state["task_contract_sha256"],
+        "document": document,
+        "design_proof_carry": design_proof_carry,
+        "retry_transition": transition,
+    }
+
+
+def design_proof_authority_after_mapping(entries, index, entry, subject):
+    data = note_data(entry)
+    carry = data.get("design_proof_carry")
+    if not isinstance(carry, dict):
+        return None
+    failure_index, failure = journal_entry_from_proof(
+        entries, data.get("source_failure"), f"{subject}'s source failure",
+    )
+    if failure_index >= index:
+        fail(f"{subject}'s source failure follows its mapping")
+    input_authority = note_data(failure).get("design_proof_authority")
+    if not isinstance(input_authority, dict) \
+            or carry.get("input_authority_sha256") != hashlib.sha256(json.dumps(
+                input_authority, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest() \
+            or carry.get("root") != input_authority.get("root"):
+        fail(f"{subject} changes its input Design-proof authority")
+    semantic = {key: value for key, value in carry.items() if key != "carry_id"}
+    if set(semantic) != {
+        "schema", "input_authority_sha256", "root", "previous_carry",
+        "from", "to", "change",
+    } or carry.get("carry_id") != hashlib.sha256(json.dumps(
+        semantic, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest():
+        fail(f"{subject} has a malformed Design-proof carry identity")
+    return {
+        "schema": 1,
+        "root": input_authority["root"],
+        "carries": [
+            *input_authority["carries"],
+            {"event": journal_line_proof(index), "carry": carry},
+        ],
+    }
+
+
+def design_proof_authority_for_assigned_code(
+        entries, before, current, unit, task, task_state, subject,
+):
+    assigned = assigned_final_checker_obligations(
+        current, unit, task, task_state, subject,
+    )
+    assigned_set = set(assigned)
+    code_members = [
+        member for member in current["entries"]
+        if member["source"]["obligation_id"] in assigned_set
+        and member["source"]["checker"] == "code"
+    ]
+    design_members = [
+        member for member in current["entries"]
+        if member["source"]["obligation_id"] in assigned_set
+        and member["source"]["checker"] == "design"
+    ]
+    if not code_members:
+        return None, None
+
+    mapping_by_transition = {}
+    for index, entry in enumerate(entries[:before]):
+        if entry.get("kind") != "final-checker.contract-mapped":
+            continue
+        transition = note_data(entry).get("retry_transition")
+        transition_id = transition.get("transition_id") \
+            if isinstance(transition, dict) else None
+        if isinstance(transition_id, str):
+            mapping_by_transition.setdefault(transition_id, []).append((index, entry))
+
+    mapped_by_index = {}
+    for member in code_members:
+        contract_maps = [
+            transfer for transfer in member["transfers"]
+            if transfer.get("kind") == "contract-mapped"
+        ]
+        if not contract_maps:
+            fail(f"{subject} has no code-obligation assignment transfer")
+        for transfer in contract_maps:
+            matches = mapping_by_transition.get(transfer.get("transition_id"), [])
+            if len(matches) != 1:
+                fail(f"{subject} has no one exact code-obligation contract map")
+            index, entry = matches[0]
+            if entry.get("lot") != unit["built"] \
+                    or entry.get("correction") != unit["round"] \
+                    or entry.get("task") != task:
+                fail(f"{subject}'s code obligation belongs to another contract map")
+            validate_final_checker_contract_mapped_entry(entries, index, entry)
+            mapped_by_index[index] = entry
+
+    mapped = sorted(mapped_by_index.items())
+    code_ids = {
+        member["source"]["obligation_id"] for member in code_members
+    }
+    code_source_maps = [
+        (index, entry) for index, entry in mapped
+        if code_ids.intersection(note_data(entry).get("obligation_ids", []))
+    ]
+    if not code_source_maps:
+        fail(f"{subject} has no code-source contract map")
+    latest_index, latest_entry = code_source_maps[-1]
+    authority = design_proof_authority_after_mapping(
+        entries, latest_index, latest_entry, subject,
+    )
+    if not isinstance(authority, dict):
+        fail(f"{subject} has no mapped Design-proof authority for code work")
+    required_events = {
+        journal_line_proof(index) for index, _entry in code_source_maps
+    }
+    actual_events = {
+        carry.get("event") for carry in authority.get("carries", [])
+        if isinstance(carry, dict)
+    }
+    if not required_events.issubset(actual_events):
+        fail(f"{subject}'s mapped Design-proof authority drops an earlier code obligation")
+    latest_carry = authority["carries"][-1].get("carry") \
+        if authority.get("carries") else None
+    root = authority.get("root")
+    current_state = current_correction_contract_state(
+        entries, before, unit["built"], unit["round"], subject,
+    )
+    if not isinstance(latest_carry, dict) \
+            or latest_carry.get("to", {}).get("document_authority") \
+            != current_state["proof"] \
+            or latest_carry.get("to", {}).get("execution_authority_sha256") \
+            != current_state["execution_authority_sha256"]:
+        return latest_index, None
+    # A pending Design member owns the first phase. The code carry remains history only.
+    if design_members:
+        return latest_index, None
+    if isinstance(root, dict) and root.get("design_contract_sha256") \
+            != task_state.get("design_contract_sha256"):
+        if any(
+            member["assignment"].get("task_contract_sha256")
+            != task_state.get("task_contract_sha256")
+            or not any(
+                transfer.get("kind") == "contract-map-document"
+                and transfer.get("to", {}).get("task_contract_sha256")
+                == task_state.get("task_contract_sha256")
+                for transfer in member["transfers"]
+            )
+            for member in code_members
+        ):
+            fail(f"{subject}'s revised code obligation has no current task contract")
+        return latest_index, None
+    if latest_carry.get("to", {}).get("task_contract_sha256") \
+            != task_state.get("task_contract_sha256") \
+            or latest_carry.get("to", {}).get("consumer_account_sha256") \
+            != task_state.get("consumer_account_sha256"):
+        fail(f"{subject}'s mapped Design-proof authority does not reach the current task contract")
+    return latest_index, authority
+
+
+def normalize_final_checker_contract_mapped(entries, data, subject):
+    if not isinstance(data, dict):
+        fail(f"{subject} requires structured mapping data")
+    expected = final_checker_contract_mapping_account(
+        entries, len(entries), data.get("built"), data.get("round"),
+        data.get("operation"), data.get("source_failure"), data.get("task"), subject,
+    )
+    if data != expected:
+        fail(f"{subject} changes its exact task assignment", expected)
+    return expected
+
+
+def validate_final_checker_contract_mapped_entry(entries, index, entry):
+    data = note_data(entry)
+    duplicates = [candidate for candidate in entries[:index]
+                  if candidate.get("kind") == "final-checker.contract-mapped"
+                  and note_data(candidate).get("operation") == data.get("operation")]
+    if duplicates:
+        fail("a final-checker contract-map operation has duplicate terminals")
+    expected = final_checker_contract_mapping_account(
+        entries, index, data.get("built"), data.get("round"),
+        data.get("operation"), data.get("source_failure"), data.get("task"),
+        "a durable final-checker contract map",
+    )
+    if data != expected:
+        fail("a durable final-checker contract map changes its exact task assignment", expected)
+
+
+def current_correction_contract_state(entries, before, built, correction, subject):
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "correction.round.opened"
+                and note_data(entry).get("built") == built
+                and note_data(entry).get("round") == correction]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact Correction Round opening")
+    opening_index, opening_entry = openings[0]
+    opening = note_data(opening_entry)
+    normalize_correction_round_opening(
+        entries[:opening_index], opening, f"{subject}'s opening", historical=True,
+    )
+    artifact = correction_artifact_from_object(
+        built, correction, opening["artifact_object"], opening["artifact_sha256"], subject,
+    )
+    tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{opening['base_commit']}^{{tree}}"], capture_output=True, text=True,
+    )
+    if tree.returncode != 0:
+        fail(f"{subject}'s opening base has no exact tree")
+    authority_sha256 = hashlib.sha256(json.dumps(
+        opening, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    _, execution_sha256 = correction_execution_account(
+        authority_sha256, opening["base_commit"], tree.stdout.strip(),
+    )
+    state = {
+        "built": built,
+        "round": correction,
+        "opening_index": opening_index,
+        "opening": opening,
+        "proof": journal_line_proof(opening_index),
+        "kind": "correction.round.opened",
+        "authority_sha256": authority_sha256,
+        "revision": 1,
+        "path": opening["artifact"],
+        "artifact": artifact,
+        "artifact_sha256": opening["artifact_sha256"],
+        "artifact_object": opening["artifact_object"],
+        "controller_sha256": opening["controller_sha256"],
+        "commit": opening["base_commit"],
+        "tree": tree.stdout.strip(),
+        "gate": artifact["identity"]["correction_base_gate"],
+        "rewind_proof": None,
+        "rewind_ordinal": 0,
+        "execution_commit": opening["base_commit"],
+        "execution_tree": tree.stdout.strip(),
+        "execution_gate": None,
+        "execution_authority_sha256": execution_sha256,
+    }
+    for index, entry in enumerate(entries[opening_index + 1:before], opening_index + 1):
+        if entry.get("kind") == "rewind.done" \
+                and note_data(entry).get("schema") == 2 \
+                and note_data(entry).get("unit") == {
+                    "kind": "correction", "built": built, "round": correction,
+                }:
+            state = validate_correction_rewind_transition(
+                entries, index, entry, state, subject,
+            )
+        elif entry.get("kind") == "correction.round.revised" \
+                and note_data(entry).get("built") == built \
+                and note_data(entry).get("round") == correction:
+            state = validate_correction_revision_transition(
+                entries, index, entry, state, subject,
+            )
+        elif entry.get("kind") == "final-checker.contract-mapped" \
+                and entry.get("lot") == built and entry.get("correction") == correction:
+            validate_final_checker_contract_mapped_entry(entries, index, entry)
+            document = note_data(entry).get("document")
+            if not isinstance(document, dict) \
+                    or document.get("authority") != state["proof"] \
+                    or document.get("sha256") != state["artifact_sha256"] \
+                    or document.get("controller_sha256") != state["controller_sha256"] \
+                    or document.get("manifest_sha256") \
+                    != state["artifact"]["manifest_sha256"] \
+                    or document.get("commit") != state["commit"] \
+                    or document.get("tree") != state["tree"] \
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(document.get("gate"))) \
+                    or document.get("consumer_map_check") is not None:
+                fail(f"{subject}'s final-checker map changes its document authority")
+            state = {
+                **state,
+                "gate": document["gate"],
+                "execution_gate": document["gate"],
+                "execution_authority_sha256": correction_execution_account(
+                    state["authority_sha256"], state["commit"], state["tree"],
+                    gate=document["gate"],
+                )[1],
+            }
+    return state
+
+
+def normalize_correction_rewind(entries, data, context, subject):
+    if not isinstance(data, dict):
+        fail(f"{subject} requires structured correction rewind data")
+    unit = data.get("unit")
+    built = unit.get("built") if isinstance(unit, dict) else None
+    correction = unit.get("round") if isinstance(unit, dict) else None
+    if context.get("lot") != built or context.get("correction") != correction:
+        fail(f"{subject} does not match the controller's Correction Round context")
+    state = current_correction_contract_state(
+        entries, len(entries), built, correction, subject,
+    )
+    candidate = {
+        "event": "note", "kind": "rewind.done", "lot": built,
+        "correction": correction, "task": context.get("task"), "data": data,
+    }
+    validate_correction_rewind_transition(
+        entries + [candidate], len(entries), candidate, state, subject, candidate=True,
+    )
+    return data
+
+
+def validate_correction_rewind_entry(entries, index, entry):
+    data = note_data(entry)
+    unit = data.get("unit") if isinstance(data, dict) else None
+    built = unit.get("built") if isinstance(unit, dict) else None
+    correction = unit.get("round") if isinstance(unit, dict) else None
+    state = current_correction_contract_state(
+        entries, index, built, correction, "a durable correction rewind",
+    )
+    validate_correction_rewind_transition(
+        entries, index, entry, state, "a durable correction rewind",
+    )
+
+
+def normalize_correction_round_revision(entries, data, subject):
+    if not isinstance(data, dict):
+        fail(f"{subject} requires structured revision data")
+    state = current_correction_contract_state(
+        entries, len(entries), data.get("built"), data.get("round"), subject,
+    )
+    candidate = {"kind": "correction.round.revised", "data": data}
+    validate_correction_revision_transition(
+        entries + [candidate], len(entries), candidate, state, subject, candidate=True,
+    )
+    return data
+
+
+def validate_correction_round_revision_entry(entries, index, entry):
+    data = note_data(entry)
+    state = current_correction_contract_state(
+        entries, index, data.get("built"), data.get("round"),
+        "a durable correction.round.revised",
+    )
+    validate_correction_revision_transition(
+        entries, index, entry, state, "a durable correction.round.revised",
+    )
+
+
+def correction_round_built_account(entries, before, built, correction, subject):
+    if not isinstance(built, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built,
+    ) or not construction_positive_integer(correction):
+        fail(f"{subject} has a malformed Correction Round identity")
+    require_no_current_correction_stop(
+        entries, before, built, correction, subject,
+    )
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "correction.round.opened"
+                and note_data(entry).get("built") == built
+                and note_data(entry).get("round") == correction]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact Correction Round opening")
+    opening_index, opening_entry = openings[0]
+    opening_data = note_data(opening_entry)
+    normalize_correction_round_opening(
+        entries[:opening_index], opening_data, f"{subject}'s opening", historical=True,
+    )
+    if any(entry.get("kind") in {
+        "correction.round.built", "correction.round.resolved", "correction.round.escalated",
+    } and note_data(entry).get("built") == built
+        and note_data(entry).get("round") == correction
+        for entry in entries[opening_index + 1:before]):
+        fail(f"{subject} follows an existing Correction Round terminal")
+
+    opening_proof = journal_line_proof(opening_index)
+    contract_state = current_correction_contract_state(
+        entries, before, built, correction, subject,
+    )
+    authority_sha256 = contract_state["authority_sha256"]
+    retry_set = outstanding_final_checker_set(
+        entries, before, built, correction, subject,
+    )
+    retry_set_sha256 = final_checker_set_sha256(retry_set)
+    if retry_set != empty_final_checker_set():
+        fail(f"{subject} has outstanding final-checker obligations")
+    ref_root = f"refs/bwr/{Path(WORKSPACE).name}/{built}/correction-{correction}"
+    active_successes = accepted_correction_task_entries_at_prefix(
+        entries, before, built, correction, opening_index,
+    )
+    if [task for task, _index, _data in active_successes] \
+            != list(range(1, opening_data["tasks"] + 1)):
+        fail(f"{subject} has no complete active Correction Round task prefix")
+    successes = []
+    attempts = 0
+    for task, success_index, success_data in active_successes:
+        success = entries[success_index]
+        validate_attempt_succeeded_entry(entries, success_index, success)
+        stable = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{ref_root}/task-{task}^{{commit}}"], capture_output=True, text=True,
+        )
+        if stable.returncode != 0 or stable.stdout.strip() != success_data["sha"]:
+            fail(f"{subject}'s stable correction task-{task} ref changed")
+        predecessor = correction_attempt_predecessor_account(
+            entries, success_index, built, correction, task, subject,
+        )
+        if success_data.get("attempt_predecessor") != predecessor:
+            fail(f"{subject}'s correction task-{task} changes its frozen predecessor")
+        parent = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{success_data['sha']}^"], capture_output=True, text=True,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != predecessor["commit"]:
+            fail(f"{subject}'s correction task-{task} changes its direct predecessor")
+        attempts += success_data["attempt"]
+        successes.append((success_index, success_data))
+
+    refs = subprocess.run(
+        ["git", "-C", project_root(), "for-each-ref", "--format=%(refname)", ref_root],
+        capture_output=True, text=True,
+    )
+    if refs.returncode != 0:
+        fail(f"{subject}'s Correction Round ref namespace is unreadable")
+    stable_tasks = sorted(
+        int(match.group(1)) for line in refs.stdout.splitlines()
+        if (match := re.fullmatch(re.escape(ref_root) + r"/task-([1-9][0-9]*)", line))
+    )
+    if stable_tasks != list(range(1, opening_data["tasks"] + 1)):
+        fail(f"{subject}'s stable correction task refs are incomplete or foreign")
+
+    final_data = successes[-1][1]
+    if final_data.get("unit_authority_sha256") != authority_sha256 \
+            or final_data.get("execution_authority_sha256") \
+            != contract_state["execution_authority_sha256"]:
+        fail(f"{subject}'s final correction task does not consume the current execution authority")
+    parser = load_correction_round_parser()
+    repository_path = opening_data["artifact"]
+    blob = subprocess.run(
+        ["git", "-C", project_root(), "show", f"{final_data['sha']}:{repository_path}"],
+        capture_output=True,
+    )
+    if blob.returncode != 0:
+        fail(f"{subject}'s final commit has no correction artifact")
+    artifact_sha256 = hashlib.sha256(blob.stdout).hexdigest()
+    artifact_object = (
+        f"corrections/{built}/objects/sha256-{artifact_sha256}.md"
+    )
+    try:
+        object_path = validate_content_object(WORKSPACE, built, artifact_sha256, ".md")
+        artifact = parser.parse_artifact(
+            object_path, expected_built=built, expected_round=correction,
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable final correction artifact", exc)
+    if str(object_path.relative_to(WORKSPACE)) != artifact_object \
+            or object_path.read_bytes() != blob.stdout \
+            or artifact.get("state") != "active" \
+            or artifact.get("artifact_sha256") != artifact_sha256 \
+            or artifact.get("controller_sha256") != contract_state["controller_sha256"] \
+            or artifact.get("manifest_sha256") \
+            != contract_state["artifact"]["manifest_sha256"] \
+            or len(artifact.get("tasks", [])) != opening_data["tasks"]:
+        fail(f"{subject}'s final correction artifact changes its frozen controller authority")
+
+    expected = {
+        "schema": 1,
+        "built": built,
+        "round": correction,
+        "opening": opening_proof,
+        "latest_authority": contract_state["proof"],
+        "execution_authority_sha256": contract_state["execution_authority_sha256"],
+        "tasks": opening_data["tasks"],
+        "attempts": attempts,
+        "commit": final_data["sha"],
+        "gate": final_data["gate"],
+        "artifact_sha256": artifact_sha256,
+        "artifact_object": artifact_object,
+        "retry_set_sha256": retry_set_sha256,
+    }
+    expected["generation_sha256"] = hashlib.sha256(json.dumps(
+        expected, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    return expected
+
+
+def normalize_correction_round_built(entries, data, subject):
+    if not isinstance(data, dict):
+        fail(f"{subject} requires structured terminal data")
+    expected = correction_round_built_account(
+        entries, len(entries), data.get("built"), data.get("round"), subject,
+    )
+    if data != expected:
+        fail(f"{subject} changes its exact completed generation", {
+            "expected": expected, "actual": data,
+        })
+    return expected
+
+
+def validate_correction_round_built_entry(entries, index, entry):
+    data = note_data(entry)
+    expected = correction_round_built_account(
+        entries, index, data.get("built"), data.get("round"),
+        "a durable correction.round.built",
+    )
+    if data != expected:
+        fail("a durable correction.round.built changes its completed generation", expected)
+
+
 def validate_lot_delivered(entries, data):
     subject = "a lot delivery"
     if set(data) != {"sha", "passes"}:
@@ -8928,11 +12004,21 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
     context = context or {}
     if kind == "attempt.failed":
         data = normalize_attempt_failed(notes, data, context)
+    elif kind == "rewind.done" and isinstance(data, dict) and data.get("schema") == 2:
+        data = normalize_correction_rewind(notes, data, context, "the correction rewind")
     elif kind == "attempt.succeeded":
         data = normalize_attempt_succeeded(notes, data, context)
     elif kind in {"paused", "aborted"} and isinstance(data, dict) \
             and "attempt" in data:
         data = normalize_attempt_stop(notes, kind, data, context)
+    elif kind in {"paused", "aborted"}:
+        correction_stop = normalize_correction_bare_stop(notes, kind, data, context)
+        if correction_stop is not None:
+            data = correction_stop
+    elif kind == "resumed":
+        correction_resume = normalize_correction_resume(notes, data, context)
+        if correction_resume is not None:
+            data = correction_resume
     elif kind == "spec.written":
         data = normalize_spec_written(notes, data, text)
     elif kind == "round.opened":
@@ -9295,6 +12381,16 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             journal_entries(), data or {}, "a Correction Round opening",
         )
 
+    if kind == "correction.round.revised":
+        data = normalize_correction_round_revision(
+            journal_entries(), data or {}, "a bounded Correction Round revision",
+        )
+
+    if kind == "correction.round.built":
+        data = normalize_correction_round_built(
+            journal_entries(), data or {}, "a completed Correction Round",
+        )
+
     if kind == "sublot.opened":
         validate_sublot_opening(
             journal_entries(), data, text, "a product-review sub-lot opening",
@@ -9513,7 +12609,36 @@ def cmd_session_retired(args):
         fail(f"`{step}` failed after the status change", detail, journaled=True)
 
 
-def cmd_subagent_started(args):
+def correction_gate_subagent_lease(event, data, lease, operation):
+    correction_scope = isinstance(data, dict) and data.get("scope") in {
+        "correction-task", "correction-review", "correction-baseline",
+    }
+    if not correction_scope:
+        if lease is not None or operation is not None:
+            fail("an inherited Correction lease cannot append an ordinary gate boundary")
+        return
+    if lease is None or operation is None:
+        fail("a Correction gate boundary is owned by its official gate helper")
+    expected_operation = (
+        f"correction-gate:{data.get('op')}"
+        if event == "subagent-started"
+        else f"correction-gate-terminal:{data.get('op')}"
+    )
+    if operation != expected_operation:
+        fail("the Correction gate boundary has another lease operation")
+    generation = hashlib.sha256(json.dumps({
+        "event": event,
+        "kind": "gate-runner",
+        "data": data,
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    try:
+        lease.verify(operation)
+        lease.bind_generation(generation)
+    except (OSError, ValueError) as exc:
+        fail("the Correction gate boundary does not own its authority lease", str(exc))
+
+
+def cmd_subagent_started(args, *, correction_lease=None, correction_operation=None):
     if args.kind not in SUBAGENT_KINDS:
         fail(f"unknown subagent kind `{args.kind}`",
              "Look the name up where the call was given to you — never invent a variant.")
@@ -9521,6 +12646,9 @@ def cmd_subagent_started(args):
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
     if args.kind == "gate-runner":
+        correction_gate_subagent_lease(
+            "subagent-started", data, correction_lease, correction_operation,
+        )
         validate_gate_subagent("subagent-started", data)
     elif args.kind == "finding-verifier" and isinstance(data, dict) \
             and data.get("owner") == "spec-loop":
@@ -9563,7 +12691,7 @@ def cmd_subagent_started(args):
     )
 
 
-def cmd_subagent_ended(args):
+def cmd_subagent_ended(args, *, correction_lease=None, correction_operation=None):
     if args.kind not in SUBAGENT_KINDS:
         fail(f"unknown subagent kind `{args.kind}`",
              "Look the name up where the call was given to you — never invent a variant.")
@@ -9571,6 +12699,9 @@ def cmd_subagent_ended(args):
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
     if args.kind == "gate-runner":
+        correction_gate_subagent_lease(
+            "subagent-ended", data, correction_lease, correction_operation,
+        )
         validate_gate_subagent("subagent-ended", data)
     elif args.kind == "finding-verifier" and isinstance(data, dict) \
             and data.get("owner") == "spec-loop":
@@ -9983,6 +13114,12 @@ def refuse_foreign_correction_pending_owner(operation, args, data, me):
     markers = {
         "correction-allocation-supersede-in-progress": "correction-round-supersede.sh",
         "correction-round-open-in-progress": "correction-round-open.sh",
+        "correction-round-built-in-progress": "correction-round-built.sh",
+        "correction-round-revision-in-progress": "correction-round-revise.sh",
+        "correction-attempt-failure-in-progress": "attempt-failed.sh --correction",
+        "correction-rewind-in-progress": "rewind.sh --correction",
+        "correction-attempt-stop-in-progress": "stop.sh <pause|abort> --correction",
+        "final-checker-contract-map-in-progress": "final-checker-contract-map.sh",
         CORRECTION_VOID_MARKER: "correction-round-void.sh",
         "correction-product-authority-in-progress": "correction-product-authority.sh",
     }
@@ -10006,15 +13143,32 @@ def refuse_foreign_correction_pending_owner(operation, args, data, me):
         product_step = name == "correction-product-authority-in-progress" \
             and isinstance(account, dict) \
             and product_authority_note_matches(account, args, data, me)
-        if not same_owner and not product_step:
+        map_source_step = name == "final-checker-contract-map-in-progress" \
+            and args.kind == "attempt.failed" \
+            and isinstance(account, dict) \
+            and account.get("failure_route_sha256") == hashlib.sha256(json.dumps(
+                data, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest() \
+            and account.get("work_unit") == data.get("unit") \
+            and account.get("target_task") == args.task
+        if not same_owner and not product_step and not map_source_step:
             fail(
                 "another Correction Round authority owner is unfinished",
                 f"resume {command} with its exact recorded arguments",
             )
 
 
-def helper_owned_correction_event(kind, owner_marker, operation):
+def helper_owned_correction_event(kind, owner_marker, operation, data):
     allowed = HELPER_OWNED_CORRECTION_NOTE_MARKERS.get(kind)
+    if kind in {"attempt.failed", "rewind.done"} and not (
+        isinstance(data, dict) and data.get("schema") == 2
+    ):
+        allowed = None
+    if kind in {"paused", "aborted"} and not (
+        isinstance(data, dict) and data.get("schema") == 2
+        and isinstance(data.get("attempt"), int)
+    ):
+        allowed = None
     if kind == "pass.closed" and owner_marker == CORRECTION_VOID_MARKER:
         allowed = {CORRECTION_VOID_MARKER}
     if allowed is None:
@@ -10046,15 +13200,40 @@ def helper_owned_correction_event(kind, owner_marker, operation):
     except (OSError, UnicodeError, ValueError) as exc:
         fail("the helper-owned correction marker is malformed", exc)
     if json.dumps(account, sort_keys=True, separators=(",", ":")).encode() + b"\n" != raw \
-            or not isinstance(account, dict) or account.get("operation") != operation:
+            or not isinstance(account, dict):
+        fail("the helper-owned correction marker belongs to another operation")
+    if owner_marker == "attempt-in-flight" and kind == "attempt.succeeded":
+        if account.get("schema") != 2 or not isinstance(data, dict) \
+                or data.get("schema") != 2:
+            fail("the correction success marker has no exact schema-2 terminal")
+        return data
+    if account.get("operation") != operation:
         fail("the helper-owned correction marker belongs to another operation")
     if owner_marker == "correction-product-authority-in-progress":
         if account.get("phase") != "supersede" \
                 or not isinstance(account.get("supersession"), dict):
             fail("the product-authority marker does not own one supersession terminal")
         event = account["supersession"].get("event")
+    elif owner_marker == "final-checker-contract-map-in-progress" \
+            and kind in {"correction.round.revised", "final-checker.contract-mapped"}:
+        event = data
     else:
         event = account.get("event")
+    if owner_marker == "correction-rewind-in-progress" and event is None:
+        event_base = account.get("event_base")
+        if not isinstance(event_base, dict) or not isinstance(data, dict):
+            fail("the correction rewind marker has no exact terminal base")
+        projected = {
+            key: value for key, value in data.items()
+            if key != "pending_owner_sha256"
+        }
+        projected["gate"] = None
+        if projected != event_base \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))) \
+                or data.get("pending_owner_sha256") \
+                != correction_rewind_pending_owner_sha256(data):
+            fail("the correction rewind terminal changes its immutable pending owner")
+        event = data
     if not isinstance(event, dict):
         fail("the helper-owned correction marker has no exact terminal payload")
     return event
@@ -10069,10 +13248,10 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
     operation = lease_operation or correction_note_operation(args)
-    helper_event = helper_owned_correction_event(args.kind, owner_marker, operation)
+    helper_event = helper_owned_correction_event(args.kind, owner_marker, operation, data)
     if helper_event is not None and (lease is None or data != helper_event):
         fail("the helper-owned correction terminal changes its exact pending operation")
-    if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS:
+    if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS or helper_event is not None:
         refuse_foreign_correction_pending_owner(operation, args, data, me)
     if lease is not None:
         try:
@@ -10087,6 +13266,16 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
         args.kind, data, text, round_number=context.get("round"),
         mandate=context.get("mandate"), context=context,
     )
+    if args.kind in {"paused", "aborted", "resumed"} \
+            and isinstance(data, dict) and data.get("schema") == 2 \
+            and isinstance(data.get("unit"), dict) \
+            and data["unit"].get("kind") == "correction":
+        stop_task = context.get("task")
+        context["lot"] = data["unit"]["built"]
+        context["correction"] = data["unit"]["round"]
+        context.pop("task", None)
+        if isinstance(data.get("attempt"), int):
+            context["task"] = stop_task
     if args.kind == "pass.closed" \
             and isinstance(data, dict) and data.get("correction_void") is not None \
             and owner_marker != CORRECTION_VOID_MARKER:
@@ -10121,13 +13310,27 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
 
 
 def cmd_note_with_lease(args, lease, operation=None, *, owner_marker=None):
-    if args.kind not in CORRECTION_AUTHORITY_NOTE_KINDS:
+    data = parse_data(args.data)
+    helper_owned_transition = args.kind in {
+        "attempt.failed", "attempt.succeeded", "rewind.done", "paused", "aborted",
+    } \
+        and isinstance(data, dict) and data.get("schema") == 2 \
+        and owner_marker in {
+            "correction-attempt-failure-in-progress", "correction-rewind-in-progress",
+            "correction-attempt-stop-in-progress", "attempt-in-flight",
+        }
+    if args.kind not in CORRECTION_AUTHORITY_NOTE_KINDS and not helper_owned_transition:
         fail("an outer correction lease cannot append this note kind")
     append_note(args, lease, operation, owner_marker)
 
 
 def cmd_note(args):
-    if args.kind in HELPER_OWNED_CORRECTION_NOTE_MARKERS:
+    data = parse_data(args.data)
+    if args.kind in HELPER_OWNED_CORRECTION_NOTE_MARKERS and (
+        args.kind not in {"attempt.failed", "rewind.done", "paused", "aborted"}
+        or isinstance(data, dict) and data.get("schema") == 2
+        and (args.kind not in {"paused", "aborted"} or isinstance(data.get("attempt"), int))
+    ):
         fail("this terminal is owned by its official Correction Round helper")
     if args.kind in CORRECTION_AUTHORITY_NOTE_KINDS:
         operation = correction_note_operation(args)
@@ -10204,17 +13407,18 @@ def cmd_construction_verdict_check(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
     if args.check == "history":
-        if any(value is not None for value in (args.lot, args.task, args.attempt)):
+        if any(value is not None for value in (args.lot, args.task, args.attempt, args.correction)):
             fail("construction verdict history takes no lot, task or attempt")
         print("CONSTRUCTION VERDICTS VALID")
         return
     if args.check not in {"design", "code"} or not isinstance(args.lot, str) \
             or not construction_positive_integer(args.task) \
-            or not construction_positive_integer(args.attempt):
+            or not construction_positive_integer(args.attempt) \
+            or args.correction is not None and not construction_positive_integer(args.correction):
         fail("a checker verdict proof requires design or code, lot, task and attempt")
     if args.check == "design":
         verdicts = design_verdicts(
-            entries, len(entries), args.lot, args.task, args.attempt,
+            entries, len(entries), args.lot, args.task, args.attempt, args.correction,
         )
         if not verdicts:
             fail("this attempt has no proved design-checker verdict")
@@ -10223,6 +13427,8 @@ def cmd_construction_verdict_check(args):
             "lot", "task", "attempt", "round",
         )}
         base["check"] = "design"
+        if args.correction is not None:
+            base["correction"] = args.correction
         logical = construction_frozen_logical(
             entries, len(entries), base, "the accepted Design proof",
         )
@@ -10232,7 +13438,9 @@ def cmd_construction_verdict_check(args):
         )
         print(journal_line_proof(proof_index))
         return
-    verdicts = code_verdicts(entries, len(entries), args.lot, args.task, args.attempt)
+    verdicts = code_verdicts(
+        entries, len(entries), args.lot, args.task, args.attempt, args.correction,
+    )
     if not verdicts:
         fail("this attempt has no proved code-checker verdict")
     verdict_index, verdict = verdicts[-1]
@@ -10255,6 +13463,7 @@ def cmd_construction_verdict_check(args):
         fail("code findings before round ten require correction and another checker round")
     resolutions = [(index, entry) for index, entry in code_resolutions(
         entries, len(entries), args.lot, args.task, args.attempt,
+        args.correction,
     ) if note_data(entry).get("round") == verdict_data.get("round")]
     if len(resolutions) != 1:
         fail("the final code-checker findings have no one exact implementer resolution")
@@ -10264,8 +13473,15 @@ def cmd_construction_verdict_check(args):
         fail("the final code-review resolution belongs to another checker verdict")
     if resolution_data.get("accepted") != 0:
         fail("the final code-review resolution contains an accepted defect")
+    plan_command = [sys.executable, CONSTRUCTION_REVIEW]
+    if args.correction is not None:
+        plan_command.extend([
+            "correction-state", args.lot, str(args.correction), str(args.task),
+        ])
+    else:
+        plan_command.extend(["plan-state", args.lot, str(args.task)])
     plan = subprocess.run(
-        [sys.executable, CONSTRUCTION_REVIEW, "plan-state", args.lot, str(args.task)],
+        plan_command,
         capture_output=True, text=True,
     )
     try:
@@ -10301,13 +13517,17 @@ def cmd_construction_origin_check(args):
 def cmd_construction_failure_handoff(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
+    identity = active_attempt_identity(
+        {"lot": args.lot, "task": args.task, "attempt": args.attempt},
+        "the final checker failure handoff", allow_closer=True,
+    )
     design_state = design_failure_handoff(
         entries, len(entries), args.lot, args.task, args.attempt,
-        "the final design-review failure handoff",
+        "the final design-review failure handoff", identity.get("correction"),
     )
     code_state = final_code_failure_handoff(
         entries, len(entries), args.lot, args.task, args.attempt,
-        "the final code-review failure handoff",
+        "the final code-review failure handoff", identity.get("correction"),
     )
     if design_state is not None and code_state is not None:
         fail("this attempt has both final design and code-review failure obligations")
@@ -10335,12 +13555,20 @@ def cmd_construction_failure_check(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
     context = {"lot": args.lot, "task": args.task, "attempt": args.attempt}
-    identity = active_attempt_identity(context, "the failure closer", allow_closer=True)
+    identity = active_attempt_identity(
+        context, "the failure closer", allow_closer=True, include_completion=True,
+    )
     base = {"attempt": args.attempt, "classification": args.classification}
     report = failure_report_state(
         entries, len(entries), args.lot, args.task, args.attempt,
-        args.classification, "the failure closer",
+        args.classification, "the failure closer", identity.get("correction"),
     )
+    if identity.get("correction") is not None:
+        print(json.dumps(
+            correction_attempt_failed_account(entries, len(entries), identity, base, report),
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ))
+        return
     expected = {**base, **(report or {})}
     if identity.get("retry"):
         accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
@@ -10499,6 +13727,7 @@ def build_parser():
     sp.add_argument("lot", nargs="?")
     sp.add_argument("task", nargs="?", type=positive_int)
     sp.add_argument("attempt", nargs="?", type=positive_int)
+    sp.add_argument("correction", nargs="?", type=positive_int)
     sp.set_defaults(func=cmd_construction_verdict_check)
 
     sp = sub.add_parser("construction-origin-check", help=argparse.SUPPRESS)

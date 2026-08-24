@@ -7,6 +7,11 @@
 # point at those commits at all — the rewound/ namespace is the only handle left
 # on them, exactly as a failed attempt's try-<K> ref is on its own.
 set -euo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    exec python3 "$HERE/correction_rewind.py" "$@"
+fi
 # The re-land paths come verbatim from controller commits and go to
 # `git checkout <sha> -- <paths>`: read as pathspecs, a committed literal
 # `docs/*.md` would restore every matching file from that commit's tree —
@@ -14,7 +19,6 @@ set -euo pipefail
 # the destructive half, on every resume alike. Literal semantics for every
 # git call — this script uses no pathspec magic anywhere.
 export GIT_LITERAL_PATHSPECS=1
-HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$HERE/../.." && pwd)
 REPO=$(cd "$WORKSPACE/../../.." && pwd)
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }

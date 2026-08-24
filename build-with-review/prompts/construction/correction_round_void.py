@@ -29,7 +29,13 @@ BLOCKING_MARKERS = {
     "correction-allocation-supersede-in-progress",
     "correction-artifact-in-progress",
     "correction-round-open-in-progress",
+    "correction-round-built-in-progress",
+    "correction-round-revision-in-progress",
+    "correction-attempt-failure-in-progress",
+    "correction-rewind-in-progress",
+    "correction-attempt-stop-in-progress",
     "correction-product-authority-in-progress",
+    "final-checker-contract-map-in-progress",
 }
 
 

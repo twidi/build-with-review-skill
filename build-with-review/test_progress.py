@@ -35,6 +35,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.path.join(HERE, "prompts", "common", "progress.py")
 AUTHORITY_SOURCE = os.path.join(HERE, "prompts", "common", "authority_precedence.py")
 CORRECTION_AUTHORITY_SOURCE = os.path.join(HERE, "prompts", "common", "correction_authority.py")
+FINAL_CHECKER_OBLIGATIONS_SOURCE = os.path.join(
+    HERE, "prompts", "common", "final_checker_obligations.py",
+)
 SPEC_EDIT_SOURCE = os.path.join(HERE, "prompts", "common", "spec_edit_auth.py")
 SPEC_PROMPTS = os.path.join(HERE, "prompts", "spec")
 PRODUCT_PROMPTS = os.path.join(HERE, "prompts", "product-review")
@@ -135,9 +138,23 @@ def reset():
                  os.path.join(WORKSPACE, "progress.jsonl.lock"),
                  os.path.join(REPO, "fixture-code-review.txt"),
                  os.path.join(REPO, "foreign.txt"),
-                 os.path.join(REPO, "later-authority.txt")):
+                 os.path.join(REPO, "later-authority.txt"),
+                 os.path.join(REPO, "correction-code.txt"),
+                 os.path.join(REPO, "correction-review-gate.txt"),
+                 os.path.join(REPO, "correction-code-checker.txt"),
+                 os.path.join(REPO, "correction-final-design-retry.txt"),
+                 os.path.join(REPO, "correction-final-code-retry.txt"),
+                 os.path.join(REPO, "post-task-final-checker-map-task-1.txt"),
+                 os.path.join(REPO, "correction-post-task-revision-task-1.txt"),
+                 os.path.join(REPO, "bare-code-retry.txt"),
+                 os.path.join(REPO, "correction-failed.txt"),
+                 os.path.join(REPO, "correction-stopped.txt"),
+                 os.path.join(REPO, "correction-spared.txt")):
         if os.path.exists(path):
             os.remove(path)
+    for pattern in ("*-candidate.txt", "*-task-1.txt"):
+        for path in pathlib.Path(REPO).glob(pattern):
+            path.unlink()
     shutil.rmtree(os.path.join(WORKSPACE, "dashboard"), ignore_errors=True)
     shutil.rmtree(os.path.join(WORKSPACE, "reports"), ignore_errors=True)
     shutil.rmtree(os.path.join(WORKSPACE, "plans"), ignore_errors=True)
@@ -148,11 +165,19 @@ def reset():
         "amendment-sweep-preflight.json", "correction-allocation-supersede-in-progress",
         "correction-artifact-in-progress", "correction-round-open-in-progress",
         "correction-round-void-in-progress", "correction-product-authority-in-progress",
+        "correction-round-built-in-progress", "correction-round-revision-in-progress",
+        "correction-attempt-failure-in-progress",
+        "correction-rewind-in-progress",
+        "correction-attempt-stop-in-progress",
+        "final-checker-contract-map-in-progress",
+        "bare-stop-in-progress",
+        "gate-check-in-progress",
     ):
         path = os.path.join(WORKSPACE, marker)
         if os.path.lexists(path):
             os.remove(path)
     shutil.rmtree(os.path.join(REPO, "docs"), ignore_errors=True)
+    shutil.rmtree(os.path.join(REPO, "corrections"), ignore_errors=True)
     shutil.rmtree(os.path.join(REPO, ".git"), ignore_errors=True)
     subprocess.run(["git", "init", "-q", REPO], check=True)
     subprocess.run(["git", "-C", REPO, "config", "user.name", "Progress Test"], check=True)
@@ -163,6 +188,17 @@ def reset():
 def run_progress(*args, env=None):
     return subprocess.run([sys.executable, SCRIPT, *args],
                           capture_output=True, text=True, env=env or ENV, timeout=120)
+
+
+def run_with_test_environment(callback):
+    previous = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(ENV)
+        return callback()
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 def load_common_module(name):
@@ -176,6 +212,28 @@ def load_common_module(name):
         return module
     finally:
         sys.path.remove(common)
+
+
+def load_construction_module(name):
+    common = os.path.join(WORKSPACE, "prompts", "common")
+    construction = os.path.join(WORKSPACE, "prompts", "construction")
+    path = os.path.join(construction, f"{name}.py")
+    isolated_names = ("progress", "correction_attempt_failure")
+    previous_modules = {
+        module_name: sys.modules.pop(module_name)
+        for module_name in isolated_names if module_name in sys.modules
+    }
+    sys.path[:0] = [construction, common]
+    try:
+        spec = importlib.util.spec_from_file_location(f"{name}_{os.getpid()}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for module_name in isolated_names:
+            sys.modules.pop(module_name, None)
+        sys.modules.update(previous_modules)
+        del sys.path[:2]
 
 
 def journal_lines():
@@ -723,6 +781,49 @@ def seed_review_gate(lot="lot-1", task=3, attempt=2, round_number=1):
     return op
 
 
+def correction_gate_authority_data(lot, correction, task, attempt):
+    marker_path = pathlib.Path(WORKSPACE) / "attempt-in-flight"
+    payload = marker_path.read_bytes()
+    marker = json.loads(payload)
+    identity = load_common_module("progress").active_attempt_identity({
+        "lot": lot, "correction": correction, "task": task, "attempt": attempt,
+    }, "the correction gate fixture", include_completion=True)
+    return {
+        "contract_authority_sha256": marker["unit_authority_sha256"],
+        "execution_authority_sha256": identity["execution_authority_sha256"],
+        "final_checker_set_sha256": marker["outstanding_final_checker_set_sha256"],
+        "attempt_marker_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def complete_live_gate(operation):
+    execution = subprocess.run(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "run", operation],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    observations = {
+        "schema": 1,
+        "commands": [{"count": 1, "example": "the command exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    }
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    report = subprocess.run(
+        [gate_script, "publish-report", operation], cwd=REPO,
+        input=json.dumps(observations), capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(report.returncode == 0, report.stdout + report.stderr)
+    closed = subprocess.run(
+        [gate_script, "close", operation], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+
+
 def code_result_source(started, findings=0):
     manifest_path = os.path.join(WORKSPACE, *started["manifest"].split("/"))
     with open(manifest_path, encoding="utf-8") as source:
@@ -928,8 +1029,31 @@ def product_report_text(mandate, findings=()):
     return "\n".join(body)
 
 
-def correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha):
+def correction_artifact_text(
+        opening, allocation, confirmed_relative, confirmed_sha, *, task_count=1,
+):
     admission = allocation["admission"]
+    task_two = ""
+    coverage = "F1: task 1"
+    if task_count == 2:
+        coverage = "F1: tasks 1, 2"
+        task_two = """
+
+---
+
+## Task 2 - Verify the coupled correction
+
+Covers: F1
+Depends on: 1
+Consumes final-checker obligations: -
+Achieves:
+  - The coupled path preserves the accepted corrected behavior.
+Files: src/coupled.py and its focused tests
+To verify: The coupled production path consumes the corrected state.
+
+### Design
+[written at correction task Design - see below]
+"""
     return f"""# Demo — {allocation['built']} correction round {allocation['round']}
 
 Schema: 1
@@ -957,7 +1081,7 @@ Repetition: {admission['repetition']}
 Reason: {admission['reason']}
 
 ## Finding coverage
-F1: task 1
+{coverage}
 
 ---
 
@@ -973,10 +1097,10 @@ To verify: The accepted behavior passes through the production entry point.
 
 ### Design
 [written at correction task Design - see below]
-"""
+{task_two}"""
 
 
-def seed_unopened_correction_allocation(token="correction-allocation"):
+def seed_unopened_correction_allocation(token="correction-allocation", *, task_count=1):
     commit, gate, _ = seed_task_gate("lot-1", token)
     opened = run_progress(
         "note", "pass.opened",
@@ -1035,7 +1159,9 @@ def seed_unopened_correction_allocation(token="correction-allocation"):
     artifact_relative = "corrections/lot-1/round-1.md"
     write_report(
         artifact_relative,
-        correction_artifact_text(opening, allocation, confirmed_relative, confirmed_sha),
+        correction_artifact_text(
+            opening, allocation, confirmed_relative, confirmed_sha, task_count=task_count,
+        ),
     )
     return {
         "commit": commit,
@@ -2002,6 +2128,68 @@ def seed_baseline_gate(owner, commit, base):
               "report_sha256": report_sha, "commands": 1},
     )
     return gate
+
+
+def seed_correction_baseline_gate(owner, commit, base, *, built="lot-1", correction=1):
+    tree = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{commit}^{{tree}}"], text=True,
+    ).strip()
+    gate_path = os.path.join(REPO, ".superpowers", "bwr", "gate.md")
+    gate_blob = subprocess.check_output(
+        ["git", "-C", REPO, "hash-object", gate_path], text=True,
+    ).strip()
+    gate = hashlib.sha256(
+        f"correction-baseline:{owner}:{commit}".encode(),
+    ).hexdigest()
+    progress_module = load_common_module("progress")
+    entries = journal_lines()
+    state = progress_module.current_correction_contract_state(
+        entries, len(entries), built, correction, "the correction baseline fixture",
+    )
+    current_set = progress_module.outstanding_final_checker_set(
+        entries, len(entries), built, correction, "the correction baseline fixture",
+    )
+    authority = {
+        "contract_authority_sha256": state["authority_sha256"],
+        "execution_authority_sha256": state["execution_authority_sha256"],
+        "final_checker_set_sha256": progress_module.final_checker_set_sha256(current_set),
+    }
+    with open(gate_path, encoding="utf-8") as source:
+        commands = [line.strip() for line in source if line.strip()]
+    check(len(commands) == 1, "the correction baseline fixture requires one gate command")
+    report_relative, report_sha = write_gate_report(
+        gate, gate_blob, tree, command=commands[0],
+    )
+    data = {
+        "op": gate, "scope": "correction-baseline", "owner": owner,
+        "lot": built, "correction": correction, "task": 0, "attempt": 0,
+        "head": commit, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+        **authority,
+    }
+    append_subagent("subagent-started", "gate-runner", mandate="gate", data=data)
+    append_subagent(
+        "subagent-ended", "gate-runner", mandate="gate",
+        data={**data, "green": True, "surface": "unchanged", "report": report_relative,
+              "report_sha256": report_sha, "commands": 1},
+    )
+    return gate
+
+
+def seed_current_correction_baseline(*, built="lot-1", correction=1):
+    selected = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "correction-round-baseline.sh"), built, str(correction)],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selected.returncode == 0, selected.stdout + selected.stderr)
+    account = json.loads(selected.stdout)
+    if account["mode"] == "fresh":
+        return account["gate"]
+    check(account["mode"] == "required" and account["gate"] is None, account)
+    return seed_correction_baseline_gate(
+        account["owner"], account["base_commit"], account["base_commit"],
+        built=built, correction=correction,
+    )
 
 
 def complete_in_pass_controller_successor(
@@ -7863,6 +8051,7 @@ def correction_task_attempt_starts_from_the_exact_opened_round():
     check(opened.returncode == 0, opened.stdout + opened.stderr)
     opening_index = len(journal_lines()) - 1
     opening = journal_lines()[opening_index]
+    seed_current_correction_baseline()
 
     started_script = os.path.join(
         WORKSPACE, "prompts", "construction", "attempt-started.sh",
@@ -7883,6 +8072,28 @@ def correction_task_attempt_starts_from_the_exact_opened_round():
     ).encode()).hexdigest()
     check(marker["unit_authority_sha256"] == opening_authority, marker)
     check(marker["task"] == 1 and marker["attempt"] == 1, marker)
+    base_tree = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse", f"{opening['data']['base_commit']}^{{tree}}",
+    ], text=True).strip()
+    check(marker["attempt_predecessor"] == {
+        "schema": 1,
+        "unit": {"kind": "correction", "built": "lot-1", "round": 1},
+        "task": 1,
+        "accepted_prefix": [],
+        "contract_authority": journal_proof(opening_index),
+        "contract_authority_sha256": opening_authority,
+        "tree_authority": {
+            "rewind": None,
+            "commit": opening["data"]["base_commit"],
+            "tree": base_tree,
+            "gate": None,
+        },
+        "execution_authority_sha256": marker["attempt_predecessor"][
+            "execution_authority_sha256"
+        ],
+        "commit": opening["data"]["base_commit"],
+        "tree": base_tree,
+    }, marker)
     check(marker["document"]["path"] == state["artifact_relative"], marker)
     check(marker["retry"] == "-", marker)
     check(marker["design_proof_authority"] is None, marker)
@@ -7899,6 +8110,1446 @@ def correction_task_attempt_starts_from_the_exact_opened_round():
 
 
 @test
+def correction_attempt_predecessor_refuses_a_foreign_start_and_retargeted_ref():
+    seed_unopened_correction_allocation("correction-attempt-predecessor-start")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opened = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_current_correction_baseline()
+    canonical = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    write_project("foreign.txt", "foreign clean predecessor\n")
+    subprocess.run(["git", "-C", REPO, "add", "foreign.txt"], check=True)
+    subprocess.run(["git", "-C", REPO, "commit", "-qm", "foreign predecessor"], check=True)
+    foreign = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    script = os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh")
+    before = len(journal_lines())
+    refused = subprocess.run(
+        [script, "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    attempt_base = "refs/bwr/test-run/lot-1/correction-1/attempt-base"
+    stable = "refs/bwr/test-run/lot-1/correction-1/task-1"
+    check(refused.returncode != 0 and "exact Correction Round attempt predecessor" in (
+        refused.stdout + refused.stderr
+    ), refused.stdout + refused.stderr)
+    check(not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists()
+          and subprocess.run([
+              "git", "-C", REPO, "show-ref", "--verify", "--quiet", attempt_base,
+          ]).returncode != 0
+          and subprocess.run([
+              "git", "-C", REPO, "show-ref", "--verify", "--quiet", stable,
+          ]).returncode != 0
+          and len(journal_lines()) == before,
+          "the refused foreign start changed the attempt authority")
+
+    subprocess.run(["git", "-C", REPO, "reset", "--hard", "-q", canonical], check=True)
+    started = subprocess.run(
+        [script, "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(marker["attempt_predecessor"]["commit"] == canonical, marker)
+    subprocess.run([
+        "git", "-C", REPO, "update-ref", attempt_base, foreign, canonical,
+    ], check=True)
+    progress_module = load_common_module("progress")
+    try:
+        progress_module.active_attempt_identity({
+            "lot": "lot-1", "correction": 1, "task": 1, "attempt": 1,
+        }, "the retargeted correction attempt")
+    except (SystemExit, ValueError):
+        pass
+    else:
+        raise AssertionError("the retargeted attempt-base remained authoritative")
+    check(subprocess.run([
+        "git", "-C", REPO, "show-ref", "--verify", "--quiet", stable,
+    ]).returncode != 0 and not any(
+        entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+        for entry in journal_lines()
+    ), "the refused retarget published a stable task terminal")
+    subprocess.run([
+        "git", "-C", REPO, "update-ref", attempt_base, canonical, foreign,
+    ], check=True)
+    restored = progress_module.active_attempt_identity({
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 1,
+    }, "the restored correction attempt")
+    check(restored["attempt_predecessor"] == marker["attempt_predecessor"], restored)
+
+
+@test
+def correction_attempt_failure_preserves_its_complete_schema_two_authority():
+    state = seed_unopened_correction_allocation("correction-attempt-failure")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opened = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_current_correction_baseline()
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    cfg = default_config()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "1", "1", "C3.9c",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    account = json.loads(admitted.stdout)
+    check(account["schema"] == 2
+          and account["unit"] == {"kind": "correction", "built": "lot-1", "round": 1}
+          and account["classification"] == "C3.9c"
+          and account["checker_obligation"] is None
+          and account["final_checker_input_set_sha256"]
+          == load_common_module("correction_authority").EMPTY_FINAL_CHECKER_SET_SHA256
+          and account["final_checker_output_set_sha256"]
+          == load_common_module("correction_authority").EMPTY_FINAL_CHECKER_SET_SHA256,
+          account)
+    before = len(journal_lines())
+    failed = run_progress(
+        "note", "attempt.failed", "--task", "1", "--data", admitted.stdout.strip(),
+    )
+    check(failed.returncode != 0 and len(journal_lines()) == before,
+          "generic progress published a helper-owned correction failure")
+
+    candidate_relative = "correction-failed.txt"
+    write_project(candidate_relative, "failed correction bytes\n")
+    physical = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "1", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(physical.returncode == 0, physical.stdout + physical.stderr)
+    try_ref = "refs/bwr/test-run/lot-1/correction-1/task-1-try-1"
+    preserved = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", try_ref], text=True,
+    ).strip()
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "show", f"{preserved}:{candidate_relative}"], text=True,
+    ) == "failed correction bytes\n", "the correction failure lost its candidate")
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip() == base, "the correction failure did not reset to attempt-base")
+    check(not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists()
+          and not (pathlib.Path(WORKSPACE) / "correction-attempt-failure-in-progress").exists(),
+          "the completed correction failure retained an owner marker")
+    terminal_index = len(journal_lines()) - 1
+    terminal = journal_lines()[terminal_index]
+    check(terminal.get("correction") == 1, terminal)
+    load_common_module("progress").validate_attempt_failed_entry(
+        journal_lines(), terminal_index, terminal,
+    )
+    failure_proof = load_common_module("progress").journal_line_proof(terminal_index)
+    rewind = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh"),
+         "--correction", "lot-1", "1", "1", "2", failure_proof],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(rewind.returncode == 0, rewind.stdout + rewind.stderr)
+    rewind_index = len(journal_lines()) - 1
+    rewind_entry = journal_lines()[rewind_index]
+    rewind_data = rewind_entry["data"]
+    check(rewind_entry.get("kind") == "rewind.done"
+          and rewind_entry.get("correction") == 1
+          and rewind_data["schema"] == 2
+          and rewind_data["cause"] == {
+              "kind": "attempt-failure", "proof": failure_proof,
+          }
+          and rewind_data["previous_rewind"] is None
+          and rewind_data["rewind"] == 1
+          and rewind_data["target"]["earliest_task"] == 1
+          and rewind_data["moved"] == []
+          and rewind_data["crossed_authorities"] == []
+          and rewind_data["relands"] == []
+          and rewind_data["gate"] is None,
+          rewind_data)
+    rewind_proof = load_common_module("progress").journal_line_proof(rewind_index)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    replacement_marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(replacement_marker["tree_authority"] == {
+        "rewind": rewind_proof,
+        "commit": rewind_data["result_commit"],
+        "tree": rewind_data["result_tree"],
+        "gate": None,
+    }, replacement_marker)
+    second_failure = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "2", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(second_failure.returncode == 0, second_failure.stdout + second_failure.stderr)
+    second_failure_index = len(journal_lines()) - 1
+    second_failure_proof = load_common_module("progress").journal_line_proof(
+        second_failure_index,
+    )
+    second_rewind = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh"),
+         "--correction", "lot-1", "1", "1", "3", second_failure_proof],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(second_rewind.returncode == 0, second_rewind.stdout + second_rewind.stderr)
+    second_rewind_entry = journal_lines()[-1]
+    check(second_rewind_entry["data"]["rewind"] == 2
+          and second_rewind_entry["data"]["previous_rewind"] == rewind_proof
+          and second_rewind_entry["data"]["moved"] == [], second_rewind_entry)
+    resolver = os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py")
+    before_revision = json.loads(subprocess.check_output(
+        [sys.executable, resolver, "resolve-correction", "lot-1", "1", "1"],
+        cwd=REPO, text=True,
+    ))
+    artifact = pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    artifact.write_text(artifact.read_text(encoding="utf-8").replace(
+        "Files: src/demo.py and its focused tests",
+        "Files: src/demo.py, src/retry.py, and their focused tests",
+    ), encoding="utf-8")
+    revision_args = [
+        os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+        "lot-1", "1", "1", "The repeated rewind exposed one coupled retry file.",
+    ]
+    prepared = subprocess.run(
+        revision_args, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(prepared.returncode == 0, prepared.stdout + prepared.stderr)
+    revision_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    if "BASELINE REQUIRED" in prepared.stdout:
+        baseline = subprocess.run(
+            [os.path.join(
+                WORKSPACE, "prompts", "construction", "correction-round-baseline.sh",
+            ), "lot-1", "1"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(baseline.returncode == 0, baseline.stdout + baseline.stderr)
+        baseline_account = json.loads(baseline.stdout)
+        seed_correction_baseline_gate(
+            baseline_account["owner"], revision_commit, revision_commit,
+        )
+        revised = subprocess.run(
+            revision_args, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(revised.returncode == 0, revised.stdout + revised.stderr)
+    revision = journal_lines()[-1]
+    after_revision = json.loads(subprocess.check_output(
+        [sys.executable, resolver, "resolve-correction", "lot-1", "1", "1"],
+        cwd=REPO, text=True,
+    ))
+    check(revision.get("kind") == "correction.round.revised"
+          and revision["data"]["previous_execution_authority_sha256"]
+          == before_revision["execution_authority_sha256"]
+          and after_revision["tree_authority"]["rewind"] is None
+          and after_revision["tree_authority"]["commit"] == revision_commit,
+          {"revision": revision, "resolved": after_revision})
+
+
+@test
+def correction_rewind_moves_accepted_suffix_refs_once():
+    state, task_one = complete_current_correction_task_one(
+        "correction-post-task-revision", task_count=2,
+    )
+    accepted_artifact = subprocess.check_output(
+        ["git", "-C", REPO, "show", f"{task_one}:{state['artifact_relative']}"],
+        text=True,
+    )
+    accepted_task_one_design = correction_task_design_text(accepted_artifact, 1)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "2", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "2", "1", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    workspace_artifact = (
+        pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    ).read_text(encoding="utf-8")
+    check(correction_task_design_text(workspace_artifact, 1) == accepted_task_one_design,
+          "Task 2 failure closure changed Task 1 Design")
+    failure_index = len(journal_lines()) - 1
+    failure_proof = load_common_module("progress").journal_line_proof(failure_index)
+    rewound = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh"),
+         "--correction", "lot-1", "1", "1", "2", failure_proof],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(rewound.returncode == 0, rewound.stdout + rewound.stderr)
+    stable = subprocess.run([
+        "git", "-C", REPO, "rev-parse", "--verify",
+        "refs/bwr/test-run/lot-1/correction-1/task-1",
+    ], capture_output=True, text=True)
+    archived = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse", "--verify",
+        "refs/bwr/test-run/lot-1/correction-1/rewound/r-1/task-1",
+    ], text=True).strip()
+    rewind_data = journal_lines()[-1]["data"]
+    check(stable.returncode != 0 and archived == task_one
+          and rewind_data["moved"] == [{
+              "task": 1,
+              "commit": task_one,
+              "from": "refs/bwr/test-run/lot-1/correction-1/task-1",
+              "to": "refs/bwr/test-run/lot-1/correction-1/rewound/r-1/task-1",
+          }], rewind_data)
+
+
+@test
+def correction_rewind_marker_refuses_changed_moved_account_before_mutation():
+    state, task_one = complete_current_correction_task_one(
+        "correction-rewind-marker-account", task_count=2,
+    )
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "2", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "2", "1", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    failure_index = len(journal_lines()) - 1
+    failure_proof = load_common_module("progress").journal_line_proof(failure_index)
+
+    helper_path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_rewind.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "correction_rewind_marker_test", helper_path,
+    )
+    helper = importlib.util.module_from_spec(specification)
+    construction_prompts = os.path.dirname(helper_path)
+    sys.path.insert(0, construction_prompts)
+    try:
+        specification.loader.exec_module(helper)
+    finally:
+        sys.path.remove(construction_prompts)
+    args = SimpleNamespace(
+        built="lot-1", round=1, earliest_task=1, attempt=2,
+        failure_proof=failure_proof,
+    )
+    operation = helper.operation_identity(args)
+    exact = helper.derive_account(args, operation)
+    marker = pathlib.Path(WORKSPACE) / helper.MARKER_NAME
+    script = os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh")
+    stable_ref = "refs/bwr/test-run/lot-1/correction-1/task-1"
+    archived_ref = "refs/bwr/test-run/lot-1/correction-1/rewound/r-1/task-1"
+    foreign_ref = "refs/bwr/test-run/foreign-correction-task-1"
+    foreign_archive = "refs/bwr/test-run/foreign-rewound-task-1"
+    extra_ref = "refs/bwr/test-run/lot-1/correction-1/task-2"
+    extra_archive = "refs/bwr/test-run/lot-1/correction-1/rewound/r-1/task-2"
+    subprocess.run(
+        ["git", "-C", REPO, "update-ref", foreign_ref, task_one], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "update-ref", extra_ref, task_one], check=True,
+    )
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD^{tree}"], text=True,
+    ).strip()
+    journal_size = len(journal_lines())
+
+    mutations = []
+    omitted = json.loads(json.dumps(exact))
+    omitted["event"]["moved"] = []
+    omitted["event_base"]["moved"] = []
+    mutations.append(omitted)
+    foreign = json.loads(json.dumps(exact))
+    foreign["event"]["moved"][0]["from"] = foreign_ref
+    foreign["event"]["moved"][0]["to"] = foreign_archive
+    foreign["event_base"]["moved"] = foreign["event"]["moved"]
+    mutations.append(foreign)
+    reordered = json.loads(json.dumps(exact))
+    reordered_member = {
+        "task": 2,
+        "commit": task_one,
+        "from": extra_ref,
+        "to": extra_archive,
+    }
+    reordered["event"]["moved"] = [reordered_member, *reordered["event"]["moved"]]
+    reordered["event_base"]["moved"] = reordered["event"]["moved"]
+    mutations.append(reordered)
+
+    for changed in mutations:
+        changed["event"]["pending_owner_sha256"] = \
+            helper.progress.correction_rewind_pending_owner_sha256(changed["event"])
+        marker.write_text(
+            json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        before_marker = marker.read_bytes()
+        refused = subprocess.run(
+            [script, "--correction", "lot-1", "1", "1", "2", failure_proof],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(refused.returncode != 0, "a changed rewind marker resumed")
+        check(marker.read_bytes() == before_marker, "a refusal changed the rewind marker")
+        check(len(journal_lines()) == journal_size, "a refusal appended a terminal")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+        ).strip() == head and subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD^{tree}"], text=True,
+        ).strip() == tree, "a refusal changed the accepted tree")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", stable_ref], text=True,
+        ).strip() == task_one, "a refusal retired the accepted stable ref")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", foreign_ref], text=True,
+        ).strip() == task_one, "a refusal retired the unrelated same-commit ref")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", extra_ref], text=True,
+        ).strip() == task_one, "a refusal retired an unowned suffix ref")
+        for unexpected in (archived_ref, foreign_archive, extra_archive):
+            check(subprocess.run(
+                ["git", "-C", REPO, "rev-parse", "--verify", unexpected],
+                capture_output=True, text=True,
+            ).returncode != 0, "a refusal published a rewound destination")
+
+    subprocess.run(
+        ["git", "-C", REPO, "update-ref", "-d", foreign_ref, task_one], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "update-ref", "-d", extra_ref, task_one], check=True,
+    )
+    marker.write_text(
+        json.dumps(exact, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "update-ref", archived_ref, task_one], check=True,
+    )
+    resumed = subprocess.run(
+        [script, "--correction", "lot-1", "1", "1", "2", failure_proof],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", archived_ref], text=True,
+    ).strip() == task_one and not marker.exists(),
+          "the exact same owner did not finish its rewind")
+
+
+@test
+def correction_rewind_relands_a_crossed_post_task_revision():
+    state, task_one = complete_current_correction_task_one(
+        "correction-post-task-revision", task_count=2,
+    )
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    artifact = pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    artifact.write_text(artifact.read_text(encoding="utf-8").replace(
+        "Files: src/coupled.py and its focused tests",
+        "Files: src/coupled.py, src/adapter.py, and their focused tests",
+    ), encoding="utf-8")
+    revision_args = [
+        os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+        "lot-1", "1", "2", "Task 2 needs one coupled source file.",
+    ]
+    prepared = subprocess.run(
+        revision_args, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(prepared.returncode == 0 and "BASELINE REQUIRED" in prepared.stdout,
+          prepared.stdout + prepared.stderr)
+    revision_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    baseline_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-baseline.sh",
+    )
+    selected = subprocess.run(
+        [baseline_script, "lot-1", "1"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selected.returncode == 0, selected.stdout + selected.stderr)
+    revision_baseline = json.loads(selected.stdout)
+    seed_correction_baseline_gate(
+        revision_baseline["owner"], revision_commit, revision_commit,
+    )
+    revised = subprocess.run(
+        revision_args, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(revised.returncode == 0, revised.stdout + revised.stderr)
+    revision_index = len(journal_lines()) - 1
+    revision_proof = load_common_module("progress").journal_line_proof(revision_index)
+
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "2", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "2", "1", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    failure_index = len(journal_lines()) - 1
+    failure_proof = load_common_module("progress").journal_line_proof(failure_index)
+    rewind_args = [
+        os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh"),
+        "--correction", "lot-1", "1", "1", "2", failure_proof,
+    ]
+    pending = subprocess.run(
+        rewind_args, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(pending.returncode == 0 and "BASELINE REQUIRED" in pending.stdout,
+          pending.stdout + pending.stderr)
+    rewind_marker = pathlib.Path(WORKSPACE) / "correction-rewind-in-progress"
+    check(rewind_marker.is_file(), "the crossed rewind lost its pending owner")
+    rewind_result = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    marker_payload = rewind_marker.read_bytes()
+    marker_mode = rewind_marker.stat().st_mode & 0o777
+    marker_account = json.loads(marker_payload)
+    changed_marker = json.loads(json.dumps(marker_account))
+    changed_marker["event_base"]["pending_owner_sha256"] = \
+        load_common_module("progress").correction_rewind_pending_owner_sha256(
+            changed_marker["event_base"],
+        )
+    rewind_marker.chmod(0o600)
+    rewind_marker.write_text(
+        json.dumps(changed_marker, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    rewind_marker.chmod(marker_mode)
+    changed_payload = rewind_marker.read_bytes()
+    journal_size = len(journal_lines())
+    rewind_tree = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD^{tree}"], text=True,
+    ).strip()
+    archived_ref = "refs/bwr/test-run/lot-1/correction-1/rewound/r-1/task-1"
+    archived_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", archived_ref], text=True,
+    ).strip()
+    malformed_resume = subprocess.run(
+        rewind_args, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(malformed_resume.returncode != 0,
+          "a baseline-required marker accepted a stored pending-owner digest")
+    check(rewind_marker.read_bytes() == changed_payload,
+          "the malformed marker refusal changed its owner")
+    check(len(journal_lines()) == journal_size,
+          "the malformed marker refusal appended a terminal")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip() == rewind_result and subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD^{tree}"], text=True,
+    ).strip() == rewind_tree,
+          "the malformed marker refusal changed its accepted tree")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", archived_ref], text=True,
+    ).strip() == archived_commit,
+          "the malformed marker refusal changed its archived ref")
+    rewind_marker.chmod(0o600)
+    rewind_marker.write_bytes(marker_payload)
+    rewind_marker.chmod(marker_mode)
+    selected = subprocess.run(
+        [baseline_script, "lot-1", "1"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selected.returncode == 0, selected.stdout + selected.stderr)
+    rewind_baseline = json.loads(selected.stdout)
+    check(rewind_baseline["mode"] == "required"
+          and rewind_baseline["base_commit"] == rewind_result,
+          rewind_baseline)
+    rewind_gate = seed_correction_baseline_gate(
+        rewind_baseline["owner"], rewind_result, rewind_result,
+    )
+    finished = subprocess.run(
+        rewind_args, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+    rewind_index = len(journal_lines()) - 1
+    rewind_data = journal_lines()[rewind_index]["data"]
+    check(rewind_data["crossed_authorities"] == [{
+        **rewind_data["crossed_authorities"][0],
+        "kind": "revision",
+        "proof": revision_proof,
+    }] and len(rewind_data["relands"]) == 1
+          and rewind_data["result_commit"] == rewind_result
+          and rewind_data["gate"] == rewind_gate
+          and not rewind_marker.exists(), rewind_data)
+    check(subprocess.check_output([
+        "git", "-C", REPO, "show", f"{rewind_result}:{state['artifact_relative']}",
+    ]) == artifact.read_bytes(), "the rewind did not retain the accepted revision bytes")
+    check(subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/rewound/r-1/task-1",
+    ], text=True).strip() == task_one, "the crossed rewind lost Task 1 history")
+    rewind_proof = load_common_module("progress").journal_line_proof(rewind_index)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    replacement_marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(replacement_marker["tree_authority"] == {
+        "rewind": rewind_proof,
+        "commit": rewind_result,
+        "tree": rewind_data["result_tree"],
+        "gate": rewind_gate,
+    }, replacement_marker)
+    checker = run_progress(
+        "subagent-started", "design-checker", "--task", "1", "--round", "1",
+    )
+    check(checker.returncode == 0, checker.stdout + checker.stderr)
+    checker_manifest = journal_lines()[-1]["data"]
+    current_unit = json.loads(subprocess.check_output([
+        sys.executable,
+        os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py"),
+        "resolve-correction", "lot-1", "1", "1",
+    ], cwd=REPO, text=True))
+    check(checker_manifest["execution_authority_sha256"]
+          == current_unit["execution_authority_sha256"], checker_manifest)
+
+
+def wait_for_correction_lease(process, subject):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        try:
+            with open(f"/proc/{process.pid}/wchan", encoding="utf-8") as source:
+                if "lock" in source.read():
+                    return
+        except FileNotFoundError:
+            break
+        time.sleep(0.002)
+    stdout, stderr = process.communicate(timeout=1)
+    raise AssertionError(f"{subject} did not wait on the Correction lease: {stdout}{stderr}")
+
+
+def run_correction_closer_race(commands):
+    lock_path = os.path.join(WORKSPACE, "correction-authority.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    processes = []
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        for index, command in enumerate(commands, 1):
+            process = subprocess.Popen(
+                command, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=ENV,
+            )
+            processes.append(process)
+            wait_for_correction_lease(process, f"correction closer {index}")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return [(*process.communicate(timeout=120), process.returncode)
+                for process in processes]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        os.close(descriptor)
+
+
+def seed_correction_failure_stop_race(token):
+    seed_correction_task_attempt(token)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    write_project("correction-failed.txt", f"{token} candidate\n")
+    return subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+
+
+@test
+def correction_failure_and_stop_rederive_after_the_shared_lease():
+    failure_command = [
+        os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+        "--correction", "lot-1", "1", "1", "1", "C3.9c",
+    ]
+    stop_script = os.path.join(WORKSPACE, "prompts", "common", "stop.sh")
+    cases = (
+        ("failure-first", failure_command,
+         [stop_script, "pause", "--correction", "lot-1", "1", "1", "1"],
+         "attempt.failed"),
+        ("pause-first",
+         [stop_script, "pause", "--correction", "lot-1", "1", "1", "1"],
+         failure_command, "paused"),
+        ("abort-first",
+         [stop_script, "abort", "--correction", "lot-1", "1", "1", "1"],
+         failure_command, "aborted"),
+    )
+    for index, (name, first, second, expected_kind) in enumerate(cases):
+        if index:
+            reset()
+        base = seed_correction_failure_stop_race(f"correction-{name}-race")
+        before = len(journal_lines())
+        results = run_correction_closer_race([first, second])
+        check([result[2] for result in results] == [0, 1], results)
+        terminals = [
+            entry for entry in journal_lines()[before:]
+            if entry.get("kind") in {"attempt.failed", "paused", "aborted"}
+            and entry.get("correction") == 1
+        ]
+        check(len(terminals) == 1 and terminals[0]["kind"] == expected_kind,
+              (results, terminals))
+        check(not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "correction-attempt-failure-in-progress").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "correction-attempt-stop-in-progress").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "final-checker-contract-map-in-progress").exists(),
+              "the losing closer retained a pending owner")
+        check(subprocess.check_output([
+            "git", "-C", REPO, "rev-parse", "HEAD",
+        ], text=True).strip() == base,
+              "the losing closer changed the winner's reset tree")
+        stable = "refs/bwr/test-run/lot-1/correction-1/task-1"
+        check(subprocess.run([
+            "git", "-C", REPO, "show-ref", "--verify", "--quiet", stable,
+        ]).returncode != 0, "a failure/stop loser published a stable task ref")
+
+
+def seed_correction_success_closer_race(token):
+    correction_task_final_gate_consumes_the_exact_correction_code_verdict()
+    gate_marker = dict(
+        line.split(" ", 1) for line in (
+            pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+        ).read_text(encoding="utf-8").splitlines()
+    )
+    complete_live_gate(gate_marker["op"])
+    subprocess.run([
+        "git", "-C", REPO, "commit", "-qm", token,
+    ], check=True)
+    commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    base = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )["attempt_predecessor"]["commit"]
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    return commit, gate_marker["op"], base
+
+
+@test
+def correction_stop_and_success_rederive_after_the_shared_lease():
+    stop_script = os.path.join(WORKSPACE, "prompts", "common", "stop.sh")
+    success_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-succeeded.sh",
+    )
+    for index, first_kind in enumerate(("success", "pause")):
+        if index:
+            reset()
+        commit, gate, base = seed_correction_success_closer_race(
+            f"correction {first_kind} race candidate",
+        )
+        success = [
+            success_script, "--correction", "lot-1", "1", "1", commit, gate,
+        ]
+        pause = [
+            stop_script, "pause", "--correction", "lot-1", "1", "1", "1",
+        ]
+        commands = [success, pause] if first_kind == "success" else [pause, success]
+        before = len(journal_lines())
+        results = run_correction_closer_race(commands)
+        check([result[2] for result in results] == [0, 1], results)
+        terminals = [
+            entry for entry in journal_lines()[before:]
+            if entry.get("kind") in {"attempt.succeeded", "paused"}
+            and entry.get("correction") == 1
+        ]
+        expected_kind = "attempt.succeeded" if first_kind == "success" else "paused"
+        check(len(terminals) == 1 and terminals[0]["kind"] == expected_kind,
+              (results, terminals))
+        stable_ref = "refs/bwr/test-run/lot-1/correction-1/task-1"
+        stable = subprocess.run([
+            "git", "-C", REPO, "rev-parse", "--verify", f"{stable_ref}^{{commit}}",
+        ], capture_output=True, text=True)
+        if first_kind == "success":
+            check(stable.returncode == 0 and stable.stdout.strip() == commit
+                  and subprocess.check_output([
+                      "git", "-C", REPO, "rev-parse", "HEAD",
+                  ], text=True).strip() == commit,
+                  "the losing stop changed the accepted success")
+        else:
+            check(stable.returncode != 0 and subprocess.check_output([
+                "git", "-C", REPO, "rev-parse", "HEAD",
+            ], text=True).strip() == base,
+                  "the losing success changed the accepted pause")
+        check(not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "correction-attempt-stop-in-progress").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "correction-attempt-failure-in-progress").exists(),
+              "the losing success/stop closer retained an owner")
+
+
+@test
+def correction_failure_and_success_rederive_after_the_shared_lease():
+    failure_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-failed.sh",
+    )
+    success_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-succeeded.sh",
+    )
+    for index, first_kind in enumerate(("success", "failure")):
+        if index:
+            reset()
+        commit, gate, base = seed_correction_success_closer_race(
+            f"correction {first_kind} failure-success race",
+        )
+        success = [
+            success_script, "--correction", "lot-1", "1", "1", commit, gate,
+        ]
+        failed = [
+            failure_script, "--correction", "lot-1", "1", "1", "1", "C3.9c",
+        ]
+        commands = [success, failed] if first_kind == "success" else [failed, success]
+        before = len(journal_lines())
+        results = run_correction_closer_race(commands)
+        check([result[2] for result in results] == [0, 1], results)
+        terminals = [
+            entry for entry in journal_lines()[before:]
+            if entry.get("kind") in {"attempt.succeeded", "attempt.failed"}
+            and entry.get("correction") == 1
+        ]
+        expected_kind = "attempt.succeeded" if first_kind == "success" else "attempt.failed"
+        check(len(terminals) == 1 and terminals[0]["kind"] == expected_kind,
+              (results, terminals))
+        stable_ref = "refs/bwr/test-run/lot-1/correction-1/task-1"
+        stable = subprocess.run([
+            "git", "-C", REPO, "rev-parse", "--verify", f"{stable_ref}^{{commit}}",
+        ], capture_output=True, text=True)
+        if first_kind == "success":
+            check(stable.returncode == 0 and stable.stdout.strip() == commit
+                  and subprocess.check_output([
+                      "git", "-C", REPO, "rev-parse", "HEAD",
+                  ], text=True).strip() == commit,
+                  "the losing failure changed the accepted success")
+        else:
+            check(stable.returncode != 0 and subprocess.check_output([
+                "git", "-C", REPO, "rev-parse", "HEAD",
+            ], text=True).strip() == base,
+                  "the losing success changed the accepted failure")
+        check(not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "correction-attempt-stop-in-progress").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "correction-attempt-failure-in-progress").exists()
+              and not (pathlib.Path(WORKSPACE) /
+                       "final-checker-contract-map-in-progress").exists(),
+              "the losing success/failure closer retained an owner")
+
+
+@test
+def correction_attempt_failure_recovers_every_owned_interruption_prefix():
+    missing = object()
+    previous_progress = sys.modules.get("progress", missing)
+    cached_progress = SimpleNamespace(source="an earlier focused test")
+    sys.modules["progress"] = cached_progress
+    try:
+        isolated = run_with_test_environment(
+            lambda: load_construction_module("correction_attempt_failure")
+        )
+        check(isolated.progress is not cached_progress
+              and sys.modules.get("progress") is cached_progress,
+              "the interruption test reused another test's progress module")
+    finally:
+        if previous_progress is missing:
+            sys.modules.pop("progress", None)
+        else:
+            sys.modules["progress"] = previous_progress
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-failed.sh",
+    )
+    for index, cut in enumerate(("marker", "ref", "reset", "terminal", "cleanup")):
+        if index:
+            reset()
+        base = seed_correction_failure_stop_race(f"correction-failure-{cut}")
+        module = run_with_test_environment(
+            lambda: load_construction_module("correction_attempt_failure")
+        )
+        args = SimpleNamespace(
+            built="lot-1", round=1, task=1, attempt=1, classification="C3.9c",
+        )
+        originals = {
+            "preserve": module.preserve_and_reset,
+            "run": module.run,
+            "note": module.progress.cmd_note_with_lease,
+            "remove": module.remove_exact,
+        }
+        try:
+            if cut == "marker":
+                module.preserve_and_reset = lambda _account: (_ for _ in ()).throw(
+                    RuntimeError("interrupted after marker")
+                )
+            elif cut == "ref":
+                def interrupt_before_reset(*command, **kwargs):
+                    if "reset" in command:
+                        raise RuntimeError("interrupted after ref")
+                    return originals["run"](*command, **kwargs)
+                module.run = interrupt_before_reset
+            elif cut == "reset":
+                module.progress.cmd_note_with_lease = lambda *_args, **_kwargs: (
+                    (_ for _ in ()).throw(RuntimeError("interrupted after reset"))
+                )
+            elif cut in {"terminal", "cleanup"}:
+                def interrupt_cleanup(relative, payload, subject):
+                    if relative == module.MARKER_NAME:
+                        if cut == "cleanup":
+                            originals["remove"](relative, payload, subject)
+                        raise RuntimeError(f"interrupted after {cut}")
+                    return originals["remove"](relative, payload, subject)
+                module.remove_exact = interrupt_cleanup
+            try:
+                run_with_test_environment(lambda: module.close(args))
+            except RuntimeError as exc:
+                check(str(exc) == f"interrupted after {cut}", exc)
+            except SystemExit as exc:
+                raise AssertionError(f"the in-process failure closer exited at {cut}: {exc}")
+            else:
+                raise AssertionError(f"the {cut} interruption did not stop the closer")
+        finally:
+            module.preserve_and_reset = originals["preserve"]
+            module.run = originals["run"]
+            module.progress.cmd_note_with_lease = originals["note"]
+            module.remove_exact = originals["remove"]
+
+        marker = pathlib.Path(WORKSPACE) / "correction-attempt-failure-in-progress"
+        attempt = pathlib.Path(WORKSPACE) / "attempt-in-flight"
+        try_ref = "refs/bwr/test-run/lot-1/correction-1/task-1-try-1"
+        terminals = [
+            entry for entry in journal_lines()
+            if entry.get("kind") == "attempt.failed" and entry.get("correction") == 1
+        ]
+        check(attempt.is_file(), f"{cut}: the interruption lost the attempt owner")
+        check(marker.exists() == (cut != "cleanup"),
+              f"{cut}: the failure owner has the wrong cleanup prefix")
+        check(bool(terminals) == (cut in {"terminal", "cleanup"}),
+              f"{cut}: the failure terminal has the wrong prefix")
+        check((subprocess.run([
+            "git", "-C", REPO, "show-ref", "--verify", "--quiet", try_ref,
+        ]).returncode == 0) == (cut != "marker"),
+              f"{cut}: the failure try ref has the wrong prefix")
+
+        if cut == "terminal":
+            original_attempt = attempt.read_bytes()
+            original_marker = marker.read_bytes()
+            marker_mode = marker.stat().st_mode & 0o777
+            attempt_mode = attempt.stat().st_mode & 0o777
+            changed_attempt = json.loads(original_attempt)
+            changed_attempt["attempt_predecessor"]["commit"] = "0" * len(
+                changed_attempt["attempt_predecessor"]["commit"]
+            )
+            changed_attempt_payload = json.dumps(
+                changed_attempt, sort_keys=True, separators=(",", ":"),
+            ).encode() + b"\n"
+            changed_marker = json.loads(original_marker)
+            changed_marker["attempt_marker_sha256"] = hashlib.sha256(
+                changed_attempt_payload,
+            ).hexdigest()
+            changed_marker_payload = json.dumps(
+                changed_marker, sort_keys=True, separators=(",", ":"),
+            ).encode() + b"\n"
+            attempt.chmod(0o600)
+            attempt.write_bytes(changed_attempt_payload)
+            attempt.chmod(attempt_mode)
+            marker.chmod(0o600)
+            marker.write_bytes(changed_marker_payload)
+            marker.chmod(marker_mode)
+            before = (len(journal_lines()),
+                      subprocess.check_output([
+                          "git", "-C", REPO, "rev-parse", "HEAD",
+                      ], text=True).strip())
+            changed = subprocess.run(
+                [script, "--correction", "lot-1", "1", "1", "1", "C3.9c"],
+                cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+            )
+            check(changed.returncode != 0
+                  and len(journal_lines()) == before[0]
+                  and subprocess.check_output([
+                      "git", "-C", REPO, "rev-parse", "HEAD",
+                  ], text=True).strip() == before[1]
+                  and attempt.read_bytes() == changed_attempt_payload
+                  and marker.read_bytes() == changed_marker_payload,
+                  "a changed completed attempt marker crossed failure recovery")
+            attempt.chmod(0o600)
+            attempt.write_bytes(original_attempt)
+            attempt.chmod(attempt_mode)
+            marker.chmod(0o600)
+            marker.write_bytes(original_marker)
+            marker.chmod(marker_mode)
+
+        if cut == "cleanup":
+            before = (len(journal_lines()), attempt.read_bytes(),
+                      subprocess.check_output([
+                          "git", "-C", REPO, "rev-parse", "HEAD",
+                      ], text=True).strip())
+            competing = subprocess.run(
+                [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"),
+                 "pause", "--correction", "lot-1", "1", "1", "1"],
+                cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+            )
+            check(competing.returncode != 0
+                  and len(journal_lines()) == before[0]
+                  and attempt.read_bytes() == before[1]
+                  and subprocess.check_output([
+                      "git", "-C", REPO, "rev-parse", "HEAD",
+                  ], text=True).strip() == before[2]
+                  and not (pathlib.Path(WORKSPACE) /
+                           "correction-attempt-stop-in-progress").exists(),
+                  "a competing stop crossed the failure cleanup prefix")
+
+        recovered = subprocess.run(
+            [script, "--correction", "lot-1", "1", "1", "1", "C3.9c"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+        terminals = [
+            entry for entry in journal_lines()
+            if entry.get("kind") == "attempt.failed" and entry.get("correction") == 1
+        ]
+        check(len(terminals) == 1 and not marker.exists() and not attempt.exists()
+              and subprocess.check_output([
+                  "git", "-C", REPO, "rev-parse", "HEAD",
+              ], text=True).strip() == base,
+              f"{cut}: the official failure recovery did not finish one exact owner")
+
+
+@test
+def correction_attempt_stop_recovers_its_terminal_and_cleanup_prefixes():
+    script = os.path.join(WORKSPACE, "prompts", "common", "stop.sh")
+    for index, cut in enumerate(("terminal", "cleanup")):
+        if index:
+            reset()
+        base = seed_correction_failure_stop_race(f"correction-stop-{cut}")
+        module = run_with_test_environment(
+            lambda: load_construction_module("correction_attempt_stop")
+        )
+        args = SimpleNamespace(
+            kind="paused", built="lot-1", round=1, task=1, attempt=1, spares=[],
+        )
+        original_remove = module.remove_exact
+        try:
+            def interrupt_cleanup(relative, payload, subject):
+                if relative == module.MARKER_NAME:
+                    if cut == "cleanup":
+                        original_remove(relative, payload, subject)
+                    raise RuntimeError(f"interrupted after {cut}")
+                return original_remove(relative, payload, subject)
+            module.remove_exact = interrupt_cleanup
+            try:
+                run_with_test_environment(lambda: module.close(args))
+            except RuntimeError as exc:
+                check(str(exc) == f"interrupted after {cut}", exc)
+            except SystemExit as exc:
+                raise AssertionError(f"the in-process stop closer exited at {cut}: {exc}")
+            else:
+                raise AssertionError(f"the stop {cut} interruption did not stop the closer")
+        finally:
+            module.remove_exact = original_remove
+
+        marker = pathlib.Path(WORKSPACE) / "correction-attempt-stop-in-progress"
+        attempt = pathlib.Path(WORKSPACE) / "attempt-in-flight"
+        check(attempt.is_file() and marker.exists() == (cut == "terminal"),
+              f"{cut}: the stop owner has the wrong cleanup prefix")
+        if cut == "cleanup":
+            before = (len(journal_lines()), attempt.read_bytes(),
+                      subprocess.check_output([
+                          "git", "-C", REPO, "rev-parse", "HEAD",
+                      ], text=True).strip())
+            competing = subprocess.run(
+                [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+                 "--correction", "lot-1", "1", "1", "1", "C3.9c"],
+                cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+            )
+            check(competing.returncode != 0
+                  and len(journal_lines()) == before[0]
+                  and attempt.read_bytes() == before[1]
+                  and subprocess.check_output([
+                      "git", "-C", REPO, "rev-parse", "HEAD",
+                  ], text=True).strip() == before[2]
+                  and not (pathlib.Path(WORKSPACE) /
+                           "correction-attempt-failure-in-progress").exists(),
+                  "a competing failure crossed the stop cleanup prefix")
+        recovered = subprocess.run(
+            [script, "pause", "--correction", "lot-1", "1", "1", "1"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+        terminals = [
+            entry for entry in journal_lines()
+            if entry.get("kind") == "paused" and entry.get("correction") == 1
+        ]
+        check(len(terminals) == 1 and not marker.exists() and not attempt.exists()
+              and subprocess.check_output([
+                  "git", "-C", REPO, "rev-parse", "HEAD",
+              ], text=True).strip() == base,
+              f"{cut}: the official stop recovery did not finish one exact owner")
+
+
+@test
+def correction_attempt_pause_and_abort_preserve_schema_two_authority():
+    for mode in ("pause", "abort"):
+        if mode == "abort":
+            reset()
+        seed_unopened_correction_allocation(f"correction-stop-{mode}")
+        closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+        check(closed.returncode == 0, closed.stdout + closed.stderr)
+        opened = subprocess.run(
+            [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+             "lot-1", "1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(opened.returncode == 0, opened.stdout + opened.stderr)
+        seed_current_correction_baseline()
+        started = subprocess.run(
+            [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+             "--correction", "lot-1", "1", "1", "1"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(started.returncode == 0, started.stdout + started.stderr)
+        controller = {
+            "schema": 1, "job": "controller", "mode": "construction",
+            "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+            "status": "working",
+        }
+        cfg = default_config()
+        cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+        cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+        set_config(cfg)
+        write_project("correction-stopped.txt", f"{mode} candidate\n")
+        stopped = subprocess.run(
+            [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), mode,
+             "--correction", "lot-1", "1", "1", "1"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(stopped.returncode == 0, stopped.stdout + stopped.stderr)
+        entry = journal_lines()[-1]
+        data = entry["data"]
+        preserved = subprocess.check_output([
+            "git", "-C", REPO, "rev-parse", data["preserved_ref"],
+        ], text=True).strip()
+        check(entry.get("kind") == ("paused" if mode == "pause" else "aborted")
+              and entry.get("correction") == 1 and data["schema"] == 2
+              and data["unit"] == {"kind": "correction", "built": "lot-1", "round": 1}
+              and subprocess.check_output([
+                  "git", "-C", REPO, "show", f"{preserved}:correction-stopped.txt",
+              ], text=True) == f"{mode} candidate\n"
+              and not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists()
+              and not (pathlib.Path(WORKSPACE) / "correction-attempt-stop-in-progress").exists(),
+              data)
+        before_resume = len(journal_lines())
+        replacement = subprocess.run(
+            [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+             "--correction", "lot-1", "1", "1", "2"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(replacement.returncode != 0,
+              "a stopped correction attempt admitted its replacement before resume")
+        resumed = run_progress("note", "resumed")
+        if mode == "pause":
+            check(resumed.returncode == 0 and len(journal_lines()) == before_resume + 1,
+                  resumed.stdout + resumed.stderr)
+            replacement = subprocess.run(
+                [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+                 "--correction", "lot-1", "1", "1", "2"],
+                cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+            )
+            check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+        else:
+            check(resumed.returncode != 0 and len(journal_lines()) == before_resume,
+                  "an aborted correction attempt admitted a resume")
+
+
+@test
+def correction_pause_between_attempts_and_resume_bind_one_exact_stop():
+    seed_unopened_correction_allocation("correction-bare-pause")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opened = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_current_correction_baseline()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+
+    stopped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(stopped.returncode == 0, stopped.stdout + stopped.stderr)
+    stop_index = len(journal_lines()) - 1
+    stop = journal_lines()[stop_index]
+    stop_proof = load_common_module("progress").journal_line_proof(stop_index)
+    check(stop.get("kind") == "paused" and stop.get("correction") == 1
+          and stop.get("task") is None and stop["data"]["schema"] == 2
+          and stop["data"]["unit"] == {
+              "kind": "correction", "built": "lot-1", "round": 1,
+          }, stop)
+
+    blocked = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(blocked.returncode != 0, "a paused Correction Round admitted a task attempt")
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    resume = journal_lines()[-1]
+    check(resume.get("kind") == "resumed" and resume.get("correction") == 1
+          and resume["data"]["schema"] == 2
+          and resume["data"]["stop"] == stop_proof, resume)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+
+
+@test
+def correction_abort_between_attempts_cannot_resume():
+    seed_unopened_correction_allocation("correction-bare-abort")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opened = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_current_correction_baseline()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    stopped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "abort"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(stopped.returncode == 0, stopped.stdout + stopped.stderr)
+    before = len(journal_lines())
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode != 0 and len(journal_lines()) == before,
+          "an aborted Correction Round admitted a resumed boundary")
+
+
+@test
+def correction_attempt_abort_restores_spared_paths_outside_the_try_tree():
+    seed_unopened_correction_allocation("correction-abort-spares")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opened = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"], cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_current_correction_baseline()
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    write_project("correction-stopped.txt", "attempt candidate\n")
+    spare = write_project("correction-spared.txt", "human-owned document\n")
+    stopped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "abort",
+         "--correction", "lot-1", "1", "1", "1", spare],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(stopped.returncode == 0, stopped.stdout + stopped.stderr)
+    terminal = journal_lines()[-1]
+    try_ref = terminal["data"]["preserved_ref"]
+    check(pathlib.Path(spare).read_text(encoding="utf-8") == "human-owned document\n"
+          and terminal["data"]["spares"] == ["correction-spared.txt"]
+          and terminal["data"]["spare_snapshot"] is not None,
+          terminal)
+    candidate_paths = subprocess.check_output(
+        ["git", "-C", REPO, "ls-tree", "-r", "--name-only", try_ref], text=True,
+    ).splitlines()
+    check("correction-stopped.txt" in candidate_paths
+          and "correction-spared.txt" not in candidate_paths,
+          "the correction try tree mixed the spared document into attempt work")
+
+
+@test
+def correction_round_revision_updates_only_unopened_task_contract_authority():
+    state = seed_unopened_correction_allocation("correction-round-revision")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opened = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    artifact = pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    artifact.write_text(artifact.read_text(encoding="utf-8").replace(
+        "Files: src/demo.py and its focused tests",
+        "Files: src/demo.py, src/helper.py, and their focused tests",
+    ), encoding="utf-8")
+    cfg = default_config()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-revise.sh",
+    )
+    revised = subprocess.run(
+        [script, "lot-1", "1", "1", "The task contract omitted one coupled source file."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(revised.returncode == 0, revised.stdout + revised.stderr)
+    revision_index, revision = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "correction.round.revised"
+    )
+    check(revision["data"]["revision"] == 2
+          and revision["data"]["from_task"] == 1, revision)
+    progress_module = load_common_module("progress")
+    progress_module.validate_correction_round_revision_entry(
+        journal_lines(), revision_index, revision,
+    )
+    resolver = os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py")
+    resolved = json.loads(subprocess.check_output(
+        [sys.executable, resolver, "resolve-correction", "lot-1", "1", "1"],
+        cwd=REPO, text=True,
+    ))
+    check(resolved["authority"]["kind"] == "correction.round.revised", resolved)
+    check(resolved["authority"]["proof"] == journal_proof(revision_index), resolved)
+    check(resolved["task"]["files"]
+          == "src/demo.py, src/helper.py, and their focused tests", resolved)
+
+    repeated = subprocess.run(
+        [script, "lot-1", "1", "1", "The task contract omitted one coupled source file."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(repeated.returncode == 0 and "already recorded" in repeated.stdout,
+          repeated.stdout + repeated.stderr)
+    check(len([
+        entry for entry in journal_lines() if entry.get("kind") == "correction.round.revised"
+    ]) == 1, "the idempotent revision closer duplicated its terminal")
+
+    seed_current_correction_baseline()
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    marker = json.loads((pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text())
+    check(marker["unit_authority_sha256"] == resolved["authority"]["sha256"], marker)
+
+
+@test
 def correction_task_design_checker_uses_the_correction_contract_and_paths():
     state = seed_unopened_correction_allocation("correction-task-design")
     closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
@@ -7912,6 +9563,7 @@ def correction_task_design_checker_uses_the_correction_contract_and_paths():
     )
     check(opened.returncode == 0, opened.stdout + opened.stderr)
     opening_index = len(journal_lines()) - 1
+    seed_current_correction_baseline()
     started_script = os.path.join(
         WORKSPACE, "prompts", "construction", "attempt-started.sh",
     )
@@ -7926,6 +9578,7 @@ def correction_task_design_checker_uses_the_correction_contract_and_paths():
         artifact.read_text(encoding="utf-8").replace(
             "[written at correction task Design - see below]",
             "Change the bounded production path and prove the accepted behavior.",
+            1,
         ),
         encoding="utf-8",
     )
@@ -7992,6 +9645,3836 @@ def correction_task_design_checker_uses_the_correction_contract_and_paths():
     repository_artifact = pathlib.Path(REPO) / state["artifact_relative"]
     check(repository_artifact.read_bytes() == artifact.read_bytes(),
           "the correction artifact was not published byte-for-byte")
+
+
+@test
+def correction_task_code_manifest_uses_correction_authority_and_paths():
+    seed_correction_task_with_clean_design("correction-task-code-manifest")
+    candidate = write_project("correction-code.txt", "bounded correction\n")
+    subprocess.run(["git", "-C", REPO, "add", candidate], check=True)
+    tree = subprocess.check_output(["git", "-C", REPO, "write-tree"], text=True).strip()
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    with open(os.path.join(WORKSPACE, "attempt-in-flight"), encoding="utf-8") as source:
+        marker = json.load(source)
+    gate = hashlib.sha256(b"correction-code-manifest").hexdigest()
+    helper = os.path.join(
+        WORKSPACE, "prompts", "construction", "construction_review.py",
+    )
+    resolver = os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py")
+    resolved = json.loads(subprocess.check_output(
+        [sys.executable, resolver, "resolve-correction", "lot-1", "1", "1"],
+        cwd=REPO, text=True,
+    ))
+    progress_module = load_common_module("progress")
+    entries = journal_lines()
+    identity = progress_module.active_attempt_identity({
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 1,
+    }, "the direct correction manifest test", include_completion=True)
+    generation = progress_module.construction_plan_generation(
+        identity, "the direct correction manifest test",
+    )
+    proof_index = progress_module.construction_design_proof(
+        entries, len(entries), identity, generation,
+        "the direct correction manifest test",
+    )
+    design_proof = progress_module.current_design_proof_authority(
+        entries, len(entries), identity, generation, proof_index,
+        "the direct correction manifest test",
+    )
+    frozen = subprocess.run(
+        [
+            sys.executable, helper, "correction-manifest", "lot-1", "1", "1", "1", "1",
+            gate, base, tree, marker["unit_authority_sha256"],
+            resolved["execution_authority_sha256"], json.dumps(
+                design_proof, sort_keys=True, separators=(",", ":"),
+            ),
+        ],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    check(frozen.returncode == 0, frozen.stdout + frozen.stderr)
+    account = json.loads(frozen.stdout)
+    check(account["path"].startswith(
+        "reports/construction/lot-1/correction-1/"
+        "task-1-attempt-1-code-round-1-"
+    ), account)
+    manifest_path = pathlib.Path(WORKSPACE) / account["path"]
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    check(document["schema"] == 5, document)
+    check(document["unit"] == {
+        "kind": "correction", "built": "lot-1", "round": 1,
+    }, document)
+    check(document["unit_authority_sha256"] == marker["unit_authority_sha256"], document)
+    check(document["correction"] == 1 and document["lot"] == "lot-1", document)
+
+
+@test
+def correction_review_gate_freezes_one_explicit_round_identity():
+    seed_unopened_correction_allocation("correction-review-gate")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    opened = subprocess.run(
+        [opening_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_current_correction_baseline()
+    started_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-started.sh",
+    )
+    started = subprocess.run(
+        [started_script, "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project("correction-review-gate.txt", "candidate\n")
+    subprocess.run(["git", "-C", REPO, "add", candidate], check=True)
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    owner = "lot-1/correction-1/task-1/attempt-1/code-round-1"
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    before_gate_starts = sum(
+        entry.get("event") == "subagent-started"
+        and entry.get("kind") == "gate-runner"
+        for entry in journal_lines()
+    )
+    lock_path = os.path.join(WORKSPACE, "correction-authority.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    process = None
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [gate_script, "open", "correction-review", owner,
+             "lot-1", "1", "1", base, "1"],
+            cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with open(f"/proc/{process.pid}/wchan", encoding="utf-8") as source:
+                    if "wait" in source.read() or "pipe" in source.read():
+                        break
+            except FileNotFoundError:
+                break
+            time.sleep(0.001)
+        check(process.poll() is None,
+              "the correction gate bypassed the shared authority lease")
+        check(not (pathlib.Path(WORKSPACE) / "gate-check-in-progress").exists(),
+              "the waiting correction gate published its physical owner")
+        check(sum(
+            entry.get("event") == "subagent-started"
+            and entry.get("kind") == "gate-runner"
+            for entry in journal_lines()
+        ) == before_gate_starts,
+              "the waiting correction gate published its journal owner")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=120)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(descriptor)
+    gate = SimpleNamespace(returncode=process.returncode, stdout=stdout, stderr=stderr)
+    check(gate.returncode == 0, gate.stdout + gate.stderr)
+    marker = pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    marker_lines = dict(
+        line.split(" ", 1) for line in marker.read_text(encoding="utf-8").splitlines()
+    )
+    check(marker_lines["scope"] == "correction-review", marker_lines)
+    check(marker_lines["correction"] == "1", marker_lines)
+    event = journal_lines()[-1]
+    check(event.get("kind") == "gate-runner" and event.get("correction") is None, event)
+    journal_path = pathlib.Path(WORKSPACE) / "progress.jsonl"
+    journal_payload = journal_path.read_bytes().splitlines(keepends=True)
+    check(journal_payload, "the correction gate start has no durable line")
+    journal_path.write_bytes(b"".join(journal_payload[:-1]))
+    before_generic_start = len(journal_lines())
+    generic_start = run_progress(
+        "subagent-started", "gate-runner", "--data",
+        json.dumps(event["data"], sort_keys=True, separators=(",", ":")),
+    )
+    refused_after(
+        generic_start, before_generic_start,
+        "a generic correction gate start without the inherited authority lease",
+    )
+    recovered_start = subprocess.run(
+        [gate_script, "open", "correction-review", owner,
+         "lot-1", "1", "1", base, "1"],
+        cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=ENV, timeout=120,
+    )
+    check(recovered_start.returncode == 0,
+          recovered_start.stdout + recovered_start.stderr)
+    attempt_payload = (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_bytes()
+    attempt = json.loads(attempt_payload)
+    identity = load_common_module("progress").active_attempt_identity({
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 1,
+    }, "the correction gate regression", include_completion=True)
+    expected_authority = {
+        "contract_authority_sha256": attempt["unit_authority_sha256"],
+        "execution_authority_sha256": identity["execution_authority_sha256"],
+        "final_checker_set_sha256": attempt["outstanding_final_checker_set_sha256"],
+        "attempt_marker_sha256": hashlib.sha256(attempt_payload).hexdigest(),
+    }
+    check({key: marker_lines.get(key) for key in expected_authority}
+          == expected_authority, marker_lines)
+    event = journal_lines()[-1]
+    check(event.get("kind") == "gate-runner" and event.get("correction") is None, event)
+    check(event["data"].get("scope") == "correction-review"
+          and event["data"].get("correction") == 1, event)
+    check({key: event["data"].get(key) for key in expected_authority}
+          == expected_authority, event)
+    execution_sha = subprocess.check_output(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "validate-token", marker_lines["execution"], marker_lines["gate"],
+         marker_lines["tree"]],
+        cwd=REPO, text=True,
+    ).strip()
+    generic_terminal = {
+        key: value for key, value in marker_lines.items() if key != "execution"
+    }
+    generic_terminal["task"] = int(generic_terminal["task"])
+    generic_terminal["attempt"] = int(generic_terminal["attempt"])
+    generic_terminal["correction"] = int(generic_terminal["correction"])
+    generic_terminal.update({"execution": execution_sha, "unusable": "lost"})
+    before_generic = len(journal_lines())
+    generic = run_progress(
+        "subagent-ended", "gate-runner", "--data",
+        json.dumps(generic_terminal, sort_keys=True, separators=(",", ":")),
+    )
+    refused_after(
+        generic, before_generic,
+        "a generic correction gate terminal without the inherited authority lease",
+    )
+    before_marker = marker.read_bytes()
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    resumed_process = None
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        resumed_process = subprocess.Popen(
+            [gate_script, "open", "correction-review", owner,
+             "lot-1", "1", "1", base, "1"],
+            cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        )
+        time.sleep(0.05)
+        check(resumed_process.poll() is None,
+              "correction gate resume bypassed the shared authority lease")
+        check(marker.read_bytes() == before_marker,
+              "the waiting correction gate resume changed its owner")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        resumed_stdout, resumed_stderr = resumed_process.communicate(timeout=120)
+    finally:
+        if resumed_process is not None and resumed_process.poll() is None:
+            resumed_process.kill()
+            resumed_process.wait()
+        os.close(descriptor)
+    check(resumed_process.returncode == 0, resumed_stdout + resumed_stderr)
+    check(sum(
+        entry.get("event") == "subagent-started"
+        and entry.get("kind") == "gate-runner"
+        and entry.get("data", {}).get("op") == marker_lines["op"]
+        for entry in journal_lines()
+    ) == 1, "correction gate resume duplicated its durable owner")
+    execution = subprocess.run(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "ordinary_gate.py",
+        ), marker_lines["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    closing_process = None
+    before_terminals = len([
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "gate-runner"
+        and entry.get("data", {}).get("op") == marker_lines["op"]
+    ])
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        closing_process = subprocess.Popen(
+            [gate_script, "close", marker_lines["op"]], cwd=REPO,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV,
+        )
+        time.sleep(0.05)
+        check(closing_process.poll() is None,
+              "correction gate close bypassed the shared authority lease")
+        check(marker.read_bytes() == before_marker,
+              "the waiting correction gate close removed or changed its marker")
+        check(len([
+            entry for entry in journal_lines()
+            if entry.get("event") == "subagent-ended"
+            and entry.get("kind") == "gate-runner"
+            and entry.get("data", {}).get("op") == marker_lines["op"]
+        ]) == before_terminals,
+              "the waiting correction gate close appended its terminal")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        close_stdout, close_stderr = closing_process.communicate(timeout=120)
+    finally:
+        if closing_process is not None and closing_process.poll() is None:
+            closing_process.kill()
+            closing_process.wait()
+        os.close(descriptor)
+    check(closing_process.returncode == 0, close_stdout + close_stderr)
+    check(not marker.exists(), "the serialized correction gate close retained its marker")
+    check(len([
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "gate-runner"
+        and entry.get("data", {}).get("op") == marker_lines["op"]
+    ]) == before_terminals + 1,
+          "the serialized correction gate close has no one exact terminal")
+
+
+@test
+def correction_gate_close_recovers_after_its_durable_terminal():
+    seed_unopened_correction_allocation("correction-gate-terminal-recovery")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opening.returncode == 0, opening.stdout + opening.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    selection = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "correction-round-baseline.sh"), "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selection.returncode == 0, selection.stdout + selection.stderr)
+    account = json.loads(selection.stdout)
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    opened = subprocess.run(
+        [gate_script, "open", "correction-baseline", account["owner"],
+         "lot-1", "0", "0", account["base_commit"], "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    marker_path = pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    marker = dict(
+        line.split(" ", 1) for line in marker_path.read_text(encoding="utf-8").splitlines()
+    )
+    lost = subprocess.run(
+        [gate_script, "lost", marker["op"]], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(lost.returncode == 0, lost.stdout + lost.stderr)
+    check(marker_path.is_file(), "the lost Correction gate discarded its logical owner")
+    replacement = subprocess.run(
+        [gate_script, "open", "correction-baseline", account["owner"],
+         "lot-1", "0", "0", account["base_commit"], "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    replacement_marker = dict(
+        line.split(" ", 1)
+        for line in marker_path.read_text(encoding="utf-8").splitlines()
+    )
+    check(replacement_marker == marker,
+          "the replacement Correction gate changed its logical owner")
+    check(len([
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "gate-runner"
+        and entry.get("data", {}).get("op") == marker["op"]
+    ]) == 2, "the lost Correction gate has no exact replacement physical owner")
+    execution = subprocess.run(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "run", marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    observations = {
+        "schema": 1,
+        "commands": [{"count": 1, "example": "true exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    }
+    report = subprocess.run(
+        [gate_script, "publish-report", marker["op"]], cwd=REPO,
+        input=json.dumps(observations), capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(report.returncode == 0, report.stdout + report.stderr)
+    execution_sha = subprocess.check_output(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "validate-token", marker["execution"], marker["gate"], marker["tree"]],
+        cwd=REPO, text=True,
+    ).strip()
+    audit = json.loads(subprocess.check_output(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_report.py",
+        ), marker["op"], marker["gate"], marker["tree"], execution_sha],
+        cwd=REPO, text=True,
+    ))
+    terminal_data = {
+        key: value for key, value in marker.items() if key != "execution"
+    }
+    terminal_data["task"] = int(terminal_data["task"])
+    terminal_data["attempt"] = int(terminal_data["attempt"])
+    terminal_data["correction"] = int(terminal_data["correction"])
+    terminal_data["execution"] = execution_sha
+    terminal_data.update(audit)
+    append_subagent("subagent-ended", "gate-runner", data=terminal_data)
+    before = len([
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "gate-runner"
+        and entry.get("data", {}).get("op") == marker["op"]
+    ])
+    resumed = subprocess.run(
+        [gate_script, "close", marker["op"]], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    check(not marker_path.exists(), "the resumed gate close retained its marker")
+    check(len([
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "gate-runner"
+        and entry.get("data", {}).get("op") == marker["op"]
+    ]) == before == 2, "the resumed gate close duplicated its terminal")
+
+
+@test
+def correction_baseline_gate_refuses_foreign_owners_and_an_unconsumed_stop():
+    seed_unopened_correction_allocation("correction-gate-owner-precedence")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opening.returncode == 0, opening.stdout + opening.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    selector = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-baseline.sh",
+    )
+    selected = subprocess.run(
+        [selector, "lot-1", "1"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selected.returncode == 0, selected.stdout + selected.stderr)
+    account = json.loads(selected.stdout)
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    foreign = pathlib.Path(WORKSPACE) / "correction-product-authority-in-progress"
+    foreign.write_bytes(b"foreign persistent owner\n")
+    before = len(journal_lines())
+    refused = subprocess.run(
+        [gate_script, "open", "correction-baseline", account["owner"],
+         "lot-1", "0", "0", account["base_commit"], "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(refused.returncode != 0 and foreign.read_bytes() == b"foreign persistent owner\n"
+          and not (pathlib.Path(WORKSPACE) / "gate-check-in-progress").exists()
+          and len(journal_lines()) == before,
+          "a correction baseline crossed a foreign persistent authority owner")
+    foreign.unlink()
+
+    seed_current_correction_baseline()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    config = default_config()
+    config["whoami"]["session"]["annotations"]["bwr"] = controller
+    config["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(config)
+    paused = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    before = len(journal_lines())
+    refused = subprocess.run(
+        [gate_script, "open", "correction-baseline", account["owner"],
+         "lot-1", "0", "0", account["base_commit"], "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(refused.returncode != 0
+          and not (pathlib.Path(WORKSPACE) / "gate-check-in-progress").exists()
+          and len(journal_lines()) == before,
+          "a correction baseline crossed an unconsumed pause")
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    reopened = subprocess.run(
+        [gate_script, "open", "correction-baseline", account["owner"],
+         "lot-1", "0", "0", account["base_commit"], "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(reopened.returncode == 0, reopened.stdout + reopened.stderr)
+    marker = dict(
+        line.split(" ", 1) for line in (
+            pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+        ).read_text(encoding="utf-8").splitlines()
+    )
+    abandoned = subprocess.run(
+        [gate_script, "abandon", marker["op"]], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(abandoned.returncode == 0, abandoned.stdout + abandoned.stderr)
+
+
+def seed_correction_task_attempt(token, *, task_count=1):
+    state = seed_unopened_correction_allocation(token, task_count=task_count)
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-open.sh",
+    )
+    opened = subprocess.run(
+        [opening_script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    seed_current_correction_baseline()
+    started_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-started.sh",
+    )
+    started = subprocess.run(
+        [started_script, "--correction", "lot-1", "1", "1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    replace_correction_task_line(
+        1,
+        "[written at correction task Design - see below]",
+        "Change the bounded production path and prove the accepted behavior.",
+    )
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": 1, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+    return state
+
+
+@test
+def correction_attempt_start_waits_for_the_shared_authority_lease():
+    seed_unopened_correction_allocation("correction-attempt-start-lease")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opening.returncode == 0, opening.stdout + opening.stderr)
+    seed_current_correction_baseline()
+    lock_path = os.path.join(WORKSPACE, "correction-authority.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    process = None
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+             "--correction", "lot-1", "1", "1", "1"],
+            cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with open(f"/proc/{process.pid}/wchan", encoding="utf-8") as source:
+                    if "lock" in source.read():
+                        break
+            except FileNotFoundError:
+                break
+            time.sleep(0.001)
+        check(process.poll() is None,
+              "the correction attempt start bypassed the shared authority lease")
+        check(not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists(),
+              "the waiting correction attempt published its marker")
+        attempt_base = "refs/bwr/test-run/lot-1/correction-1/attempt-base"
+        check(subprocess.run(
+            ["git", "-C", REPO, "show-ref", "--verify", "--quiet", attempt_base],
+        ).returncode != 0, "the waiting correction attempt published attempt-base")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=120)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(descriptor)
+    check(process.returncode == 0, stdout + stderr)
+    check((pathlib.Path(WORKSPACE) / "attempt-in-flight").is_file(),
+          "the serialized correction attempt published no marker")
+
+
+@test
+def correction_attempt_start_admits_one_of_two_official_owners():
+    seed_unopened_correction_allocation("correction-attempt-start-race")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    opening = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-open.sh"),
+         "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opening.returncode == 0, opening.stdout + opening.stderr)
+    seed_current_correction_baseline()
+    command = [
+        os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+        "--correction", "lot-1", "1", "1", "1",
+    ]
+    processes = [
+        subprocess.Popen(
+            command, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        )
+        for _ in range(2)
+    ]
+    results = [(*process.communicate(timeout=120), process.returncode) for process in processes]
+    check(sorted(result[2] for result in results) == [0, 1], results)
+    marker_path = pathlib.Path(WORKSPACE) / "attempt-in-flight"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    check(marker["task"] == 1 and marker["attempt"] == 1, marker)
+    attempt_base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    check(attempt_base == subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip(), "the competing starts published another attempt base")
+
+
+def seed_correction_task_with_clean_design(token, *, task_count=1):
+    state = seed_correction_task_attempt(token, task_count=task_count)
+    checker = run_progress(
+        "subagent-started", "design-checker", "--task", "1", "--round", "1",
+    )
+    check(checker.returncode == 0, checker.stdout + checker.stderr)
+    payload = json.loads(checker.stdout.splitlines()[0])
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "design checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result_source = pathlib.Path(BASE) / f"{token}-design-result.json"
+    result_source.write_text(json.dumps({
+        "verdict": "clean",
+        "manifest": payload["manifest"],
+        "checks": [
+            {"subject": "source findings", "evidence": "The bounded findings are covered."},
+            {"subject": "product contract", "evidence": "The affected contract is preserved."},
+        ],
+        "previous": [],
+        "findings": [],
+    }), encoding="utf-8")
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": str(result_source)}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    consumed = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"design","outcome":"clean"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+    publish = pathlib.Path(WORKSPACE) / "prompts" / "construction" / "plan-publish.sh"
+    published = subprocess.run(
+        [publish, "--correction", "lot-1", "1"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    return state
+
+
+def replace_correction_task_design(task, replacement):
+    path = pathlib.Path(WORKSPACE) / "corrections" / "lot-1" / "round-1.md"
+    text = path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        rf"(?ms)(^## Task {task} - .*?^### Design\n).*?(?=^### |^---$|^## Task |\Z)",
+    )
+    text, count = pattern.subn(
+        rf"\g<1>{replacement.rstrip()}\n\n", text, count=1,
+    )
+    check(count == 1, f"correction task {task} has no one exact Design section")
+    path.write_text(text, encoding="utf-8")
+
+
+def correction_task_design_text(text, task):
+    match = re.search(
+        rf"(?ms)^## Task {task} - .*?^### Design\n(.*?)(?=^### |^---$|^## Task |\Z)",
+        text,
+    )
+    check(match is not None, f"correction task {task} has no exact Design text")
+    return match.group(1)
+
+
+def replace_correction_task_line(task, previous, replacement):
+    path = pathlib.Path(WORKSPACE) / "corrections" / "lot-1" / "round-1.md"
+    text = path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        rf"(?ms)(^## Task {task} - .*?)(?=^---$|^## Task |\Z)",
+    )
+    match = pattern.search(text)
+    check(match is not None, f"correction task {task} has no exact section")
+    section = match.group(1)
+    check(section.count(previous) == 1,
+          f"correction task {task} does not contain one exact source line")
+    changed = section.replace(previous, replacement)
+    path.write_text(text[:match.start(1)] + changed + text[match.end(1):], encoding="utf-8")
+
+
+def replace_current_correction_design(replacement):
+    replace_correction_task_design(1, replacement)
+
+
+def drive_correction_design_to_accepted_final_finding(*, task=1):
+    previous = []
+    for round_number in range(1, 11):
+        opening = open_design_round(round_number)
+        finding = {
+            "id": 1,
+            "where": f"Correction Design round {round_number}",
+            "what": "The correction Design keeps one exact accepted defect.",
+            "why": "The bounded correction contract remains unmet.",
+            "impact": "IMPORTANT",
+            "previous": [1] if previous else [],
+        }
+        finish_design_round(
+            round_number, opening, findings=[finding], previous=previous,
+        )
+        if round_number < 10:
+            replace_correction_task_design(
+                task,
+                f"Correct the bounded behavior. Design generation {round_number}."
+            )
+            resolve_design_round(round_number, [{"id": 1, "status": "corrected"}])
+            previous = [{
+                "id": 1,
+                "status": "still-open",
+                "evidence": "The exact bounded defect remains open.",
+            }]
+        else:
+            resolve_design_round(round_number, [{"id": 1, "status": "accepted"}])
+
+
+@test
+def correction_final_design_obligation_starts_under_contract_map_owner(
+        *, open_design=True, complete_mapping=True, interrupt_failure_cleanup=False,
+):
+    seed_correction_task_attempt("correction-final-design-obligation")
+    drive_correction_design_to_accepted_final_finding()
+    handoff = run_progress("construction-failure-handoff", "lot-1", "1", "1")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report_relative = (
+        "reports/construction/lot-1/correction-1/task-1-attempt-1-failure.md"
+    )
+    report = pathlib.Path(WORKSPACE) / report_relative
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        "## What failed\nThe final Design checker accepted one defect.\n\n"
+        "## Classification\nC3.9b — the current correction task Design is wrong.\n\n"
+        "## Evidence read\nThe immutable checker result and settlement.\n\n"
+        + handoff.stdout,
+        encoding="utf-8",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "1", "1", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    account = json.loads(admitted.stdout)
+    transition = account["final_checker_transition"]
+    check(len(transition["additions"]) == 1, transition)
+    source = transition["additions"][0]["source"]
+    assignment = transition["additions"][0]["assignment"]
+    check(source["checker"] == "design" and source["accepted_ids"] == [1], source)
+    check(assignment["owner"] == "task-contract-map"
+          and assignment["task"] is None, assignment)
+    check(account["final_checker_output_set_sha256"] != account[
+        "final_checker_input_set_sha256"
+    ], account)
+
+    failure_command = [
+        os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+        "--correction", "lot-1", "1", "1", "1", "C3.9b",
+    ]
+    if interrupt_failure_cleanup:
+        module = run_with_test_environment(
+            lambda: load_construction_module("correction_attempt_failure")
+        )
+        args = SimpleNamespace(
+            built="lot-1", round=1, task=1, attempt=1, classification="C3.9b",
+        )
+        original_remove = module.remove_exact
+        try:
+            def interrupt_before_cleanup(relative, payload, subject):
+                if relative == module.MARKER_NAME:
+                    raise RuntimeError("interrupted after final-checker failure terminal")
+                return original_remove(relative, payload, subject)
+            module.remove_exact = interrupt_before_cleanup
+            try:
+                run_with_test_environment(lambda: module.close(args))
+            except RuntimeError as exc:
+                check(str(exc) == "interrupted after final-checker failure terminal", exc)
+            else:
+                raise AssertionError("the final-checker failure cleanup did not interrupt")
+        finally:
+            module.remove_exact = original_remove
+        check((pathlib.Path(WORKSPACE) / "attempt-in-flight").is_file()
+              and (pathlib.Path(WORKSPACE) /
+                   "correction-attempt-failure-in-progress").is_file(),
+              "the final-checker failure interruption lost its owners")
+    failed = subprocess.run(
+        failure_command, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    marker = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
+    check(marker.is_file(), "the accepted final Design source has no durable map owner")
+    terminal = journal_lines()[-1]
+    check(terminal.get("kind") == "attempt.failed", terminal)
+    load_common_module("progress").validate_attempt_failed_entry(
+        journal_lines(), len(journal_lines()) - 1, terminal,
+    )
+
+    blocked_start = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(blocked_start.returncode != 0, "an attempt crossed the unfinished map owner")
+
+    map_account = json.loads(marker.read_text(encoding="utf-8"))
+    if not complete_mapping:
+        return map_account
+    obligation_id = source["obligation_id"]
+    artifact = pathlib.Path(map_account["document"]["workspace_path"])
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace(
+            "Consumes final-checker obligations: -",
+            f"Consumes final-checker obligations: {obligation_id}",
+        ),
+        encoding="utf-8",
+    )
+    mapped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "final-checker-contract-map.sh"),
+         "lot-1", "1", map_account["operation"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(mapped.returncode == 0, mapped.stdout + mapped.stderr)
+    check(not marker.exists(), "the completed final-checker map retained its owner")
+    mapping_events = [
+        (index, entry) for index, entry in enumerate(journal_lines())
+        if entry.get("kind") == "final-checker.contract-mapped"
+    ]
+    check(len(mapping_events) == 1, mapping_events)
+    mapping_index, mapping_event = mapping_events[0]
+    check(mapping_event["data"]["obligation_ids"] == [obligation_id], mapping_event)
+    load_common_module("progress").validate_final_checker_contract_mapped_entry(
+        journal_lines(), mapping_index, mapping_event,
+    )
+
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(attempt["assigned_final_checker_obligations"] == [obligation_id], attempt)
+    check(attempt["outstanding_final_checker_set_sha256"]
+          == mapping_event["data"]["retry_transition"]["output_sha256"], attempt)
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": 2, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+    if open_design:
+        design_opening = run_progress(
+            "subagent-started", "design-checker", "--task", "1", "--round", "1",
+        )
+        check(design_opening.returncode == 0, design_opening.stdout + design_opening.stderr)
+        design_logical = json.loads(design_opening.stdout.splitlines()[0])
+        design_manifest = json.loads(
+            (pathlib.Path(WORKSPACE) / design_logical["manifest"]).read_text(encoding="utf-8")
+        )
+        check(design_manifest["final_checker_set_sha256"]
+              == attempt["outstanding_final_checker_set_sha256"], design_manifest)
+        check(design_manifest["assigned_final_checker_obligations"] == [obligation_id],
+              design_manifest)
+        check(design_manifest["design_proof_authority"] is None, design_manifest)
+
+
+@test
+def correction_attempt_failure_recovers_after_its_set_transition_terminal():
+    correction_final_design_obligation_starts_under_contract_map_owner(
+        open_design=False, complete_mapping=False, interrupt_failure_cleanup=True,
+    )
+    check(not (pathlib.Path(WORKSPACE) /
+               "correction-attempt-failure-in-progress").exists()
+          and not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists(),
+          "the recovered final-checker failure retained its attempt owners")
+
+
+@test
+def correction_final_checker_mapping_waits_before_any_physical_mutation():
+    account = correction_final_design_obligation_starts_under_contract_map_owner(
+        open_design=False, complete_mapping=False,
+    )
+    obligation_id = account["source"]["obligation_id"]
+    artifact = pathlib.Path(account["document"]["workspace_path"])
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace(
+            "Consumes final-checker obligations: -",
+            f"Consumes final-checker obligations: {obligation_id}",
+        ),
+        encoding="utf-8",
+    )
+    marker_path = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
+    before_marker = marker_path.read_bytes()
+    before_journal = (pathlib.Path(WORKSPACE) / "progress.jsonl").read_bytes()
+    before_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    object_root = pathlib.Path(WORKSPACE) / "corrections" / "lot-1" / "objects"
+    before_objects = sorted(
+        (path.relative_to(object_root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in object_root.rglob("*") if path.is_file()
+    )
+    lock_path = os.path.join(WORKSPACE, "correction-authority.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    process = None
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [os.path.join(WORKSPACE, "prompts", "construction",
+                          "final-checker-contract-map.sh"),
+             "lot-1", "1", account["operation"]],
+            cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with open(f"/proc/{process.pid}/wchan", encoding="utf-8") as source:
+                    if "lock" in source.read():
+                        break
+            except FileNotFoundError:
+                break
+            time.sleep(0.001)
+        check(process.poll() is None,
+              "the final-checker mapping bypassed the shared authority lease")
+        after_objects = sorted(
+            (path.relative_to(object_root).as_posix(),
+             hashlib.sha256(path.read_bytes()).hexdigest())
+            for path in object_root.rglob("*") if path.is_file()
+        )
+        check(after_objects == before_objects,
+              "the waiting final-checker mapping published an immutable object")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+        ).strip() == before_head, "the waiting final-checker mapping published a commit")
+        check((pathlib.Path(WORKSPACE) / "progress.jsonl").read_bytes() == before_journal,
+              "the waiting final-checker mapping appended an event")
+        check(marker_path.read_bytes() == before_marker,
+              "the waiting final-checker mapping changed or cleaned its marker")
+        foreign_owner = pathlib.Path(WORKSPACE) / "correction-round-revision-in-progress"
+        foreign_owner.write_bytes(b"another durable authority owner\n")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=120)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(descriptor)
+    check(process.returncode != 0, stdout + stderr)
+    check(marker_path.read_bytes() == before_marker
+          and (pathlib.Path(WORKSPACE) / "progress.jsonl").read_bytes() == before_journal
+          and subprocess.check_output(
+              ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+          ).strip() == before_head,
+          "the serialized mapping crossed another persistent authority owner")
+    foreign_owner.unlink()
+    resumed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "final-checker-contract-map.sh"),
+         "lot-1", "1", account["operation"]],
+        cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=ENV, timeout=120,
+    )
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    check(not marker_path.exists(),
+          "the pre-repository mapping retained its completed persistent owner")
+    check(len([
+        entry for entry in journal_lines()
+        if entry.get("kind") == "final-checker.contract-mapped"
+    ]) == 1, "the serialized pre-repository mapping has no exact terminal")
+
+
+@test
+def correction_retry_pause_preserves_the_nonempty_final_checker_set():
+    correction_final_design_obligation_starts_under_contract_map_owner(open_design=False)
+    progress_module = load_common_module("progress")
+    entries = journal_lines()
+    current = progress_module.outstanding_final_checker_set(
+        entries, len(entries), "lot-1", 1, "the retry pause test",
+    )
+    current_sha = load_common_module("final_checker_obligations").set_sha256(current)
+    obligation_ids = [member["source"]["obligation_id"] for member in current["entries"]]
+    check(len(obligation_ids) == 1, current)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    stopped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause",
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(stopped.returncode == 0, stopped.stdout + stopped.stderr)
+    stop_index = len(journal_lines()) - 1
+    stop = journal_lines()[stop_index]
+    check(stop["data"]["final_checker_set_sha256"] == current_sha
+          and stop["data"]["final_checker_assignments"] == obligation_ids,
+          stop)
+    progress_module.expected_attempt_stop_data(
+        journal_lines(), stop_index, stop, "the durable retry pause",
+    )
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    bare = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(bare.returncode == 0, bare.stdout + bare.stderr)
+    bare_stop = journal_lines()[-1]
+    check(bare_stop["data"]["final_checker_set_sha256"] == current_sha
+          and bare_stop["data"]["final_checker_assignments"] == obligation_ids,
+          bare_stop)
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    aborted = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "abort",
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(aborted.returncode == 0, aborted.stdout + aborted.stderr)
+    abort_stop = journal_lines()[-1]
+    check(abort_stop["data"]["final_checker_set_sha256"] == current_sha
+          and abort_stop["data"]["final_checker_assignments"] == obligation_ids,
+          abort_stop)
+
+
+@test
+def correction_bare_pause_preserves_code_design_proof_through_first_code_retry():
+    correction_final_code_obligation_carries_the_current_design_proof(open_code=False)
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    authority = attempt["design_proof_authority"]
+    obligation_ids = attempt["assigned_final_checker_obligations"]
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    active_pause = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause",
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(active_pause.returncode == 0, active_pause.stdout + active_pause.stderr)
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    bare_pause = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(bare_pause.returncode == 0, bare_pause.stdout + bare_pause.stderr)
+    stop_index = len(journal_lines()) - 1
+    stop = journal_lines()[stop_index]
+    expected_bare_authority = {
+        "schema": 1,
+        "tasks": [{
+            "task": 1,
+            "obligation_ids": obligation_ids,
+            "authority": authority,
+        }],
+    }
+    check(stop["data"]["design_proof_authority"] == expected_bare_authority, stop)
+    progress_module = load_common_module("progress")
+    progress_module.expected_correction_bare_stop_data(
+        journal_lines(), stop_index, stop, "the durable bare code pause",
+    )
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    resume = journal_lines()[-1]
+    check(resume["data"]["design_proof_authority"] == expected_bare_authority, resume)
+    progress_module.validate_correction_resume_entry(
+        journal_lines(), len(journal_lines()) - 1, resume,
+    )
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    replacement = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(replacement["design_proof_authority"] == authority
+          and replacement["assigned_final_checker_obligations"] == obligation_ids,
+          replacement)
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": 3, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+    published = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-publish.sh"),
+         "--correction", "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project("bare-code-retry.txt", "bare pause code retry\n")
+    subprocess.run([
+        "git", "-C", REPO, "add", candidate, "corrections/lot-1/round-1.md",
+    ], check=True)
+    tree = subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    ).strip()
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_blob = subprocess.check_output([
+        "git", "-C", REPO, "hash-object",
+        os.path.join(REPO, ".superpowers", "bwr", "gate.md"),
+    ], text=True).strip()
+    gate = hashlib.sha256(b"bare-pause-code-retry").hexdigest()
+    gate_data = {
+        "op": gate, "scope": "correction-review",
+        "owner": "lot-1/correction-1/task-1/attempt-3/code-round-1",
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 3,
+        "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+        **correction_gate_authority_data("lot-1", 1, 1, 3),
+    }
+    append_subagent("subagent-started", "gate-runner", data=gate_data)
+    report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
+    append_subagent("subagent-ended", "gate-runner", data={
+        **gate_data, "green": True, "surface": "unchanged",
+        "report": report_relative, "report_sha256": report_sha, "commands": 1,
+    })
+    opened = run_progress(
+        "subagent-started", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    logical = journal_lines()[-1]["data"]
+    check(logical["design_proof_authority"] == authority, logical)
+    manifest = json.loads(
+        (pathlib.Path(WORKSPACE) / logical["manifest"]).read_text(encoding="utf-8")
+    )
+    check(manifest["design_proof_authority"] == authority, manifest)
+
+
+@test
+def correction_stop_projector_validates_resumes_once_and_rejects_mutation():
+    correction_final_design_obligation_starts_under_contract_map_owner(open_design=False)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    paused = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause",
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    cycles = 5
+    for _cycle in range(cycles):
+        stopped = subprocess.run(
+            [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(stopped.returncode == 0, stopped.stdout + stopped.stderr)
+        resumed = run_progress("note", "resumed")
+        check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    entries = journal_lines()
+    progress_module = load_common_module("progress")
+    calls = 0
+    original = progress_module.correction_resume_account
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    progress_module.correction_resume_account = counted
+    check(progress_module.current_correction_stop_state(
+        entries, len(entries), "the linear stop history",
+    ) is None, entries[-1])
+    check(calls == cycles + 1, {"calls": calls, "cycles": cycles + 1})
+    calls = 0
+    progress_module.validate_construction_verdict_history(entries)
+    check(calls == cycles + 1, {
+        "historical_calls": calls, "cycles": cycles + 1,
+    })
+    resume_index = next(
+        index for index, entry in reversed(list(enumerate(entries)))
+        if entry.get("kind") == "resumed" and entry.get("data", {}).get("schema") == 2
+    )
+    for key in (
+        "stop", "unit_authority_sha256", "execution_authority_sha256",
+        "final_checker_set_sha256", "final_checker_assignments",
+        "design_proof_authority",
+    ):
+        changed = json.loads(json.dumps(entries))
+        current = changed[resume_index]["data"][key]
+        changed[resume_index]["data"][key] = {} if current is None else None
+        refused = False
+        try:
+            progress_module.current_correction_stop_state(
+                changed, len(changed), f"the changed resume {key}",
+            )
+        except SystemExit:
+            refused = True
+        check(refused, f"a changed resume {key} hid its stop")
+    changed = json.loads(json.dumps(entries))
+    changed[resume_index]["data"]["stop"] = None
+    journal_path = pathlib.Path(WORKSPACE) / "progress.jsonl"
+    raw_lines = journal_path.read_text(encoding="utf-8").splitlines()
+    raw_lines[resume_index] = json.dumps(
+        changed[resume_index], separators=(",", ":"),
+    )
+    journal_path.write_text(
+        "\n".join(raw_lines) + "\n",
+        encoding="utf-8",
+    )
+    changed_bytes = journal_path.read_bytes()
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    completed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-built.sh"),
+         "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(completed.returncode != 0 and "resume" in (
+        completed.stdout + completed.stderr
+    ).lower(), completed.stdout + completed.stderr)
+    check(journal_path.read_bytes() == changed_bytes,
+          "completion changed the damaged journal")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip() == head, "completion moved HEAD after a changed resume")
+    check(not (pathlib.Path(WORKSPACE) / "correction-round-built-in-progress").exists(),
+          "completion published a marker after a changed resume")
+
+
+@test
+def correction_pause_blocks_every_authority_mutation_until_resume():
+    correction_final_design_obligation_starts_under_contract_map_owner(open_design=False)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    paused = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause",
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    before_entries = journal_lines()
+    before_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    before_status = subprocess.check_output(
+        ["git", "-C", REPO, "status", "--porcelain"], text=True,
+    )
+    before_markers = sorted(
+        path.name for path in pathlib.Path(WORKSPACE).iterdir()
+        if path.name.endswith("-in-progress")
+    )
+    failure_index = next(
+        index for index, entry in reversed(list(enumerate(before_entries)))
+        if entry.get("kind") == "attempt.failed" and entry.get("correction") == 1
+    )
+    commands = [
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+         "lot-1", "1", "1", "A stopped round cannot revise its task contract."],
+        [os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh"),
+         "--correction", "lot-1", "1", "1", "3", journal_proof(failure_index)],
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-built.sh"),
+         "lot-1", "1"],
+    ]
+    for command in commands:
+        refused = subprocess.run(
+            command, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(refused.returncode != 0 and "stop" in (
+            refused.stdout + refused.stderr
+        ).lower(), refused.stdout + refused.stderr)
+        check(journal_lines() == before_entries, "a stopped authority command appended")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+        ).strip() == before_head, "a stopped authority command changed HEAD")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "status", "--porcelain"], text=True,
+        ) == before_status, "a stopped authority command changed the tree")
+        check(sorted(
+            path.name for path in pathlib.Path(WORKSPACE).iterdir()
+            if path.name.endswith("-in-progress")
+        ) == before_markers, "a stopped authority command published a marker")
+    mapping = next(
+        entry for entry in reversed(before_entries)
+        if entry.get("kind") == "final-checker.contract-mapped"
+    )
+    progress_module = load_common_module("progress")
+    refused_mapping = False
+    try:
+        progress_module.normalize_final_checker_contract_mapped(
+            before_entries, mapping["data"], "the stopped final-checker map",
+        )
+    except SystemExit:
+        refused_mapping = True
+    check(refused_mapping, "a final-checker map crossed a current pause")
+    check(journal_lines() == before_entries, "the stopped mapping changed the journal")
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    replace_correction_task_line(
+        1,
+        "Files: src/demo.py and its focused tests",
+        "Files: src/demo.py, src/resumed.py, and their focused tests",
+    )
+    revised = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+         "lot-1", "1", "1", "The resumed task owns one additional bounded file."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(revised.returncode == 0, revised.stdout + revised.stderr)
+    check(journal_lines()[-1].get("kind") == "correction.round.revised",
+          journal_lines()[-1])
+
+
+@test
+def correction_retry_set_reauthenticates_each_complete_historical_producer():
+    correction_final_code_obligation_carries_the_current_design_proof(open_code=False)
+    entries = journal_lines()
+    progress_module = load_common_module("progress")
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    status = subprocess.check_output(
+        ["git", "-C", REPO, "status", "--porcelain"], text=True,
+    )
+    markers = sorted(
+        path.name for path in pathlib.Path(WORKSPACE).iterdir()
+        if path.name.endswith("-in-progress")
+    )
+    failure_index = next(
+        index for index, entry in reversed(list(enumerate(entries)))
+        if entry.get("kind") == "attempt.failed" and entry.get("correction") == 1
+    )
+    mapping_index = next(
+        index for index, entry in reversed(list(enumerate(entries)))
+        if entry.get("kind") == "final-checker.contract-mapped"
+    )
+    mutations = []
+    changed = json.loads(json.dumps(entries))
+    changed[failure_index]["data"]["unit_authority_sha256"] = "0" * 64
+    mutations.append(("failure authority", changed))
+    changed = json.loads(json.dumps(entries))
+    changed[failure_index]["data"].pop("final_checker_transition")
+    mutations.append(("missing failure transition", changed))
+    changed = json.loads(json.dumps(entries))
+    changed[mapping_index]["data"]["document"]["gate"] = "0" * 64
+    mutations.append(("mapping document", changed))
+    changed = json.loads(json.dumps(entries))
+    changed[mapping_index]["data"]["design_proof_carry"]["carry_id"] = "0" * 64
+    mutations.append(("mapping Design carry", changed))
+    changed = json.loads(json.dumps(entries))
+    changed[mapping_index]["data"].pop("retry_transition")
+    mutations.append(("missing mapping transition", changed))
+    for label, history in mutations:
+        refused = False
+        try:
+            progress_module.normalize_correction_bare_stop(
+                history, "paused", {
+                    "sha": head,
+                    "op": hashlib.sha256(label.encode()).hexdigest(),
+                }, {"lot": "lot-1", "correction": 1},
+            )
+        except SystemExit:
+            refused = True
+        check(refused, f"the retry-set consumer accepted changed {label}")
+        check(journal_lines() == entries, f"changed {label} mutated the journal")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+        ).strip() == head, f"changed {label} moved HEAD")
+        check(subprocess.check_output(
+            ["git", "-C", REPO, "status", "--porcelain"], text=True,
+        ) == status, f"changed {label} changed the tree")
+        check(sorted(
+            path.name for path in pathlib.Path(WORKSPACE).iterdir()
+            if path.name.endswith("-in-progress")
+        ) == markers, f"changed {label} published a marker")
+
+
+@test
+def correction_retry_revision_remaps_only_its_changed_task_contract():
+    correction_final_design_obligation_starts_under_contract_map_owner(open_design=False)
+    progress_module = load_common_module("progress")
+    before_failure = journal_lines()
+    input_set = progress_module.outstanding_final_checker_set(
+        before_failure, len(before_failure), "lot-1", 1, "the retry revision test",
+    )
+    input_id = input_set["entries"][0]["source"]["obligation_id"]
+    old_contract = input_set["entries"][0]["assignment"]["task_contract_sha256"]
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "2", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    replace_correction_task_line(
+        1,
+        "Files: src/demo.py and its focused tests",
+        "Files: src/demo.py, src/retry.py, and their focused tests",
+    )
+    revised = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+         "lot-1", "1", "1", "The retry needs one additional bounded source file."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(revised.returncode == 0, revised.stdout + revised.stderr)
+    entries = journal_lines()
+    current = progress_module.outstanding_final_checker_set(
+        entries, len(entries), "lot-1", 1, "the durable retry revision",
+    )
+    check([member["source"]["obligation_id"] for member in current["entries"]]
+          == [input_id], current)
+    assignment = current["entries"][0]["assignment"]
+    state = progress_module.current_correction_contract_state(
+        entries, len(entries), "lot-1", 1, "the durable retry revision",
+    )
+    check(assignment["owner"] == "task" and assignment["task"] == 1
+          and assignment["task_contract_sha256"]
+          == state["artifact"]["tasks"][0]["task_contract_sha256"]
+          and assignment["task_contract_sha256"] != old_contract,
+          assignment)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    failed_again = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "3", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed_again.returncode == 0, failed_again.stdout + failed_again.stderr)
+    failure_index = len(journal_lines()) - 1
+    before_rewind = progress_module.outstanding_final_checker_set(
+        journal_lines(), len(journal_lines()), "lot-1", 1,
+        "the retry rewind input",
+    )
+    current_sha = load_common_module("final_checker_obligations").set_sha256(
+        before_rewind,
+    )
+    rewind = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh"),
+         "--correction", "lot-1", "1", "1", "4", journal_proof(failure_index)],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(rewind.returncode == 0, rewind.stdout + rewind.stderr)
+    rewind_entry = journal_lines()[-1]
+    check(rewind_entry.get("kind") == "rewind.done"
+          and rewind_entry["data"]["outstanding_retry_set_sha256"] == current_sha,
+          rewind_entry)
+    after_rewind = progress_module.outstanding_final_checker_set(
+        journal_lines(), len(journal_lines()), "lot-1", 1,
+        "the durable retry rewind",
+    )
+    check(after_rewind == before_rewind, after_rewind)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "4"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+
+
+@test
+def correction_final_design_retry_publishes_one_current_design_proof():
+    correction_final_design_obligation_starts_under_contract_map_owner()
+    started = next(
+        entry["data"] for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "design-checker"
+        and entry.get("correction") == 1
+        and entry.get("attempt") == 2
+        and entry.get("round") == 1
+    )
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "design checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result_source = pathlib.Path(BASE) / "correction-final-design-retry-result.json"
+    result_source.write_text(json.dumps({
+        "verdict": "clean",
+        "manifest": started["manifest"],
+        "checks": [
+            {"subject": "source findings",
+             "evidence": "The accepted Design obligation is corrected."},
+            {"subject": "product contract",
+             "evidence": "The current semantic Design contract remains satisfied."},
+        ],
+        "previous": [],
+        "findings": [],
+    }), encoding="utf-8")
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": str(result_source)}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    consumed = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"design","outcome":"clean"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+
+    published = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-publish.sh"),
+         "--correction", "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project(
+        "correction-final-design-retry.txt", "accepted retry candidate\n",
+    )
+    subprocess.run([
+        "git", "-C", REPO, "add", candidate, "corrections/lot-1/round-1.md",
+    ], check=True)
+    tree = subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    ).strip()
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_blob = subprocess.check_output([
+        "git", "-C", REPO, "hash-object",
+        os.path.join(REPO, ".superpowers", "bwr", "gate.md"),
+    ], text=True).strip()
+    review_gate = hashlib.sha256(b"correction-final-design-retry-review").hexdigest()
+    review_data = {
+        "op": review_gate,
+        "scope": "correction-review",
+        "owner": "lot-1/correction-1/task-1/attempt-2/code-round-1",
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 2,
+        "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+        **correction_gate_authority_data("lot-1", 1, 1, 2),
+    }
+    append_subagent("subagent-started", "gate-runner", data=review_data)
+    report_relative, report_sha = write_gate_report(review_gate, gate_blob, tree)
+    append_subagent("subagent-ended", "gate-runner", data={
+        **review_data, "green": True, "surface": "unchanged",
+        "report": report_relative, "report_sha256": report_sha, "commands": 1,
+    })
+    opened = run_progress(
+        "subagent-started", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"gate": review_gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    logical = journal_lines()[-1]["data"]
+    manifest = json.loads(
+        (pathlib.Path(WORKSPACE) / logical["manifest"]).read_text(encoding="utf-8")
+    )
+    authority = manifest["design_proof_authority"]
+    check(isinstance(authority, dict), authority)
+    check(authority.get("schema") == 1 and authority.get("carries") == [], authority)
+    check(authority.get("root", {}).get("proof") == journal_proof(
+        next(
+            index for index, entry in reversed(list(enumerate(journal_lines())))
+            if entry.get("kind") == "verdict.consumed"
+            and entry.get("task") == 1 and entry.get("attempt") == 2
+            and entry.get("correction") == 1
+            and entry.get("data", {}).get("check") == "design"
+        )
+    ), authority)
+
+
+@test
+def correction_final_design_retry_success_consumes_its_exact_obligation():
+    correction_final_design_retry_publishes_one_current_design_proof()
+    started = next(
+        entry["data"] for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "code-checker"
+        and entry.get("correction") == 1
+        and entry.get("attempt") == 2
+        and entry.get("round") == 1
+    )
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "code checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result = code_result_source(started)
+    ended = run_progress(
+        "subagent-ended", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    verdict = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"code","outcome":"clean"}',
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    proved = run_progress(
+        "construction-verdict-check", "code", "lot-1", "1", "2", "1",
+    )
+    check(proved.returncode == 0, proved.stdout + proved.stderr)
+
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    owner = "lot-1/correction-1/task-1/attempt-2"
+    opened = subprocess.run(
+        [gate_script, "open", "correction-task", owner, "lot-1", "1", "2", base, "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    marker = dict(line.split(" ", 1) for line in (
+        pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    ).read_text(encoding="utf-8").splitlines())
+    execution = subprocess.run(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "run", marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    observations = {
+        "schema": 1,
+        "commands": [{"count": 1, "example": "true exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    }
+    report = subprocess.run(
+        [gate_script, "publish-report", marker["op"]], cwd=REPO,
+        input=json.dumps(observations), capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(report.returncode == 0, report.stdout + report.stderr)
+    closed = subprocess.run(
+        [gate_script, "close", marker["op"]], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "consume final Design obligation"],
+        check=True,
+    )
+    commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    success = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh"),
+         "--correction", "lot-1", "1", "1", commit, marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=300,
+    )
+    check(success.returncode == 0, success.stdout + success.stderr)
+    terminal_index, terminal = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+    )
+    transition = terminal["data"]["final_checker_transition"]
+    check(transition["input_sha256"] != transition["output_sha256"], transition)
+    check(transition["dispositions"] == [{
+        "obligation_id": terminal["data"]["final_checker_assignments"][0],
+        "outcome": "consumed",
+        "assignment": None,
+        "evidence": transition["dispositions"][0]["evidence"],
+        "transition_authority": transition["transition_id"],
+    }], transition)
+    evidence = transition["dispositions"][0]["evidence"]
+    check(evidence["consumer_phase"] == "first-design-manifest", evidence)
+    check(evidence["manifest"]["round"] == 1
+          and evidence["manifest"]["attempt"] == 2, evidence)
+    check(evidence["success"]["commit"] == commit
+          and evidence["success"]["gate"] == marker["op"], evidence)
+    load_common_module("progress").validate_attempt_succeeded_entry(
+        journal_lines(), terminal_index, terminal,
+    )
+
+
+@test
+def post_task_final_checker_contract_mapping_publishes_commit_and_fresh_baseline():
+    state, task_one = complete_current_correction_task_one(
+        "post-task-final-checker-map", task_count=2,
+    )
+    accepted_artifact = subprocess.check_output(
+        ["git", "-C", REPO, "show", f"{task_one}:{state['artifact_relative']}"],
+        text=True,
+    )
+    workspace_artifact = (
+        pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    ).read_text(encoding="utf-8")
+    accepted_task_one_design = correction_task_design_text(accepted_artifact, 1)
+    check(correction_task_design_text(workspace_artifact, 1) == accepted_task_one_design,
+          "Task 1 Design diverged before Task 2 started")
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "2", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    implementer = dict(CALLER_BWR)
+    implementer.update({"task": 2, "attempt": 1, "correction": 1})
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = implementer
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = implementer
+    set_config(cfg)
+    drive_correction_design_to_accepted_final_finding(task=2)
+    workspace_artifact = (
+        pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    ).read_text(encoding="utf-8")
+    check(correction_task_design_text(workspace_artifact, 1) == accepted_task_one_design,
+          "Task 2 Design review changed Task 1 Design")
+    handoff = run_progress("construction-failure-handoff", "lot-1", "2", "1")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report = pathlib.Path(WORKSPACE) / (
+        "reports/construction/lot-1/correction-1/"
+        "task-2-attempt-1-failure.md"
+    )
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        "## What failed\nThe final Design checker accepted one Task 2 defect.\n\n"
+        "## Classification\nC3.9b — Task 2 requires one bounded Design retry.\n\n"
+        "## Evidence read\nThe immutable Task 2 checker result and settlement.\n\n"
+        + handoff.stdout,
+        encoding="utf-8",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "2", "1", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "2", "1", "C3.9b"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    marker_path = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    obligation_id = marker["source"]["obligation_id"]
+    replace_correction_task_line(
+        2,
+        "Consumes final-checker obligations: -",
+        f"Consumes final-checker obligations: {obligation_id}",
+    )
+    workspace_artifact = (
+        pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    ).read_text(encoding="utf-8")
+    check(correction_task_design_text(workspace_artifact, 1) == accepted_task_one_design,
+          "Task 2 obligation-line edit changed Task 1 Design")
+    arguments = [
+        os.path.join(WORKSPACE, "prompts", "construction",
+                     "final-checker-contract-map.sh"),
+        "lot-1", "1", marker["operation"],
+    ]
+    prepared = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(prepared.returncode == 0 and "BASELINE REQUIRED" in prepared.stdout,
+          prepared.stdout + prepared.stderr)
+    check(marker_path.is_file(), "the post-task map lost its persistent owner")
+    document_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    check(document_commit != task_one, "the post-task map created no document commit")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD^"], text=True,
+    ).strip() == task_one, "the map document commit has another parent")
+    check(subprocess.check_output([
+        "git", "-C", REPO, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD",
+    ], text=True).splitlines() == [state["artifact_relative"]],
+          "the map document commit changed another path")
+    selected = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "correction-round-baseline.sh"), "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selected.returncode == 0, selected.stdout + selected.stderr)
+    baseline = json.loads(selected.stdout)
+    check(baseline["mode"] == "required"
+          and baseline["base_commit"] == document_commit, baseline)
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    opened_gate = subprocess.run(
+        [gate_script, "open", "correction-baseline", baseline["owner"],
+         "lot-1", "0", "0", document_commit, "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened_gate.returncode == 0, opened_gate.stdout + opened_gate.stderr)
+    gate_marker = pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    gate_account = dict(
+        line.split(" ", 1) for line in gate_marker.read_text(encoding="utf-8").splitlines()
+    )
+    gate = gate_account["op"]
+    before_gate = gate_marker.read_bytes()
+    before_map = marker_path.read_bytes()
+    before_journal = (pathlib.Path(WORKSPACE) / "progress.jsonl").read_bytes()
+    before_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    crossed = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(crossed.returncode != 0,
+          "the post-task final-checker mapping crossed its live baseline gate")
+    check(gate_marker.read_bytes() == before_gate and marker_path.read_bytes() == before_map,
+          "the refused post-task mapping changed a persistent owner")
+    check((pathlib.Path(WORKSPACE) / "progress.jsonl").read_bytes() == before_journal,
+          "the refused post-task mapping appended an event")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip() == before_head, "the refused post-task mapping published another commit")
+    complete_live_gate(gate)
+    finished = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+    check(not marker_path.exists(), "the completed post-task map retained its owner")
+    revision_index, revision = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "correction.round.revised"
+        and entry.get("data", {}).get("producer") == "final-checker-contract-map"
+    )
+    check(revision["data"]["commit"] == document_commit
+          and revision["data"]["tree"] == subprocess.check_output(
+              ["git", "-C", REPO, "rev-parse", "HEAD^{tree}"], text=True,
+          ).strip()
+          and revision["data"]["baseline"] == {
+              "required": True, "reused_gate": None,
+          }, revision)
+    load_common_module("progress").validate_correction_round_revision_entry(
+        journal_lines(), revision_index, revision,
+    )
+    mapping_index, mapping = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "final-checker.contract-mapped"
+    )
+    load_common_module("progress").validate_final_checker_contract_mapped_entry(
+        journal_lines(), mapping_index, mapping,
+    )
+    check(mapping["data"]["document"]["authority"] == journal_proof(revision_index)
+          and mapping["data"]["document"]["commit"] == document_commit
+          and mapping["data"]["document"]["gate"] == gate
+          and mapping["data"]["document"]["consumer_map_check"] is None,
+          mapping)
+    resolved = json.loads(subprocess.check_output([
+        sys.executable,
+        os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py"),
+        "resolve-correction", "lot-1", "1", "2",
+    ], cwd=REPO, text=True))
+    check(resolved["tree_authority"] == {
+        "rewind": None,
+        "commit": document_commit,
+        "tree": revision["data"]["tree"],
+        "gate": gate,
+    }, resolved)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "2", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+
+
+@test
+def correction_retry_post_task_revision_preserves_the_current_assignment():
+    post_task_final_checker_contract_mapping_publishes_commit_and_fresh_baseline()
+    progress_module = load_common_module("progress")
+    before = progress_module.outstanding_final_checker_set(
+        journal_lines(), len(journal_lines()), "lot-1", 1,
+        "the post-task retry revision",
+    )
+    obligation_id = before["entries"][0]["source"]["obligation_id"]
+    old_contract = before["entries"][0]["assignment"]["task_contract_sha256"]
+    task_one_ref = "refs/bwr/test-run/lot-1/correction-1/task-1"
+    task_one = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", task_one_ref], text=True,
+    ).strip()
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "2", "2", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    replace_correction_task_line(
+        2,
+        "Files: src/coupled.py and its focused tests",
+        "Files: src/coupled.py, src/post-task-retry.py, and their focused tests",
+    )
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    arguments = [
+        os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+        "lot-1", "1", "2", "The Task 2 retry needs one additional bounded source file.",
+    ]
+    prepared = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(prepared.returncode == 0 and "BASELINE REQUIRED" in prepared.stdout,
+          prepared.stdout + prepared.stderr)
+    revision_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    selected = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "correction-round-baseline.sh"), "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selected.returncode == 0, selected.stdout + selected.stderr)
+    baseline = json.loads(selected.stdout)
+    gate = seed_correction_baseline_gate(
+        baseline["owner"], revision_commit, revision_commit,
+    )
+    finished = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+    entries = journal_lines()
+    current = progress_module.outstanding_final_checker_set(
+        entries, len(entries), "lot-1", 1, "the durable post-task retry revision",
+    )
+    state = progress_module.current_correction_contract_state(
+        entries, len(entries), "lot-1", 1, "the durable post-task retry revision",
+    )
+    assignment = current["entries"][0]["assignment"]
+    check(current["entries"][0]["source"]["obligation_id"] == obligation_id
+          and assignment["task_contract_sha256"]
+          == state["artifact"]["tasks"][1]["task_contract_sha256"]
+          and assignment["task_contract_sha256"] != old_contract
+          and subprocess.check_output(
+              ["git", "-C", REPO, "rev-parse", task_one_ref], text=True,
+          ).strip() == task_one
+          and state["gate"] == gate,
+          assignment)
+
+
+def drive_current_correction_code_to_accepted_final_finding(
+        token, *, attempt=1, first_round_open=False,
+):
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    gate_blob = subprocess.check_output([
+        "git", "-C", REPO, "hash-object",
+        os.path.join(REPO, ".superpowers", "bwr", "gate.md"),
+    ], text=True).strip()
+    candidate = f"{token}-candidate.txt"
+    for round_number in range(1, 11):
+        if first_round_open and round_number == 1:
+            logical = next(
+                entry["data"] for entry in reversed(journal_lines())
+                if entry.get("event") == "subagent-started"
+                and entry.get("kind") == "code-checker"
+                and entry.get("correction") == 1
+                and entry.get("attempt") == attempt
+                and entry.get("round") == 1
+            )
+        else:
+            write_project(candidate, f"candidate generation {round_number}\n")
+            candidate_paths = [candidate]
+            artifact_path = os.path.join(REPO, "corrections", "lot-1", "round-1.md")
+            if os.path.isfile(artifact_path):
+                candidate_paths.append(artifact_path)
+            subprocess.run(
+                ["git", "-C", REPO, "add", *candidate_paths], check=True,
+            )
+            tree = subprocess.check_output(
+                ["git", "-C", REPO, "write-tree"], text=True,
+            ).strip()
+            gate = hashlib.sha256(
+                f"{token}:attempt:{attempt}:code:{round_number}".encode()
+            ).hexdigest()
+            gate_data = {
+                "op": gate, "scope": "correction-review",
+                "owner": (
+                    f"lot-1/correction-1/task-1/attempt-{attempt}/"
+                    f"code-round-{round_number}"
+                ),
+                "lot": "lot-1", "correction": 1, "task": 1, "attempt": attempt,
+                "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+                **correction_gate_authority_data("lot-1", 1, 1, attempt),
+            }
+            append_subagent("subagent-started", "gate-runner", data=gate_data)
+            report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
+            append_subagent("subagent-ended", "gate-runner", data={
+                **gate_data, "green": True, "surface": "unchanged",
+                "report": report_relative, "report_sha256": report_sha, "commands": 1,
+            })
+            opened = run_progress(
+                "subagent-started", "code-checker", "--task", "1",
+                "--round", str(round_number), "--data", json.dumps({"gate": gate}),
+            )
+            check(opened.returncode == 0, opened.stdout + opened.stderr)
+            logical = journal_lines()[-1]["data"]
+        spent = run_progress(
+            "note", "bound.spent", "--task", "1", "--round", str(round_number),
+            "--text", f"code checker round {round_number} of 10",
+        )
+        check(spent.returncode == 0, spent.stdout + spent.stderr)
+        result = code_result_source(logical, findings=1)
+        ended = run_progress(
+            "subagent-ended", "code-checker", "--task", "1",
+            "--round", str(round_number), "--data", json.dumps({"result": result}),
+        )
+        check(ended.returncode == 0, ended.stdout + ended.stderr)
+        verdict = run_progress(
+            "note", "verdict.consumed", "--task", "1", "--round", str(round_number),
+            "--data", '{"check":"code","outcome":"findings"}',
+        )
+        check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+        if round_number < 10:
+            append_code_correction(round_number)
+    resolution = pathlib.Path(BASE) / f"{token}-accepted-code.md"
+    resolution.write_text(
+        "## Finding 1 — accepted\n"
+        "The next attempt must correct this accepted code defect.\n",
+        encoding="utf-8",
+    )
+    resolved = run_progress(
+        "note", "code.review.resolved", "--task", "1", "--round", "10",
+        "--text-file", str(resolution),
+        "--data", '{"check":"code","items":[{"id":1,"status":"accepted"}]}',
+    )
+    check(resolved.returncode == 0, resolved.stdout + resolved.stderr)
+
+
+@test
+def correction_final_code_obligation_carries_the_current_design_proof(
+        *, open_code=True, task_count=1,
+):
+    seed_correction_task_with_clean_design(
+        "correction-final-code-obligation", task_count=task_count,
+    )
+    drive_current_correction_code_to_accepted_final_finding(
+        "correction-final-code-obligation",
+    )
+    handoff = run_progress("construction-failure-handoff", "lot-1", "1", "1")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report_relative = (
+        "reports/construction/lot-1/correction-1/task-1-attempt-1-failure.md"
+    )
+    report = pathlib.Path(WORKSPACE) / report_relative
+    report.write_text(
+        "## What failed\nThe final code checker accepted one defect.\n\n"
+        "## Classification\nC3.9a — retry the bounded implementation.\n\n"
+        "## Evidence read\nThe immutable checker result and settlement.\n\n"
+        + handoff.stdout,
+        encoding="utf-8",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "1", "1", "C3.9a",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "1", "C3.9a"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    marker = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
+    account = json.loads(marker.read_text(encoding="utf-8"))
+    check(isinstance(account["current_design_proof_authority"], dict), account)
+    source = account["source"]
+    check(source["checker"] == "code", source)
+    replace_correction_task_line(
+        1,
+        "Consumes final-checker obligations: -",
+        f"Consumes final-checker obligations: {source['obligation_id']}",
+    )
+    mapped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "final-checker-contract-map.sh"),
+         "lot-1", "1", account["operation"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(mapped.returncode == 0, mapped.stdout + mapped.stderr)
+    mapping = next(
+        entry for entry in reversed(journal_lines())
+        if entry.get("kind") == "final-checker.contract-mapped"
+    )
+    carry = mapping["data"]["design_proof_carry"]
+    check(isinstance(carry, dict) and re.fullmatch(
+        r"[0-9a-f]{64}", carry.get("carry_id", ""),
+    ), carry)
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(isinstance(attempt["design_proof_authority"], dict), attempt)
+    check(attempt["assigned_final_checker_obligations"] == [source["obligation_id"]], attempt)
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": 2, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+    if not open_code:
+        return
+    published = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-publish.sh"),
+         "--correction", "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project(
+        "correction-final-code-retry.txt", "accepted code retry candidate\n",
+    )
+    subprocess.run([
+        "git", "-C", REPO, "add", candidate, "corrections/lot-1/round-1.md",
+    ], check=True)
+    tree = subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    ).strip()
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_blob = subprocess.check_output([
+        "git", "-C", REPO, "hash-object",
+        os.path.join(REPO, ".superpowers", "bwr", "gate.md"),
+    ], text=True).strip()
+    review_gate = hashlib.sha256(b"correction-final-code-retry-review").hexdigest()
+    review_data = {
+        "op": review_gate,
+        "scope": "correction-review",
+        "owner": "lot-1/correction-1/task-1/attempt-2/code-round-1",
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 2,
+        "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+        **correction_gate_authority_data("lot-1", 1, 1, 2),
+    }
+    append_subagent("subagent-started", "gate-runner", data=review_data)
+    report_relative, report_sha = write_gate_report(review_gate, gate_blob, tree)
+    append_subagent("subagent-ended", "gate-runner", data={
+        **review_data, "green": True, "surface": "unchanged",
+        "report": report_relative, "report_sha256": report_sha, "commands": 1,
+    })
+    opened = run_progress(
+        "subagent-started", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"gate": review_gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    logical = journal_lines()[-1]["data"]
+    check(logical["design_proof_authority"] == attempt["design_proof_authority"], logical)
+    manifest = json.loads(
+        (pathlib.Path(WORKSPACE) / logical["manifest"]).read_text(encoding="utf-8")
+    )
+    check(manifest["design_proof_authority"] == attempt["design_proof_authority"], manifest)
+
+
+@test
+def correction_mixed_design_then_code_obligations_start_with_design():
+    correction_final_design_obligation_starts_under_contract_map_owner(open_design=False)
+    first_attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    design_id = first_attempt["assigned_final_checker_obligations"][0]
+    open_code_after_fresh_correction_design("mixed-design-code", 2)
+    drive_current_correction_code_to_accepted_final_finding(
+        "mixed-design-code", attempt=2, first_round_open=True,
+    )
+    handoff = run_progress("construction-failure-handoff", "lot-1", "1", "2")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report = pathlib.Path(WORKSPACE) / (
+        "reports/construction/lot-1/correction-1/"
+        "task-1-attempt-2-failure.md"
+    )
+    report.write_text(
+        "## What failed\nThe retry found one accepted code defect.\n\n"
+        "## Classification\nC3.9a — retry both bounded obligations.\n\n"
+        "## Evidence read\nThe pending Design obligation and code settlement.\n\n"
+        + handoff.stdout,
+        encoding="utf-8",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "1", "2", "C3.9a",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "2", "C3.9a"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    marker_path = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
+    account = json.loads(marker_path.read_text(encoding="utf-8"))
+    code_id = account["source"]["obligation_id"]
+    check(account["source"]["checker"] == "code" and design_id != code_id, account)
+    check(account["prior_ids"] == [design_id], account)
+    next_ids = sorted([design_id, code_id])
+    check(account["next_ids"] == next_ids, account)
+    artifact = pathlib.Path(account["document"]["workspace_path"])
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace(
+            f"Consumes final-checker obligations: {design_id}",
+            "Consumes final-checker obligations: " + ", ".join(next_ids),
+        ),
+        encoding="utf-8",
+    )
+    mapped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "final-checker-contract-map.sh"),
+         "lot-1", "1", account["operation"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(mapped.returncode == 0, mapped.stdout + mapped.stderr)
+    mapping_index, mapping = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "final-checker.contract-mapped"
+        and entry["data"]["operation"] == account["operation"]
+    )
+    check(isinstance(mapping["data"]["design_proof_carry"], dict), mapping)
+    load_common_module("progress").validate_final_checker_contract_mapped_entry(
+        journal_lines(), mapping_index, mapping,
+    )
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(attempt["assigned_final_checker_obligations"] == next_ids, attempt)
+    check(attempt["design_proof_authority"] is None, attempt)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    paused = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause",
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(paused.returncode == 0, paused.stdout + paused.stderr)
+    pause_index = len(journal_lines()) - 1
+    pause = journal_lines()[pause_index]
+    check(pause["data"]["final_checker_assignments"] == next_ids
+          and pause["data"]["design_proof_authority"] is None,
+          pause)
+    progress_module = load_common_module("progress")
+    progress_module.expected_attempt_stop_data(
+        journal_lines(), pause_index, pause, "the durable mixed retry pause",
+    )
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "4"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    replacement_marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(replacement_marker["assigned_final_checker_obligations"] == next_ids
+          and replacement_marker["design_proof_authority"] is None,
+          replacement_marker)
+    failed_again = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "4", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=300,
+    )
+    check(failed_again.returncode == 0, failed_again.stdout + failed_again.stderr)
+    failure_index = len(journal_lines()) - 1
+    failure = journal_lines()[failure_index]
+    check(failure["data"]["final_checker_assignments"] == next_ids
+          and failure["data"]["design_proof_authority"] is None,
+          failure)
+    progress_module.validate_attempt_failed_entry(
+        journal_lines(), failure_index, failure,
+    )
+    final_start = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "5"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(final_start.returncode == 0, final_start.stdout + final_start.stderr)
+    final_marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(final_marker["assigned_final_checker_obligations"] == next_ids
+          and final_marker["design_proof_authority"] is None,
+          final_marker)
+    complete_mixed_final_checker_retry("mixed-design-code-success", 5, next_ids)
+
+
+@test
+def correction_code_retry_revision_requires_a_new_design_proof():
+    correction_final_code_obligation_carries_the_current_design_proof(open_code=False)
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    obligation_ids = attempt["assigned_final_checker_obligations"]
+    check(len(obligation_ids) == 1 and isinstance(attempt["design_proof_authority"], dict),
+          attempt)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "2", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    replace_correction_task_line(
+        1,
+        "Files: src/demo.py and its focused tests",
+        "Files: src/demo.py, src/code-retry.py, and their focused tests",
+    )
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    revised = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+         "lot-1", "1", "1", "The code retry needs one additional bounded source file."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(revised.returncode == 0, revised.stdout + revised.stderr)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(marker["assigned_final_checker_obligations"] == obligation_ids
+          and marker["design_proof_authority"] is None,
+          marker)
+
+
+@test
+def correction_mixed_code_then_design_obligations_start_with_design():
+    correction_code_retry_revision_requires_a_new_design_proof()
+    prior_attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    code_id = prior_attempt["assigned_final_checker_obligations"][0]
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": 3, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+    drive_correction_design_to_accepted_final_finding()
+    handoff = run_progress("construction-failure-handoff", "lot-1", "1", "3")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report = pathlib.Path(WORKSPACE) / (
+        "reports/construction/lot-1/correction-1/"
+        "task-1-attempt-3-failure.md"
+    )
+    report.write_text(
+        "## What failed\nThe retry found one accepted Design defect.\n\n"
+        "## Classification\nC3.9b — retry both bounded obligations.\n\n"
+        "## Evidence read\nThe pending code obligation and Design settlement.\n\n"
+        + handoff.stdout,
+        encoding="utf-8",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "1", "3", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "3", "C3.9b"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=300,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    marker_path = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
+    account = json.loads(marker_path.read_text(encoding="utf-8"))
+    design_id = account["source"]["obligation_id"]
+    check(account["source"]["checker"] == "design" and code_id != design_id, account)
+    check(account["prior_ids"] == [code_id], account)
+    next_ids = sorted([code_id, design_id])
+    check(account["next_ids"] == next_ids, account)
+    artifact = pathlib.Path(account["document"]["workspace_path"])
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace(
+            f"Consumes final-checker obligations: {code_id}",
+            "Consumes final-checker obligations: " + ", ".join(next_ids),
+        ),
+        encoding="utf-8",
+    )
+    mapped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "final-checker-contract-map.sh"),
+         "lot-1", "1", account["operation"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=300,
+    )
+    check(mapped.returncode == 0, mapped.stdout + mapped.stderr)
+    mapping_index, mapping = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "final-checker.contract-mapped"
+        and entry["data"]["operation"] == account["operation"]
+    )
+    check(mapping["data"]["design_proof_carry"] is None, mapping)
+    load_common_module("progress").validate_final_checker_contract_mapped_entry(
+        journal_lines(), mapping_index, mapping,
+    )
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "4"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=300,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(attempt["assigned_final_checker_obligations"] == next_ids, attempt)
+    check(attempt["design_proof_authority"] is None, attempt)
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    aborted = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "abort",
+         "--correction", "lot-1", "1", "1", "4"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=300,
+    )
+    check(aborted.returncode == 0, aborted.stdout + aborted.stderr)
+    abort_index = len(journal_lines()) - 1
+    abort = journal_lines()[abort_index]
+    check(abort["data"]["final_checker_assignments"] == next_ids
+          and abort["data"]["design_proof_authority"] is None,
+          abort)
+    load_common_module("progress").expected_attempt_stop_data(
+        journal_lines(), abort_index, abort, "the durable reverse-order mixed abort",
+    )
+
+
+def open_code_after_fresh_correction_design(token, attempt):
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": attempt, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+    opened = run_progress(
+        "subagent-started", "design-checker", "--task", "1", "--round", "1",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    logical = json.loads(opened.stdout.splitlines()[0])
+    manifest = json.loads(
+        (pathlib.Path(WORKSPACE) / logical["manifest"]).read_text(encoding="utf-8")
+    )
+    check(manifest["design_proof_authority"] is None, manifest)
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "design checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result = write_design_result(
+        f"{token}-fresh-design.json", design_result_payload(logical),
+    )
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    consumed = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"design","outcome":"clean"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+    design_proof = journal_proof(len(journal_lines()) - 1)
+    published = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-publish.sh"),
+         "--correction", "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project(f"{token}-candidate.txt", "fresh Design candidate\n")
+    subprocess.run([
+        "git", "-C", REPO, "add", candidate, "corrections/lot-1/round-1.md",
+    ], check=True)
+    tree = subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    ).strip()
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_blob = subprocess.check_output([
+        "git", "-C", REPO, "hash-object",
+        os.path.join(REPO, ".superpowers", "bwr", "gate.md"),
+    ], text=True).strip()
+    gate = hashlib.sha256(f"{token}:code-round-1".encode()).hexdigest()
+    gate_data = {
+        "op": gate, "scope": "correction-review",
+        "owner": f"lot-1/correction-1/task-1/attempt-{attempt}/code-round-1",
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": attempt,
+        "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+        **correction_gate_authority_data("lot-1", 1, 1, attempt),
+    }
+    append_subagent("subagent-started", "gate-runner", data=gate_data)
+    report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
+    append_subagent("subagent-ended", "gate-runner", data={
+        **gate_data, "green": True, "surface": "unchanged",
+        "report": report_relative, "report_sha256": report_sha, "commands": 1,
+    })
+    opened = run_progress(
+        "subagent-started", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    code_logical = journal_lines()[-1]["data"]
+    authority = code_logical["design_proof_authority"]
+    check(isinstance(authority, dict)
+          and authority["root"]["proof"] == design_proof
+          and authority["carries"] == [], authority)
+    return authority
+
+
+def complete_mixed_final_checker_retry(token, attempt, obligation_ids):
+    cfg = default_config()
+    caller = dict(CALLER_BWR)
+    caller.update({"task": 1, "attempt": attempt, "correction": 1})
+    cfg["whoami"]["session"]["annotations"]["bwr"] = caller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = caller
+    set_config(cfg)
+    authority = open_code_after_fresh_correction_design(token, attempt)
+    design_started = next(
+        entry["data"] for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "design-checker"
+        and entry.get("correction") == 1
+        and entry.get("attempt") == attempt
+        and entry.get("round") == 1
+    )
+    design_manifest = json.loads(
+        (pathlib.Path(WORKSPACE) / design_started["manifest"]).read_text(encoding="utf-8")
+    )
+    check(design_manifest["assigned_final_checker_obligations"] == obligation_ids
+          and design_manifest["design_proof_authority"] is None,
+          design_manifest)
+    started = next(
+        entry["data"] for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "code-checker"
+        and entry.get("correction") == 1
+        and entry.get("attempt") == attempt
+        and entry.get("round") == 1
+    )
+    check(started["assigned_final_checker_obligations"] == obligation_ids, started)
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "code checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result = code_result_source(started)
+    ended = run_progress(
+        "subagent-ended", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    verdict = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"code","outcome":"clean"}',
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    owner = f"lot-1/correction-1/task-1/attempt-{attempt}"
+    opened = subprocess.run(
+        [gate_script, "open", "correction-task", owner, "lot-1", "1",
+         str(attempt), base, "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    marker = dict(line.split(" ", 1) for line in (
+        pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    ).read_text(encoding="utf-8").splitlines())
+    execution = subprocess.run(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "run", marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    observations = {
+        "schema": 1,
+        "commands": [{"count": 1, "example": "true exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    }
+    report = subprocess.run(
+        [gate_script, "publish-report", marker["op"]], cwd=REPO,
+        input=json.dumps(observations), capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(report.returncode == 0, report.stdout + report.stderr)
+    closed = subprocess.run(
+        [gate_script, "close", marker["op"]], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "consume mixed final obligations"],
+        check=True,
+    )
+    commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    success = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh"),
+         "--correction", "lot-1", "1", "1", commit, marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=300,
+    )
+    check(success.returncode == 0, success.stdout + success.stderr)
+    terminal_index, terminal = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+    )
+    transition = terminal["data"]["final_checker_transition"]
+    consumed = [
+        disposition for disposition in transition["dispositions"]
+        if disposition["outcome"] == "consumed"
+    ]
+    check(sorted(item["obligation_id"] for item in consumed) == obligation_ids, consumed)
+    check({item["evidence"]["manifest"]["checker"] for item in consumed}
+          == {"design", "code"}, consumed)
+    check(terminal["data"]["final_checker_output_set_sha256"]
+          == load_common_module("final_checker_obligations").EMPTY_SET_SHA256,
+          terminal)
+    check(terminal["data"]["design_proof_authority"] == authority, terminal)
+    load_common_module("progress").validate_attempt_succeeded_entry(
+        journal_lines(), terminal_index, terminal,
+    )
+
+
+@test
+def correction_code_retry_rewind_requires_a_new_design_proof():
+    correction_final_code_obligation_carries_the_current_design_proof(open_code=False)
+    old = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )["design_proof_authority"]
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "2", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    failure_index = len(journal_lines()) - 1
+    rewound = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh"),
+         "--correction", "lot-1", "1", "1", "3", journal_proof(failure_index)],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(rewound.returncode == 0, rewound.stdout + rewound.stderr)
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(marker["design_proof_authority"] is None, marker)
+    fresh = open_code_after_fresh_correction_design("code-retry-rewind", 3)
+    check(fresh != old, fresh)
+
+
+@test
+def correction_code_retry_foreign_task_revision_requires_a_new_design_proof():
+    correction_final_code_obligation_carries_the_current_design_proof(
+        open_code=False, task_count=2,
+    )
+    old = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )["design_proof_authority"]
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "2", "C3.9c"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    replace_correction_task_line(
+        2,
+        "Files: src/coupled.py and its focused tests",
+        "Files: src/coupled.py, src/foreign-revision.py, and their focused tests",
+    )
+    revised = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
+         "lot-1", "1", "2", "Task 2 owns one additional bounded file."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(revised.returncode == 0, revised.stdout + revised.stderr)
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    marker = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(marker["design_proof_authority"] is None, marker)
+    fresh = open_code_after_fresh_correction_design("foreign-task-revision", 3)
+    check(fresh != old, fresh)
+
+
+@test
+def correction_final_code_retry_success_consumes_its_exact_obligation():
+    correction_final_code_obligation_carries_the_current_design_proof()
+    started = next(
+        entry["data"] for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "code-checker"
+        and entry.get("correction") == 1
+        and entry.get("attempt") == 2
+        and entry.get("round") == 1
+    )
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "code checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result = code_result_source(started)
+    ended = run_progress(
+        "subagent-ended", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    verdict = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"code","outcome":"clean"}',
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    proved = run_progress(
+        "construction-verdict-check", "code", "lot-1", "1", "2", "1",
+    )
+    check(proved.returncode == 0, proved.stdout + proved.stderr)
+
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    owner = "lot-1/correction-1/task-1/attempt-2"
+    opened = subprocess.run(
+        [gate_script, "open", "correction-task", owner, "lot-1", "1", "2", base, "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    marker = dict(line.split(" ", 1) for line in (
+        pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    ).read_text(encoding="utf-8").splitlines())
+    execution = subprocess.run(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "run", marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    observations = {
+        "schema": 1,
+        "commands": [{"count": 1, "example": "true exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    }
+    report = subprocess.run(
+        [gate_script, "publish-report", marker["op"]], cwd=REPO,
+        input=json.dumps(observations), capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(report.returncode == 0, report.stdout + report.stderr)
+    closed = subprocess.run(
+        [gate_script, "close", marker["op"]], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "consume final code obligation"],
+        check=True,
+    )
+    commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    success = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh"),
+         "--correction", "lot-1", "1", "1", commit, marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(success.returncode == 0, success.stdout + success.stderr)
+    terminal_index, terminal = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+    )
+    transition = terminal["data"]["final_checker_transition"]
+    check(transition["input_sha256"] != transition["output_sha256"], transition)
+    evidence = transition["dispositions"][0]["evidence"]
+    check(evidence["consumer_phase"] == "first-code-manifest", evidence)
+    check(evidence["manifest"]["attempt"] == 2
+          and evidence["manifest"]["round"] == 1, evidence)
+    check(evidence["success"]["design_proof_authority_sha256"]
+          == hashlib.sha256(json.dumps(
+              terminal["data"]["design_proof_authority"],
+              sort_keys=True, separators=(",", ":"),
+          ).encode()).hexdigest(), evidence)
+    load_common_module("progress").validate_attempt_succeeded_entry(
+        journal_lines(), terminal_index, terminal,
+    )
+
+
+@test
+def two_final_code_obligations_compose_before_their_shared_retry():
+    correction_final_code_obligation_carries_the_current_design_proof()
+    first_mapping_index, first_mapping = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "final-checker.contract-mapped"
+    )
+    first_id = first_mapping["data"]["obligation_ids"][0]
+    drive_current_correction_code_to_accepted_final_finding(
+        "correction-second-final-code-obligation",
+        attempt=2, first_round_open=True,
+    )
+    handoff = run_progress("construction-failure-handoff", "lot-1", "1", "2")
+    check(handoff.returncode == 0, handoff.stdout + handoff.stderr)
+    report = pathlib.Path(WORKSPACE) / (
+        "reports/construction/lot-1/correction-1/"
+        "task-1-attempt-2-failure.md"
+    )
+    report.write_text(
+        "## What failed\nThe retry found a second accepted code defect.\n\n"
+        "## Classification\nC3.9a — retry both bounded obligations.\n\n"
+        "## Evidence read\nThe carried obligation and the new immutable settlement.\n\n"
+        + handoff.stdout,
+        encoding="utf-8",
+    )
+    admitted = run_progress(
+        "construction-failure-check", "lot-1", "1", "2", "C3.9a",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failed = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "--correction", "lot-1", "1", "1", "2", "C3.9a"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    marker_path = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
+    account = json.loads(marker_path.read_text(encoding="utf-8"))
+    second_id = account["source"]["obligation_id"]
+    check(first_id != second_id, account)
+    check(account["prior_ids"] == [first_id], account)
+    check(account["next_ids"] == sorted([first_id, second_id]), account)
+    input_authority = account["current_design_proof_authority"]
+    check(len(input_authority["carries"]) == 1, input_authority)
+    artifact = pathlib.Path(account["document"]["workspace_path"])
+    prior_line = f"Consumes final-checker obligations: {first_id}"
+    next_line = (
+        "Consumes final-checker obligations: "
+        + ", ".join(sorted([first_id, second_id]))
+    )
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace(prior_line, next_line),
+        encoding="utf-8",
+    )
+    mapped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction",
+                      "final-checker-contract-map.sh"),
+         "lot-1", "1", account["operation"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(mapped.returncode == 0, mapped.stdout + mapped.stderr)
+    second_mapping_index, second_mapping = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "final-checker.contract-mapped"
+        and entry["data"]["operation"] == account["operation"]
+    )
+    carry = second_mapping["data"]["design_proof_carry"]
+    check(carry["previous_carry"] == {
+        "event": journal_proof(first_mapping_index),
+        "carry_id": first_mapping["data"]["design_proof_carry"]["carry_id"],
+    }, carry)
+    started = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    check(attempt["assigned_final_checker_obligations"]
+          == sorted([first_id, second_id]), attempt)
+    authority = attempt["design_proof_authority"]
+    check(len(authority["carries"]) == 2, authority)
+    check(authority["carries"][-1]["event"] == journal_proof(second_mapping_index), authority)
+
+
+@test
+def correction_composed_code_retry_pause_preserves_every_obligation():
+    two_final_code_obligations_compose_before_their_shared_retry()
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg = default_config()
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    stopped = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), "pause",
+         "--correction", "lot-1", "1", "1", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(stopped.returncode == 0, stopped.stdout + stopped.stderr)
+    stop_index = len(journal_lines()) - 1
+    stop = journal_lines()[stop_index]
+    check(stop["data"]["final_checker_set_sha256"]
+          == attempt["outstanding_final_checker_set_sha256"]
+          and stop["data"]["final_checker_assignments"]
+          == attempt["assigned_final_checker_obligations"]
+          and stop["data"]["design_proof_authority"]
+          == attempt["design_proof_authority"],
+          stop)
+    load_common_module("progress").expected_attempt_stop_data(
+        journal_lines(), stop_index, stop, "the durable composed retry pause",
+    )
+
+
+def complete_current_correction_task_one(token, *, task_count=1):
+    state = seed_correction_task_with_clean_design(token, task_count=task_count)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project(f"{token}-task-1.txt", "accepted correction task 1\n")
+    subprocess.run([
+        "git", "-C", REPO, "add", candidate, state["artifact_relative"],
+    ], check=True)
+    tree = subprocess.check_output(["git", "-C", REPO, "write-tree"], text=True).strip()
+    head = subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip()
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_blob = subprocess.check_output([
+        "git", "-C", REPO, "hash-object", os.path.join(REPO, ".superpowers", "bwr", "gate.md"),
+    ], text=True).strip()
+    review_gate = hashlib.sha256(f"{token}:review".encode()).hexdigest()
+    review_data = {
+        "op": review_gate, "scope": "correction-review",
+        "owner": "lot-1/correction-1/task-1/attempt-1/code-round-1",
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 1,
+        "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+        **correction_gate_authority_data("lot-1", 1, 1, 1),
+    }
+    append_subagent("subagent-started", "gate-runner", data=review_data)
+    report_relative, report_sha = write_gate_report(review_gate, gate_blob, tree)
+    append_subagent("subagent-ended", "gate-runner", data={
+        **review_data, "green": True, "surface": "unchanged",
+        "report": report_relative, "report_sha256": report_sha, "commands": 1,
+    })
+    checker = run_progress(
+        "subagent-started", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"gate": review_gate}),
+    )
+    check(checker.returncode == 0, checker.stdout + checker.stderr)
+    checker_data = journal_lines()[-1]["data"]
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "code checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result = code_result_source(checker_data)
+    ended = run_progress(
+        "subagent-ended", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    verdict = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"code","outcome":"clean"}',
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    owner = "lot-1/correction-1/task-1/attempt-1"
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    opened_gate = subprocess.run(
+        [gate_script, "open", "correction-task", owner, "lot-1", "1", "1", base, "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened_gate.returncode == 0, opened_gate.stdout + opened_gate.stderr)
+    marker = dict(line.split(" ", 1) for line in (
+        pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    ).read_text(encoding="utf-8").splitlines())
+    execution = subprocess.run(
+        [sys.executable, os.path.join(
+            WORKSPACE, "prompts", "construction", "gate_execution.py",
+        ), "run", marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    observations = {
+        "schema": 1,
+        "commands": [{"count": 1, "example": "true exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    }
+    report = subprocess.run(
+        [gate_script, "publish-report", marker["op"]], cwd=REPO,
+        input=json.dumps(observations), capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(report.returncode == 0, report.stdout + report.stderr)
+    closed_gate = subprocess.run(
+        [gate_script, "close", marker["op"]], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(closed_gate.returncode == 0, closed_gate.stdout + closed_gate.stderr)
+    subprocess.run(["git", "-C", REPO, "commit", "-qm", f"{token} task 1"], check=True)
+    commit = subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip()
+    success = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh"),
+         "--correction", "lot-1", "1", "1", commit, marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(success.returncode == 0, success.stdout + success.stderr)
+    return state, commit
+
+
+@test
+def correction_round_revision_after_task_publishes_commit_and_fresh_baseline():
+    state, task_one = complete_current_correction_task_one(
+        "correction-post-task-revision", task_count=2,
+    )
+    artifact = pathlib.Path(WORKSPACE) / state["artifact_relative"]
+    original = artifact.read_text(encoding="utf-8")
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-revise.sh",
+    )
+    artifact.write_text(original.replace(
+        "Files: src/demo.py and its focused tests",
+        "Files: src/demo.py, src/accepted.py, and their focused tests",
+    ), encoding="utf-8")
+    refused = subprocess.run(
+        [script, "lot-1", "1", "1", "An accepted contract cannot be revised."],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(refused.returncode != 0
+          and subprocess.check_output(
+              ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+          ).strip() == task_one
+          and not (pathlib.Path(WORKSPACE) / "correction-round-revision-in-progress").exists(),
+          "an accepted correction task contract entered revision authority")
+    artifact.write_text(original, encoding="utf-8")
+    artifact.write_text(artifact.read_text(encoding="utf-8").replace(
+        "Files: src/coupled.py and its focused tests",
+        "Files: src/coupled.py, src/adapter.py, and their focused tests",
+    ), encoding="utf-8")
+    cfg = default_config()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+    arguments = [
+        script, "lot-1", "1", "2",
+        "The unopened task contract omitted one coupled source file.",
+    ]
+    prepared = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(prepared.returncode == 0 and "BASELINE REQUIRED" in prepared.stdout,
+          prepared.stdout + prepared.stderr)
+    marker = pathlib.Path(WORKSPACE) / "correction-round-revision-in-progress"
+    check(marker.is_file(), "the controller-document revision lost its pending owner")
+    revision_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    check(revision_commit != task_one, "the post-task revision created no document commit")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD^"], text=True,
+    ).strip() == task_one, "the document commit has another parent")
+    check(subprocess.check_output([
+        "git", "-C", REPO, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD",
+    ], text=True).splitlines() == [state["artifact_relative"]],
+          "the controller document commit changed another path")
+    repeated_pending = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(repeated_pending.returncode == 0
+          and "BASELINE REQUIRED" in repeated_pending.stdout
+          and subprocess.check_output(
+              ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+          ).strip() == revision_commit,
+          repeated_pending.stdout + repeated_pending.stderr)
+    before = len(journal_lines())
+    baseline_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-baseline.sh",
+    )
+    selected = subprocess.run(
+        [baseline_script, "lot-1", "1"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(selected.returncode == 0, selected.stdout + selected.stderr)
+    baseline = json.loads(selected.stdout)
+    check(baseline["mode"] == "required" and baseline["base_commit"] == revision_commit,
+          baseline)
+    gate = seed_correction_baseline_gate(
+        baseline["owner"], revision_commit, revision_commit,
+    )
+    finished = subprocess.run(
+        arguments, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(finished.returncode == 0, finished.stdout + finished.stderr)
+    check(not marker.exists(), "the completed revision retained its pending owner")
+    revisions = [(index, entry) for index, entry in enumerate(journal_lines()[before:], before)
+                 if entry.get("kind") == "correction.round.revised"]
+    check(len(revisions) == 1, revisions)
+    revision_index, revision = revisions[0]
+    check(revision["data"]["from_task"] == 2
+          and revision["data"]["commit"] == revision_commit
+          and revision["data"]["gate"] == gate, revision)
+    load_common_module("progress").validate_correction_round_revision_entry(
+        journal_lines(), revision_index, revision,
+    )
+    attempt_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-started.sh",
+    )
+    attempt_base = "refs/bwr/test-run/lot-1/correction-1/attempt-base"
+    before_attempt_base = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", attempt_base], text=True,
+    ).strip()
+    before_retry = len(journal_lines())
+    repeated_task = subprocess.run(
+        [attempt_script, "--correction", "lot-1", "1", "1", "2"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(repeated_task.returncode != 0 and "first missing" in (
+        repeated_task.stdout + repeated_task.stderr
+    ), repeated_task.stdout + repeated_task.stderr)
+    check(
+        len(journal_lines()) == before_retry
+        and not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists()
+        and subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+        ).strip() == revision_commit
+        and subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", attempt_base], text=True,
+        ).strip() == before_attempt_base
+        and subprocess.check_output([
+            "git", "-C", REPO, "rev-parse",
+            "refs/bwr/test-run/lot-1/correction-1/task-1",
+        ], text=True).strip() == task_one,
+        "the repeated accepted task start changed Correction authority",
+    )
+    started = subprocess.run(
+        [attempt_script, "--correction", "lot-1", "1", "2", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(started.returncode == 0, started.stdout + started.stderr)
+    attempt = json.loads((pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text())
+    resolved = json.loads(subprocess.check_output([
+        sys.executable,
+        os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py"),
+        "resolve-correction", "lot-1", "1", "2",
+    ], cwd=REPO, text=True))
+    check(attempt["task"] == 2
+          and attempt["document"]["task_contract_sha256"]
+          == resolved["task"]["task_contract_sha256"], attempt)
+
+
+@test
+def correction_task_code_checker_consumes_the_correction_gate_and_manifest():
+    seed_correction_task_with_clean_design("correction-task-code-checker")
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project("correction-code-checker.txt", "candidate\n")
+    subprocess.run([
+        "git", "-C", REPO, "add", candidate, "corrections/lot-1/round-1.md",
+    ], check=True)
+    tree = subprocess.check_output(["git", "-C", REPO, "write-tree"], text=True).strip()
+    head = subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip()
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    gate_blob = subprocess.check_output([
+        "git", "-C", REPO, "hash-object", os.path.join(REPO, ".superpowers", "bwr", "gate.md"),
+    ], text=True).strip()
+    gate = hashlib.sha256(b"correction-code-checker-gate").hexdigest()
+    data = {
+        "op": gate, "scope": "correction-review",
+        "owner": "lot-1/correction-1/task-1/attempt-1/code-round-1",
+        "lot": "lot-1", "correction": 1, "task": 1, "attempt": 1,
+        "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
+        **correction_gate_authority_data("lot-1", 1, 1, 1),
+    }
+    append_subagent("subagent-started", "gate-runner", data=data)
+    report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
+    append_subagent("subagent-ended", "gate-runner", data={
+        **data, "green": True, "surface": "unchanged", "report": report_relative,
+        "report_sha256": report_sha, "commands": 1,
+    })
+    checker = run_progress(
+        "subagent-started", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"gate": gate}),
+    )
+    check(checker.returncode == 0, checker.stdout + checker.stderr)
+    payload = json.loads(checker.stdout.splitlines()[0])
+    check(payload["manifest"].startswith(
+        "reports/construction/lot-1/correction-1/"
+        "task-1-attempt-1-code-round-1-"
+    ), payload)
+    event = journal_lines()[-1]
+    check(event.get("correction") == 1, event)
+    document = json.loads(
+        (pathlib.Path(WORKSPACE) / payload["manifest"]).read_text(encoding="utf-8")
+    )
+    check(document["schema"] == 5 and document["correction"] == 1, document)
+
+
+@test
+def correction_task_final_gate_consumes_the_exact_correction_code_verdict():
+    correction_task_code_checker_consumes_the_correction_gate_and_manifest()
+    started = [
+        entry["data"] for entry in journal_lines()
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "code-checker"
+    ][-1]
+    spent = run_progress(
+        "note", "bound.spent", "--task", "1", "--round", "1",
+        "--text", "code checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    result = code_result_source(started)
+    ended = run_progress(
+        "subagent-ended", "code-checker", "--task", "1", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    verdict = run_progress(
+        "note", "verdict.consumed", "--task", "1", "--round", "1",
+        "--data", '{"check":"code","outcome":"clean"}',
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/attempt-base",
+    ], text=True).strip()
+    owner = "lot-1/correction-1/task-1/attempt-1"
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    final_gate = subprocess.run(
+        [gate_script, "open", "correction-task", owner, "lot-1", "1", "1", base, "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(final_gate.returncode == 0, final_gate.stdout + final_gate.stderr)
+    marker = dict(
+        line.split(" ", 1) for line in (
+            pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+        ).read_text(encoding="utf-8").splitlines()
+    )
+    check(marker["scope"] == "correction-task" and marker["correction"] == "1", marker)
+    check(re.fullmatch(r"[0-9]+:[0-9a-f]{64}", marker["code"]), marker)
+
+
+@test
+def correction_task_success_records_one_stable_schema_two_terminal():
+    correction_task_final_gate_consumes_the_exact_correction_code_verdict()
+    marker_path = pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    marker = dict(
+        line.split(" ", 1) for line in marker_path.read_text(encoding="utf-8").splitlines()
+    )
+    execution = subprocess.run(
+        [
+            sys.executable,
+            os.path.join(WORKSPACE, "prompts", "construction", "gate_execution.py"),
+            "run", marker["op"],
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(execution.returncode == 0, execution.stdout + execution.stderr)
+    observations = {
+        "schema": 1,
+        "commands": [{"count": 1, "example": "true exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    }
+    report = subprocess.run(
+        [
+            os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh"),
+            "publish-report", marker["op"],
+        ],
+        cwd=REPO, input=json.dumps(observations), capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(report.returncode == 0, report.stdout + report.stderr)
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    closed = subprocess.run(
+        [gate_script, "close", marker["op"]], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+
+    subprocess.run([
+        "git", "-C", REPO, "commit", "-qm", "correction task 1",
+    ], check=True)
+    commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    success_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "attempt-succeeded.sh",
+    )
+    lock_path = os.path.join(WORKSPACE, "correction-authority.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    process = None
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [success_script, "--correction", "lot-1", "1", "1", commit, marker["op"]],
+            cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with open(f"/proc/{process.pid}/wchan", encoding="utf-8") as source:
+                    if "lock" in source.read():
+                        break
+            except FileNotFoundError:
+                break
+            time.sleep(0.001)
+        check(process.poll() is None,
+              "the correction attempt success bypassed the shared authority lease")
+        check(subprocess.run([
+            "git", "-C", REPO, "show-ref", "--verify", "--quiet",
+            "refs/bwr/test-run/lot-1/correction-1/task-1",
+        ]).returncode != 0, "the waiting success published the stable task ref")
+        check((pathlib.Path(WORKSPACE) / "attempt-in-flight").is_file(),
+              "the waiting success removed the attempt marker")
+        check(not any(
+            entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+            for entry in journal_lines()
+        ), "the waiting success appended its terminal")
+        foreign_owner = pathlib.Path(WORKSPACE) / "correction-round-revision-in-progress"
+        foreign_owner.write_bytes(b"another durable authority owner\n")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=120)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(descriptor)
+    check(process.returncode != 0, stdout + stderr)
+    check(subprocess.run([
+        "git", "-C", REPO, "show-ref", "--verify", "--quiet",
+        "refs/bwr/test-run/lot-1/correction-1/task-1",
+    ]).returncode != 0
+          and (pathlib.Path(WORKSPACE) / "attempt-in-flight").is_file()
+          and not any(
+              entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+              for entry in journal_lines()
+          ), "the refused correction success changed its stable state")
+    foreign_owner.unlink()
+    success = subprocess.run(
+        [success_script, "--correction", "lot-1", "1", "1", commit, marker["op"]],
+        cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=ENV, timeout=120,
+    )
+    check(success.returncode == 0, success.stdout + success.stderr)
+    stable = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/task-1",
+    ], text=True).strip()
+    check(stable == commit, (stable, commit))
+    terminal = [
+        entry for entry in journal_lines()
+        if entry.get("kind") == "attempt.succeeded"
+        and entry.get("correction") == 1
+    ][-1]
+    check(terminal.get("lot") == "lot-1" and terminal.get("task") == 1, terminal)
+    check(terminal["data"].get("schema") == 2, terminal)
+    check(terminal["data"].get("sha") == commit, terminal)
+    check(terminal["data"].get("gate") == marker["op"], terminal)
+    check(not (pathlib.Path(WORKSPACE) / "attempt-in-flight").exists(), terminal)
+
+    repeated = subprocess.run(
+        [success_script, "--correction", "lot-1", "1", "1", commit, marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(repeated.returncode == 0 and "already recorded" in repeated.stdout,
+          repeated.stdout + repeated.stderr)
+    check(len([
+        entry for entry in journal_lines()
+        if entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+    ]) == 1, "the idempotent correction success closer duplicated its terminal")
+
+    write_project("foreign.txt", "later unrelated commit\n")
+    subprocess.run(["git", "-C", REPO, "add", "foreign.txt"], check=True)
+    subprocess.run(["git", "-C", REPO, "commit", "-qm", "later commit"], check=True)
+    later = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    retarget = subprocess.run(
+        [success_script, "--correction", "lot-1", "1", "1", later, marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(retarget.returncode != 0, "the stable correction task ref retargeted")
+    check(subprocess.check_output([
+        "git", "-C", REPO, "rev-parse",
+        "refs/bwr/test-run/lot-1/correction-1/task-1",
+    ], text=True).strip() == commit, "the refused retry changed the stable correction ref")
+
+
+@test
+def correction_task_success_resumes_after_stable_ref_publication():
+    correction_task_final_gate_consumes_the_exact_correction_code_verdict()
+    marker = dict(
+        line.split(" ", 1) for line in (
+            pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+        ).read_text(encoding="utf-8").splitlines()
+    )
+    complete_live_gate(marker["op"])
+    subprocess.run([
+        "git", "-C", REPO, "commit", "-qm", "correction task 1 interrupted success",
+    ], check=True)
+    commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    stable_ref = "refs/bwr/test-run/lot-1/correction-1/task-1"
+    subprocess.run([
+        "git", "-C", REPO, "update-ref", stable_ref, commit, "0" * len(commit),
+    ], check=True)
+    check(not any(
+        entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+        for entry in journal_lines()
+    ), "the interrupted stable ref unexpectedly has a success terminal")
+    attempt_marker = pathlib.Path(WORKSPACE) / "attempt-in-flight"
+    check(attempt_marker.is_file(),
+          "the stable-ref interruption did not preserve the attempt owner")
+    success = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh"),
+         "--correction", "lot-1", "1", "1", commit, marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(success.returncode == 0, success.stdout + success.stderr)
+    terminals = [
+        entry for entry in journal_lines()
+        if entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+    ]
+    check(len(terminals) == 1 and terminals[0]["data"]["sha"] == commit, terminals)
+    check(not attempt_marker.exists(),
+          "the resumed correction success retained its attempt owner")
+    check(subprocess.check_output([
+        "git", "-C", REPO, "rev-parse", stable_ref,
+    ], text=True).strip() == commit, "the resumed success changed the stable ref")
+
+
+@test
+def correction_attempt_predecessor_rejects_a_foreign_parent_before_success():
+    correction_task_final_gate_consumes_the_exact_correction_code_verdict()
+    gate_marker = dict(
+        line.split(" ", 1) for line in (
+            pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+        ).read_text(encoding="utf-8").splitlines()
+    )
+    complete_live_gate(gate_marker["op"])
+    attempt = json.loads(
+        (pathlib.Path(WORKSPACE) / "attempt-in-flight").read_text(encoding="utf-8")
+    )
+    predecessor = attempt["attempt_predecessor"]
+    base = predecessor["commit"]
+    candidate_tree = subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    ).strip()
+    base_tree = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{base}^{{tree}}"], text=True,
+    ).strip()
+    base_parent = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{base}^"], text=True,
+    ).strip()
+    foreign = subprocess.check_output(
+        ["git", "-C", REPO, "commit-tree", base_tree, "-p", base_parent],
+        input="foreign sibling predecessor\n", text=True,
+    ).strip()
+    invalid = subprocess.check_output(
+        ["git", "-C", REPO, "commit-tree", candidate_tree, "-p", foreign],
+        input="task candidate after foreign predecessor\n", text=True,
+    ).strip()
+    subprocess.run(["git", "-C", REPO, "reset", "--hard", "-q", invalid], check=True)
+    script = os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh")
+    stable_ref = "refs/bwr/test-run/lot-1/correction-1/task-1"
+    before = len(journal_lines())
+    attempt_base = "refs/bwr/test-run/lot-1/correction-1/attempt-base"
+    subprocess.run([
+        "git", "-C", REPO, "update-ref", attempt_base, foreign, base,
+    ], check=True)
+    retargeted = subprocess.run(
+        [script, "--correction", "lot-1", "1", "1", invalid, gate_marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(retargeted.returncode != 0 and "attempt-base" in (
+        retargeted.stdout + retargeted.stderr
+    ), retargeted.stdout + retargeted.stderr)
+    check(subprocess.run([
+        "git", "-C", REPO, "show-ref", "--verify", "--quiet", stable_ref,
+    ]).returncode != 0 and len(journal_lines()) == before,
+          "the retargeted apparent one-commit candidate published a stable success")
+    subprocess.run([
+        "git", "-C", REPO, "update-ref", attempt_base, base, foreign,
+    ], check=True)
+    refused = subprocess.run(
+        [script, "--correction", "lot-1", "1", "1", invalid, gate_marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(refused.returncode != 0 and "direct child" in (
+        refused.stdout + refused.stderr
+    ), refused.stdout + refused.stderr)
+    check(subprocess.run([
+        "git", "-C", REPO, "show-ref", "--verify", "--quiet", stable_ref,
+    ]).returncode != 0 and len(journal_lines()) == before,
+          "the foreign-parent candidate published a stable success")
+
+    valid = subprocess.check_output(
+        ["git", "-C", REPO, "commit-tree", candidate_tree, "-p", base],
+        input="task candidate from frozen predecessor\n", text=True,
+    ).strip()
+    subprocess.run(["git", "-C", REPO, "reset", "--hard", "-q", valid], check=True)
+    success = subprocess.run(
+        [script, "--correction", "lot-1", "1", "1", valid, gate_marker["op"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(success.returncode == 0, success.stdout + success.stderr)
+    entries = journal_lines()
+    terminal_index, terminal = next(
+        (index, entry) for index, entry in reversed(list(enumerate(entries)))
+        if entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+    )
+    check(terminal["data"]["attempt_predecessor"] == predecessor, terminal)
+    check(terminal["data"]["final_checker_transition"]["dispositions"] == [], terminal)
+    progress_module = load_common_module("progress")
+    progress_module.validate_attempt_succeeded_entry(entries, terminal_index, terminal)
+    post_terminal_predecessor = progress_module.correction_attempt_predecessor_account(
+        entries, len(entries), "lot-1", 1, 1,
+        "the post-terminal correction attempt cleanup",
+    )
+    check(post_terminal_predecessor == predecessor, post_terminal_predecessor)
+
+    changed = json.loads(json.dumps(entries))
+    changed_terminal = changed[terminal_index]
+    changed_terminal["data"]["attempt_predecessor"]["commit"] = foreign
+    changed_terminal["data"]["attempt_predecessor"]["tree"] = base_tree
+    try:
+        progress_module.validate_attempt_succeeded_entry(
+            changed, terminal_index, changed_terminal,
+        )
+    except (SystemExit, ValueError):
+        pass
+    else:
+        raise AssertionError("historical success accepted a changed predecessor proof")
+
+    authority_module = load_common_module("correction_authority")
+    artifact = pathlib.Path(WORKSPACE) / "corrections" / "lot-1" / "round-1.md"
+    authority_module.publish_content_object(
+        pathlib.Path(WORKSPACE), "lot-1", artifact.read_bytes(), ".md",
+    )
+    built = progress_module.correction_round_built_account(
+        entries, len(entries), "lot-1", 1,
+        "the completed direct-predecessor Correction Round",
+    )
+    check(built["commit"] == valid and built["tasks"] == 1, built)
+
+
+@test
+def correction_round_built_refuses_pending_set_and_closes_one_empty_generation():
+    correction_task_success_records_one_stable_schema_two_terminal()
+    _, success = next(
+        (index, entry) for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("kind") == "attempt.succeeded" and entry.get("correction") == 1
+    )
+    commit = success["data"]["sha"]
+    subprocess.run(["git", "-C", REPO, "reset", "--hard", "-q", commit], check=True)
+    cfg = default_config()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "correction": 1,
+        "status": "working",
+    }
+    cfg["whoami"]["session"]["annotations"]["bwr"] = controller
+    cfg["sessions"][CALLER]["annotations"]["bwr"] = controller
+    set_config(cfg)
+
+    progress_module = load_common_module("progress")
+    authority_module = load_common_module("correction_authority")
+    artifact = pathlib.Path(WORKSPACE) / "corrections" / "lot-1" / "round-1.md"
+    authority_module.publish_content_object(
+        pathlib.Path(WORKSPACE), "lot-1", artifact.read_bytes(), ".md",
+    )
+    obligations_module = load_common_module("final_checker_obligations")
+    pending_source = obligations_module.source_account({
+        "source_proof": f"1:{'1' * 64}",
+        "source_unit": {"kind": "correction", "built": "lot-1", "round": 1},
+        "source_contract_authority_sha256": "2" * 64,
+        "source_execution_authority_sha256": "3" * 64,
+        "owner_task": 1,
+        "checker": "design",
+        "accepted_ids": [1],
+        "result_sha256": "4" * 64,
+        "settlement": f"2:{'5' * 64}",
+        "required_consumer_phase": "first-design-manifest",
+    })
+    _pending_transition, pending_set = obligations_module.materialize_transition(
+        obligations_module.empty_set(),
+        additions=[{
+            "source": pending_source,
+            "assignment": {
+                "unit": {
+                    "kind": "task-contract-map",
+                    "operation": "6" * 64,
+                    "work_unit": {"kind": "correction", "built": "lot-1", "round": 1},
+                    "target_task": 1,
+                    "document_kind": "correction-artifact",
+                },
+                "task": None,
+                "phase": "publish-task-contract",
+                "owner": "task-contract-map",
+            },
+        }],
+        dispositions=[],
+        transfer_kind="final-checker-source",
+    )
+    original_projector = progress_module.outstanding_final_checker_set
+    projector_calls = []
+
+    def pending_projector(entries, before, built, correction, subject):
+        if subject == "the non-empty Correction Round completion":
+            projector_calls.append((len(entries), before, built, correction, subject))
+            return pending_set
+        return original_projector(entries, before, built, correction, subject)
+
+    before_pending = journal_lines()
+    pending_marker = pathlib.Path(WORKSPACE) / "correction-round-built-in-progress"
+    head_before_pending = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    progress_module.outstanding_final_checker_set = pending_projector
+    try:
+        try:
+            progress_module.correction_round_built_account(
+                before_pending, len(before_pending), "lot-1", 1,
+                "the non-empty Correction Round completion",
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("Correction Round built accepted a pending checker set")
+    finally:
+        progress_module.outstanding_final_checker_set = original_projector
+    check(len(projector_calls) == 1, projector_calls)
+    check(
+        journal_lines() == before_pending
+        and not pending_marker.exists()
+        and subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+        ).strip() == head_before_pending,
+        "the refused non-empty Correction Round completion changed durable state",
+    )
+    expected = progress_module.correction_round_built_account(
+        journal_lines(), len(journal_lines()), "lot-1", 1,
+        "the refused generic Correction Round completion",
+    )
+    before = len(journal_lines())
+    generic = run_progress(
+        "note", "correction.round.built", "--data",
+        json.dumps(expected, sort_keys=True, separators=(",", ":")),
+    )
+    check(generic.returncode != 0 and len(journal_lines()) == before,
+          "generic progress note published the helper-owned Correction Round terminal")
+
+    script = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction-round-built.sh",
+    )
+    built = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(built.returncode == 0, built.stdout + built.stderr)
+    terminals = [
+        (index, entry) for index, entry in enumerate(journal_lines())
+        if entry.get("kind") == "correction.round.built"
+    ]
+    check(len(terminals) == 1, terminals)
+    terminal_index, terminal = terminals[0]
+    data = terminal["data"]
+    check(terminal.get("lot") == "lot-1" and terminal.get("correction") == 1
+          and terminal.get("task") is None and terminal.get("attempt") is None, terminal)
+    check(data.get("schema") == 1 and data.get("built") == "lot-1"
+          and data.get("round") == 1, data)
+    check(data.get("tasks") == 1 and data.get("attempts") == 1, data)
+    check(data.get("commit") == commit and data.get("gate") == success["data"]["gate"], data)
+    check(data.get("retry_set_sha256")
+          == obligations_module.set_sha256(obligations_module.empty_set()), data)
+    check(data.get("generation_sha256") == hashlib.sha256(json.dumps(
+        {key: value for key, value in data.items() if key != "generation_sha256"},
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest(), data)
+    progress_module.validate_correction_round_built_entry(
+        journal_lines(), terminal_index, terminal,
+    )
+    changed = json.loads(json.dumps(journal_lines()))
+    changed[terminal_index]["data"]["commit"] = "0" * 40
+    try:
+        progress_module.validate_correction_round_built_entry(
+            changed, terminal_index, changed[terminal_index],
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("historical Correction Round completion accepted changed authority")
+
+    marker_path = pathlib.Path(WORKSPACE) / "correction-round-built-in-progress"
+    operation = "correction-built:" + hashlib.sha256(
+        b"correction-built:lot-1:1",
+    ).hexdigest()
+    marker_path.write_text(json.dumps({
+        "schema": 1, "operation": operation, "event": data,
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    repeated = subprocess.run(
+        [script, "lot-1", "1"], cwd=REPO, capture_output=True, text=True,
+        env=ENV, timeout=120,
+    )
+    check(repeated.returncode == 0 and "already recorded" in repeated.stdout,
+          repeated.stdout + repeated.stderr)
+    check(not marker_path.exists(), "the resumed Correction Round closer retained its marker")
+    check(len([
+        entry for entry in journal_lines() if entry.get("kind") == "correction.round.built"
+    ]) == 1, "the idempotent Correction Round closer duplicated its terminal")
 
 
 @test
@@ -8939,8 +14422,8 @@ def correction_round_baseline_selects_reuse_required_and_fresh_proofs():
         "round": 1,
         "base_commit": close_data["base_commit"],
         "task_zero": "refs/bwr/test-run/lot-1/correction-1/task-0",
-        "mode": "reuse",
-        "gate": close_data["base_gate"],
+        "mode": "required",
+        "gate": None,
         "owner": owner,
     }, reuse_data)
 
@@ -8956,12 +14439,54 @@ def correction_round_baseline_selects_reuse_required_and_fresh_proofs():
     check(required_data["mode"] == "required" and required_data["gate"] is None
           and required_data["owner"] == owner, required_data)
 
-    fresh_gate = seed_baseline_gate(
+    ordinary_gate = seed_baseline_gate(
         owner, close_data["base_commit"], close_data["base_commit"],
     )
-    current = subprocess.run(
+    ordinary_refused = subprocess.run(
         [os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh"),
-         "require-current"],
+         "require-correction-baseline", ordinary_gate, close_data["base_commit"],
+         "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(ordinary_refused.returncode != 0,
+          "an ordinary baseline substituted for a correction baseline")
+    still_required = subprocess.run(
+        [baseline_script, "lot-1", "1"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(still_required.returncode == 0
+          and json.loads(still_required.stdout)["mode"] == "required",
+          still_required.stdout + still_required.stderr)
+    gate_script = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    opened_gate = subprocess.run(
+        [gate_script, "open", "correction-baseline", owner,
+         "lot-1", "0", "0", close_data["base_commit"], "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(opened_gate.returncode == 0, opened_gate.stdout + opened_gate.stderr)
+    marker = dict(line.split(" ", 1) for line in (
+        pathlib.Path(WORKSPACE) / "gate-check-in-progress"
+    ).read_text(encoding="utf-8").splitlines())
+    fresh_gate = marker["op"]
+    check(marker["scope"] == "correction-baseline"
+          and marker["correction"] == "1"
+          and "attempt_marker_sha256" not in marker, marker)
+    complete_live_gate(fresh_gate)
+    correction_as_ordinary = subprocess.run(
+        [gate_script, "require-baseline", fresh_gate, close_data["base_commit"]],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(correction_as_ordinary.returncode != 0,
+          "a correction baseline substituted for an ordinary baseline")
+    correction_current = subprocess.run(
+        [gate_script, "require-current", "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(correction_current.returncode == 0
+          and correction_current.stdout.strip() == fresh_gate,
+          correction_current.stdout + correction_current.stderr)
+    current = subprocess.run(
+        [gate_script, "require-current"],
         cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
     )
     check(current.returncode == 0 and current.stdout.strip() == fresh_gate,
@@ -8974,6 +14499,27 @@ def correction_round_baseline_selects_reuse_required_and_fresh_proofs():
     fresh_data = json.loads(fresh.stdout)
     check(fresh_data["mode"] == "fresh" and fresh_data["gate"] == fresh_gate,
           fresh_data)
+    entries = journal_lines()
+    terminal_index = next(
+        index for index, entry in reversed(list(enumerate(entries)))
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "gate-runner"
+        and entry.get("data", {}).get("op") == fresh_gate
+        and "unusable" not in entry.get("data", {})
+    )
+    entries[terminal_index]["data"]["contract_authority_sha256"] = "0" * 64
+    journal_path = pathlib.Path(WORKSPACE) / "progress.jsonl"
+    journal_path.write_text(
+        "\n".join(json.dumps(entry, separators=(",", ":")) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    changed = subprocess.run(
+        [gate_script, "require-correction-baseline", fresh_gate,
+         close_data["base_commit"], "lot-1", "1"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(changed.returncode != 0,
+          "a changed Correction gate authority survived historical replay")
 
 
 @test
@@ -13042,6 +18588,10 @@ def main():
             CORRECTION_AUTHORITY_SOURCE,
             os.path.join(WORKSPACE, "prompts", "common", "correction_authority.py"),
         )
+        shutil.copyfile(
+            FINAL_CHECKER_OBLIGATIONS_SOURCE,
+            os.path.join(WORKSPACE, "prompts", "common", "final_checker_obligations.py"),
+        )
         shutil.copyfile(SPEC_EDIT_SOURCE,
                         os.path.join(WORKSPACE, "prompts", "common", "spec_edit_auth.py"))
         for name in ("spec-commit.sh", "attempt-closer.sh", "bare-stop.sh", "stop.sh",
@@ -13071,13 +18621,21 @@ def main():
         os.makedirs(os.path.join(WORKSPACE, "prompts", "construction"))
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
+            "ordinary_gate.py",
             "construction_review.py", "correction_round.py",
             "plan-commit.sh",
             "work_unit.py", "correction_attempt_start.py", "attempt-started.sh",
+            "correction_attempt_success.py", "correction_attempt_failure.py",
+            "correction_attempt_stop.py",
+            "attempt-failed.sh", "correction_rewind.py", "rewind.sh",
+            "attempt-succeeded.sh",
             "correction_artifact_publish.py", "plan-publish.sh",
             "correction_round_supersede.py", "correction-round-supersede.sh",
             "correction_round_void.py", "correction-round-void.sh",
             "correction_round_open.py", "correction-round-open.sh",
+            "correction_round_built.py", "correction-round-built.sh",
+            "correction_round_revise.py", "correction-round-revise.sh",
+            "final_checker_contract_map.py", "final-checker-contract-map.sh",
             "correction_round_baseline.py", "correction-round-baseline.sh",
             "correction_product_authority.py", "correction-product-authority.sh",
         ):

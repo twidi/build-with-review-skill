@@ -225,8 +225,45 @@ def correction_state(built, correction, task):
         "plan_projection_sha256": canonical_sha256(projection),
         "plan_ownership_sha256": artifact["controller_sha256"],
         "contract_sha256": selected["task_contract_sha256"],
+        "design_contract_sha256": selected["design_contract_sha256"],
+        "consumer_account_sha256": selected["consumer_account_sha256"],
         "design_sha256": selected["design_sha256"],
         "disagreement_sha256": selected["disagreement_sha256"],
+    }
+
+
+def correction_attempt_assurance(built, correction, task, attempt):
+    path = WORKSPACE / "attempt-in-flight"
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("the correction attempt marker is not one real file")
+        marker = json.loads(path.read_bytes())
+    except (OSError, UnicodeError, ValueError) as exc:
+        refuse(f"the correction attempt assurance is unavailable: {exc}")
+    unit = {"kind": "correction", "built": built, "round": int(correction)}
+    assigned = marker.get("assigned_final_checker_obligations")
+    attempt_predecessor = marker.get("attempt_predecessor")
+    if marker.get("schema") != 2 or marker.get("unit") != unit \
+            or marker.get("task") != int(task) or marker.get("attempt") != int(attempt) \
+            or not isinstance(attempt_predecessor, dict) \
+            or attempt_predecessor.get("unit") != unit \
+            or attempt_predecessor.get("task") != int(task) \
+            or not re.fullmatch(
+                r"[0-9a-f]{40,64}", str(attempt_predecessor.get("commit")),
+            ) \
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(marker.get("outstanding_final_checker_set_sha256")),
+            ) or not isinstance(assigned, list) \
+            or assigned != sorted(set(assigned)) \
+            or any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in assigned) \
+            or marker.get("design_proof_authority") is not None \
+            and not isinstance(marker.get("design_proof_authority"), dict):
+        refuse("the correction attempt assurance is malformed")
+    return {
+        "attempt_predecessor": attempt_predecessor,
+        "final_checker_set_sha256": marker["outstanding_final_checker_set_sha256"],
+        "assigned_final_checker_obligations": assigned,
+        "design_proof_authority": marker["design_proof_authority"],
     }
 
 
@@ -389,18 +426,7 @@ def atomic_publish(relative, payload, subject):
     return target
 
 
-def manifest(lot, task, attempt, round_number, gate, base, tree):
-    task = validate_identity(lot, task)
-    if not TASK_RE.fullmatch(str(attempt)) or not TASK_RE.fullmatch(str(round_number)):
-        refuse("the attempt or round identity is malformed")
-    for value, subject in ((base, "base"), (tree, "tree")):
-        if not re.fullmatch(r"[0-9a-f]{40,64}", value):
-            refuse(f"the candidate {subject} identity is malformed")
-    if not re.fullmatch(r"[0-9a-f]{64}", gate):
-        refuse("the gate operation identity is malformed")
-    git_bytes("rev-parse", "--verify", f"{base}^{{commit}}")
-    git_bytes("cat-file", "-e", f"{tree}^{{tree}}")
-    state = plan_state(lot, task)
+def candidate_files(base, tree):
     files = []
     for number, (status, old_path, path) in enumerate(parse_name_status(base, tree), 1):
         diff = path_diff(base, tree, old_path, path)
@@ -421,6 +447,22 @@ def manifest(lot, task, attempt, round_number, gate, base, tree):
         })
     if not files:
         refuse("the code-review candidate changes no path")
+    return files
+
+
+def manifest(lot, task, attempt, round_number, gate, base, tree):
+    task = validate_identity(lot, task)
+    if not TASK_RE.fullmatch(str(attempt)) or not TASK_RE.fullmatch(str(round_number)):
+        refuse("the attempt or round identity is malformed")
+    for value, subject in ((base, "base"), (tree, "tree")):
+        if not re.fullmatch(r"[0-9a-f]{40,64}", value):
+            refuse(f"the candidate {subject} identity is malformed")
+    if not re.fullmatch(r"[0-9a-f]{64}", gate):
+        refuse("the gate operation identity is malformed")
+    git_bytes("rev-parse", "--verify", f"{base}^{{commit}}")
+    git_bytes("cat-file", "-e", f"{tree}^{{tree}}")
+    state = plan_state(lot, task)
+    files = candidate_files(base, tree)
     document = {
         "schema": 4,
         "lot": lot,
@@ -440,6 +482,71 @@ def manifest(lot, task, attempt, round_number, gate, base, tree):
         f"task-{task}-attempt-{attempt}-code-round-{round_number}-{gate}-manifest.json",
     )
     atomic_publish(str(relative), payload, "the code-review manifest")
+    return {"path": str(relative), "sha256": sha256(payload), "tree": tree, "files": len(files)}
+
+
+def correction_manifest(
+    built, correction, task, attempt, round_number, gate, base, tree,
+    unit_authority, execution_authority, design_proof_json,
+):
+    task = validate_identity(built, task)
+    if not all(TASK_RE.fullmatch(str(value)) for value in (correction, attempt, round_number)):
+        refuse("the correction attempt or round identity is malformed")
+    for value, subject in ((base, "base"), (tree, "tree")):
+        if not re.fullmatch(r"[0-9a-f]{40,64}", value):
+            refuse(f"the correction candidate {subject} identity is malformed")
+    if not re.fullmatch(r"[0-9a-f]{64}", gate) \
+            or not re.fullmatch(r"[0-9a-f]{64}", unit_authority) \
+            or not re.fullmatch(r"[0-9a-f]{64}", execution_authority):
+        refuse("the correction code-review authority is malformed")
+    correction = int(correction)
+    git_bytes("rev-parse", "--verify", f"{base}^{{commit}}")
+    git_bytes("cat-file", "-e", f"{tree}^{{tree}}")
+    state = correction_state(built, correction, task)
+    assurance = correction_attempt_assurance(
+        built, correction, task, attempt,
+    )
+    if base != assurance["attempt_predecessor"]["commit"]:
+        refuse("the correction code-review base changes its frozen attempt predecessor")
+    try:
+        design_proof_authority = json.loads(design_proof_json)
+    except ValueError as exc:
+        refuse(f"the correction Design-proof authority is malformed: {exc}")
+    if not isinstance(design_proof_authority, dict) \
+            or set(design_proof_authority) != {"schema", "root", "carries"} \
+            or design_proof_authority.get("schema") != 1 \
+            or not isinstance(design_proof_authority.get("root"), dict) \
+            or not isinstance(design_proof_authority.get("carries"), list):
+        refuse("the correction Design-proof authority has an invalid shape")
+    assurance["design_proof_authority"] = design_proof_authority
+    unit = {"kind": "correction", "built": built, "round": correction}
+    files = candidate_files(base, tree)
+    document = {
+        "schema": 5,
+        "unit": unit,
+        "unit_authority_sha256": unit_authority,
+        "execution_authority_sha256": execution_authority,
+        "lot": built,
+        "correction": correction,
+        "task": task,
+        "attempt": int(attempt),
+        "round": int(round_number),
+        "gate": gate,
+        "base": base,
+        "tree": tree,
+        **state,
+        **assurance,
+        "previous": read_previous_account(int(round_number)),
+        "files": files,
+    }
+    payload = (json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ) + "\n").encode()
+    relative = pathlib.PurePosixPath(
+        "reports", "construction", built, f"correction-{correction}",
+        f"task-{task}-attempt-{attempt}-code-round-{round_number}-{gate}-manifest.json",
+    )
+    atomic_publish(str(relative), payload, "the correction code-review manifest")
     return {"path": str(relative), "sha256": sha256(payload), "tree": tree, "files": len(files)}
 
 
@@ -479,6 +586,9 @@ def correction_design_manifest(
             or not re.fullmatch(r"[0-9a-f]{64}", execution_authority):
         refuse("the correction design-review identity is malformed")
     state = correction_state(built, correction, task)
+    assurance = correction_attempt_assurance(
+        built, correction, task, attempt,
+    )
     unit = {"kind": "correction", "built": built, "round": int(correction)}
     document = {
         "schema": 2,
@@ -491,6 +601,7 @@ def correction_design_manifest(
         "attempt": int(attempt),
         "round": int(round_number),
         **state,
+        **assurance,
         "previous": read_design_previous_account(int(round_number)),
     }
     payload = (json.dumps(
@@ -518,6 +629,9 @@ def load_design_manifest(relative):
     }
     correction_required = required | {
         "unit", "unit_authority_sha256", "execution_authority_sha256", "correction",
+        "attempt_predecessor",
+        "final_checker_set_sha256", "assigned_final_checker_obligations",
+        "design_proof_authority", "design_contract_sha256", "consumer_account_sha256",
     }
     schema_two = isinstance(document, dict) and document.get("schema") == 2
     if not isinstance(document, dict) \
@@ -563,18 +677,41 @@ def load_manifest(relative):
         "plan", "plan_sha256", "plan_projection_sha256", "plan_ownership_sha256",
         "contract_sha256", "design_sha256", "disagreement_sha256", "previous", "files",
     }
-    if not isinstance(document, dict) or set(document) != required \
-            or document.get("schema") != 4 or not isinstance(document.get("files"), list):
+    correction_required = required | {
+        "unit", "unit_authority_sha256", "execution_authority_sha256", "correction",
+        "attempt_predecessor",
+        "final_checker_set_sha256", "assigned_final_checker_obligations",
+        "design_proof_authority", "design_contract_sha256", "consumer_account_sha256",
+    }
+    schema_two = isinstance(document, dict) and document.get("schema") == 5
+    if not isinstance(document, dict) \
+            or set(document) != (correction_required if schema_two else required) \
+            or document.get("schema") not in {4, 5} \
+            or not isinstance(document.get("files"), list):
         refuse("the code-review manifest has an invalid shape")
     task = validate_identity(document.get("lot"), document.get("task"))
     if not TASK_RE.fullmatch(str(document.get("attempt"))) \
             or not TASK_RE.fullmatch(str(document.get("round"))):
         refuse("the code-review manifest has a malformed generation identity")
     validate_previous_account(document["previous"], int(document["round"]))
-    expected_relative = str(pathlib.PurePosixPath(
-        "reports", "construction", document["lot"],
-        f"task-{task}-attempt-{document['attempt']}-code-round-{document['round']}-{document['gate']}-manifest.json",
-    ))
+    if schema_two:
+        correction = document.get("correction")
+        if not TASK_RE.fullmatch(str(correction)) or document.get("unit") != {
+            "kind": "correction", "built": document["lot"], "round": correction,
+        } or not re.fullmatch(r"[0-9a-f]{64}", str(document.get("unit_authority_sha256"))) \
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(document.get("execution_authority_sha256")),
+                ):
+            refuse("the correction code-review manifest has malformed authority")
+        expected_relative = str(pathlib.PurePosixPath(
+            "reports", "construction", document["lot"], f"correction-{correction}",
+            f"task-{task}-attempt-{document['attempt']}-code-round-{document['round']}-{document['gate']}-manifest.json",
+        ))
+    else:
+        expected_relative = str(pathlib.PurePosixPath(
+            "reports", "construction", document["lot"],
+            f"task-{task}-attempt-{document['attempt']}-code-round-{document['round']}-{document['gate']}-manifest.json",
+        ))
     if relative != expected_relative:
         refuse("the code-review manifest path contradicts its generation identity")
     expected_files = []
@@ -1107,7 +1244,10 @@ def final_tree(manifest_relative, current_tree, resolved_disagreement="-"):
     if not re.fullmatch(r"[0-9a-f]{40,64}", current_tree):
         refuse("the final candidate tree identity is malformed")
     git_bytes("cat-file", "-e", f"{current_tree}^{{tree}}")
-    state = plan_state(frozen["lot"], frozen["task"])
+    if frozen["schema"] == 5:
+        state = correction_state(frozen["lot"], frozen["correction"], frozen["task"])
+    else:
+        state = plan_state(frozen["lot"], frozen["task"])
     for key in ("contract_sha256", "design_sha256", "plan_projection_sha256",
                 "plan_ownership_sha256"):
         if state[key] != frozen[key]:
@@ -1119,13 +1259,14 @@ def final_tree(manifest_relative, current_tree, resolved_disagreement="-"):
         refuse("the accepted final Disagreement identity is malformed")
     if state["disagreement_sha256"] != expected_disagreement:
         refuse("the final plan carries an unreviewed Disagreement generation")
-    plan_copy = f"docs/plans/{WORKSPACE.name}-{frozen['lot']}-plan.md"
+    plan_copy = frozen["plan"] if frozen["schema"] == 5 \
+        else f"docs/plans/{WORKSPACE.name}-{frozen['lot']}-plan.md"
     changed = git_bytes("diff", "--name-only", "-z", frozen["tree"], current_tree).stdout
     paths = [item.decode("utf-8", "surrogateescape") for item in changed.split(b"\0") if item]
     if any(path != plan_copy for path in paths):
         refuse("the final gate candidate changes bytes outside the reviewed candidate and plan projection")
     committed_plan = tree_file(current_tree, plan_copy)
-    workspace_plan = real_workspace_file(state["plan"], "the construction plan").read_bytes()
+    workspace_plan = real_workspace_file(state["plan"], "the construction document").read_bytes()
     if committed_plan != workspace_plan:
         refuse("the final tree does not carry the exact reviewed plan publication")
     print(json.dumps({"tree": current_tree, "plan": plan_copy}, separators=(",", ":")))
@@ -1145,6 +1286,8 @@ def main():
         print(json.dumps(design_disagreement_state(*args), separators=(",", ":"), sort_keys=True))
     elif command == "manifest" and len(args) == 7:
         print(json.dumps(manifest(*args), separators=(",", ":"), sort_keys=True))
+    elif command == "correction-manifest" and len(args) == 11:
+        print(json.dumps(correction_manifest(*args), separators=(",", ":"), sort_keys=True))
     elif command == "design-manifest" and len(args) == 4:
         print(json.dumps(design_manifest(*args), separators=(",", ":"), sort_keys=True))
     elif command == "correction-state" and len(args) == 3:

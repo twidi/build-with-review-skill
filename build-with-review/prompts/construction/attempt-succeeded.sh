@@ -13,6 +13,11 @@ die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 [ -e "$REPO/.git" ] || die "$REPO is not a git repository"
 source "$WORKSPACE/prompts/common/attempt-closer.sh"
 
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    exec python3 "$HERE/correction_attempt_success.py" "$@"
+fi
+
 [ $# -eq 4 ] \
     || die "4 arguments expected, $# given — usage: attempt-succeeded.sh <lot> <task N> <the commit the implementer reported> <final gate op>"
 LOT=$1 N=$2 REPORTED=$3 GATE_OP=$4

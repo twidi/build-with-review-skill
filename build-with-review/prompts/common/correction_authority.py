@@ -11,6 +11,8 @@ import pathlib
 import re
 import stat
 
+from final_checker_obligations import EMPTY_SET_SHA256, empty_set, materialize_transition
+
 LOT_RE = re.compile(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
 SUFFIXES = {".md", ".json"}
@@ -28,12 +30,19 @@ ADMISSION_KEYS = {
     "items", "spec", "human_decisions", "controller_contract", "ownership",
     "decomposition", "coordination", "repetition", "reason",
 }
-EMPTY_FINAL_CHECKER_SET = {"schema": 1, "entries": []}
-EMPTY_FINAL_CHECKER_SET_SHA256 = hashlib.sha256(
-    json.dumps(EMPTY_FINAL_CHECKER_SET, sort_keys=True, separators=(",", ":")).encode(),
-).hexdigest()
+EMPTY_FINAL_CHECKER_SET = empty_set()
+EMPTY_FINAL_CHECKER_SET_SHA256 = EMPTY_SET_SHA256
 RENAME_NOREPLACE = 1
 CORRECTION_LOCK_NAME = "correction-authority.lock"
+
+
+def empty_retry_transition():
+    transition, output = materialize_transition(
+        empty_set(), additions=[], dispositions=[], transfer_kind="empty",
+    )
+    if output != empty_set():
+        raise ValueError("the empty retry transition produced a non-empty set")
+    return transition
 
 
 def recovery_relative_path(relative):

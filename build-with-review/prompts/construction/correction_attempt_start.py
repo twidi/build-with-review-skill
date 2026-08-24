@@ -2,6 +2,7 @@
 """Start one Correction Round task attempt from its exact opened authority."""
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -15,8 +16,33 @@ REPO = WORKSPACE.parent.parent.parent.resolve()
 COMMON = HERE.parent / "common"
 sys.path.insert(0, str(COMMON))
 
-from correction_authority import EMPTY_FINAL_CHECKER_SET_SHA256  # noqa: E402
+from correction_authority import (  # noqa: E402
+    CorrectionAuthorityLease,
+    WorkspaceFileAnchor,
+)
 from work_unit import resolve_correction  # noqa: E402
+
+
+CORRECTION_OWNER_MARKERS = {
+    "amendment-commit-in-progress",
+    "document-copy-in-progress",
+    "gate-check-in-progress",
+    "plan-commit-in-progress",
+    "rewind-in-progress",
+    "spec-breach-recovery-in-progress",
+    "spec-commit-in-progress",
+    "correction-allocation-supersede-in-progress",
+    "correction-artifact-in-progress",
+    "correction-attempt-failure-in-progress",
+    "correction-attempt-stop-in-progress",
+    "correction-product-authority-in-progress",
+    "correction-round-built-in-progress",
+    "correction-round-open-in-progress",
+    "correction-round-revision-in-progress",
+    "correction-round-void-in-progress",
+    "correction-rewind-in-progress",
+    "final-checker-contract-map-in-progress",
+}
 
 
 def refuse(message):
@@ -39,6 +65,27 @@ def marker_exists():
     return os.path.lexists(WORKSPACE / "attempt-in-flight")
 
 
+def unfinished_correction_owner():
+    return next(
+        (name for name in sorted(CORRECTION_OWNER_MARKERS)
+         if os.path.lexists(WORKSPACE / name)),
+        None,
+    )
+
+
+def operation_identity(args):
+    account = {
+        "kind": "correction-attempt-start",
+        "built": args.built,
+        "round": args.round,
+        "task": args.task,
+        "attempt": args.attempt,
+    }
+    return "correction-attempt-start:" + hashlib.sha256(json.dumps(
+        account, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
 def used_attempt(entries, built, round_number, task, attempt):
     return any(
         entry.get("kind") in {"attempt.succeeded", "attempt.failed", "paused", "aborted"}
@@ -49,7 +96,7 @@ def used_attempt(entries, built, round_number, task, attempt):
     )
 
 
-def start(args):
+def start_owned(args):
     if args.retry != "-":
         refuse("Correction Round retry obligations are not available at this implementation checkpoint")
     try:
@@ -57,6 +104,9 @@ def start(args):
     except (OSError, ValueError) as exc:
         refuse(str(exc))
 
+    pending_owner = unfinished_correction_owner()
+    if pending_owner is not None:
+        refuse(f"another workflow owner is unfinished: {pending_owner}")
     if marker_exists():
         refuse("attempt-in-flight already owns another attempt")
     dirty = git_output("status", "--porcelain")
@@ -64,28 +114,6 @@ def start(args):
         refuse(f"the tree is not clean:\n{dirty}")
 
     ref_root = resolved["ref_root"]
-    task_zero = git_output("rev-parse", f"{ref_root}/task-0")
-    if args.task == 1:
-        predecessor = task_zero
-    else:
-        predecessor = git_output("rev-parse", f"{ref_root}/task-{args.task - 1}")
-    for task in range(1, args.task):
-        git_output("rev-parse", f"{ref_root}/task-{task}")
-    if run(
-        "git", "-C", str(REPO), "show-ref", "--verify", "--quiet",
-        f"{ref_root}/task-{args.task}", check=False,
-    ).returncode == 0:
-        refuse(f"task {args.task} is already stable")
-    head = git_output("rev-parse", "HEAD")
-    if run("git", "-C", str(REPO), "merge-base", "--is-ancestor", predecessor, head,
-           check=False).returncode != 0:
-        refuse("the current branch omits the required correction predecessor")
-    gate = run(
-        "bash", str(HERE / "gate-check.sh"), "require-current", check=False,
-    )
-    if gate.returncode != 0:
-        refuse("the current Correction Round base has no accepted current gate")
-
     common_progress = HERE.parent / "common" / "progress.py"
     verdicts = run(
         str(common_progress), "construction-verdict-check", "history", check=False,
@@ -95,14 +123,64 @@ def start(args):
 
     from work_unit import progress  # imported here to keep the CLI error boundary local
     entries = progress.journal_entries()
+    try:
+        stopped = progress.current_correction_stop_state(
+            entries, len(entries), "the correction attempt start",
+            unit={"kind": "correction", "built": args.built, "round": args.round},
+        )
+    except ValueError as exc:
+        refuse(str(exc))
+    if stopped is not None:
+        refuse("the Correction Round is stopped; resume its exact pause before another attempt")
     if used_attempt(entries, args.built, args.round, args.task, args.attempt):
         refuse("the Correction Round attempt number was already used")
+    try:
+        attempt_predecessor = progress.correction_attempt_predecessor_account(
+            entries, len(entries), args.built, args.round, args.task,
+            "the correction attempt start", require_first_missing=True,
+        )
+    except ValueError as exc:
+        refuse(str(exc))
+    if run(
+        "git", "-C", str(REPO), "show-ref", "--verify", "--quiet",
+        f"{ref_root}/task-{args.task}", check=False,
+    ).returncode == 0:
+        refuse(f"task {args.task} is already stable")
+    head = git_output("rev-parse", "HEAD")
+    if head != attempt_predecessor["commit"]:
+        refuse("current HEAD is not the exact Correction Round attempt predecessor")
+    gate = run(
+        "bash", str(HERE / "gate-check.sh"), "require-current",
+        args.built, str(args.round), check=False,
+    )
+    if gate.returncode != 0:
+        detail = gate.stderr.strip() or gate.stdout.strip()
+        refuse(f"the current Correction Round base has no accepted Correction gate: {detail}")
     try_ref = f"{ref_root}/task-{args.task}-try-{args.attempt}"
     if run("git", "-C", str(REPO), "show-ref", "--verify", "--quiet", try_ref,
            check=False).returncode == 0:
         refuse("the Correction Round attempt already has a try ref")
 
     task = resolved["task"]
+    try:
+        outstanding = progress.outstanding_final_checker_set(
+            entries, len(entries), args.built, args.round,
+            "the correction attempt start",
+        )
+        assigned = progress.assigned_final_checker_obligations(
+            outstanding, resolved["unit"], args.task, task,
+            "the correction attempt start",
+        )
+    except ValueError as exc:
+        refuse(str(exc))
+    try:
+        _design_authority_index, design_proof_authority = \
+            progress.design_proof_authority_for_assigned_code(
+                entries, len(entries), outstanding, resolved["unit"], args.task,
+                task, "the correction attempt start",
+            )
+    except ValueError as exc:
+        refuse(str(exc))
     marker = {
         "schema": 2,
         "unit": resolved["unit"],
@@ -110,6 +188,7 @@ def start(args):
         "tree_authority": resolved["tree_authority"],
         "task": args.task,
         "attempt": args.attempt,
+        "attempt_predecessor": attempt_predecessor,
         "document": {
             "path": resolved["workspace_document"],
             "manifest_sha256": resolved["task_manifest_sha256"],
@@ -121,27 +200,34 @@ def start(args):
             "disagreement_sha256": task["disagreement_sha256"],
         },
         "retry": "-",
-        "design_proof_authority": None,
-        "outstanding_final_checker_set_sha256": EMPTY_FINAL_CHECKER_SET_SHA256,
-        "assigned_final_checker_obligations": [],
+        "design_proof_authority": design_proof_authority,
+        "outstanding_final_checker_set_sha256": progress.final_checker_set_sha256(
+            outstanding,
+        ),
+        "assigned_final_checker_obligations": assigned,
     }
-    run("git", "-C", str(REPO), "update-ref", f"{ref_root}/attempt-base", head)
-    marker_path = WORKSPACE / "attempt-in-flight"
-    temporary = marker_path.with_name(f"{marker_path.name}.tmp-{os.getpid()}")
-    try:
-        with open(temporary, "x", encoding="utf-8") as target:
-            json.dump(marker, target, sort_keys=True, separators=(",", ":"))
-            target.write("\n")
-            target.flush()
-            os.fsync(target.fileno())
-        os.replace(temporary, marker_path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    run(
+        "git", "-C", str(REPO), "update-ref", f"{ref_root}/attempt-base",
+        attempt_predecessor["commit"],
+    )
+    payload = json.dumps(marker, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    with WorkspaceFileAnchor(
+        WORKSPACE, "attempt-in-flight", "the correction attempt owner",
+    ) as anchored:
+        anchored.publish(payload, mode=0o600)
     print(
         f"ATTEMPT correction {args.built} round {args.round} "
-        f"task {args.task} try {args.attempt}\nFROM {head}",
+        f"task {args.task} try {args.attempt}\nFROM {attempt_predecessor['commit']}",
     )
+
+
+def start(args):
+    operation = operation_identity(args)
+    try:
+        with CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+            start_owned(args)
+    except (OSError, ValueError) as exc:
+        refuse(str(exc))
 
 
 def main():

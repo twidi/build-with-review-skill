@@ -96,20 +96,22 @@ def correction_opening(entries, built, round_number):
 def resolve_correction(built, round_number, task=None):
     unit = normalize_work_unit({"kind": "correction", "built": built, "round": round_number})
     entries = progress.journal_entries()
-    opening_index, opening = correction_opening(entries, built, round_number)
-    authority_proof = progress.journal_line_proof(opening_index)
-    authority_sha256 = hashlib.sha256(
-        json.dumps(opening, sort_keys=True, separators=(",", ":")).encode(),
-    ).hexdigest()
+    correction_opening(entries, built, round_number)
+    state = progress.current_correction_contract_state(
+        entries, len(entries), built, round_number, "the resolved Correction Round",
+    )
+    opening = state["opening"]
+    authority_proof = state["proof"]
+    authority_sha256 = state["authority_sha256"]
     artifact_relative = pathlib.PurePosixPath("corrections", built, f"round-{round_number}.md")
     artifact = parse_artifact(
         WORKSPACE / artifact_relative, expected_built=built, expected_round=round_number,
     )
     if artifact["state"] != "active" \
-            or artifact["controller_sha256"] != opening["controller_sha256"] \
-            or artifact["manifest_sha256"] != opening["manifest_sha256"] \
-            or len(artifact["tasks"]) != opening["tasks"]:
-        raise ValueError("the current Correction Round artifact changes its opening authority")
+            or artifact["controller_sha256"] != state["controller_sha256"] \
+            or artifact["manifest_sha256"] != state["artifact"]["manifest_sha256"] \
+            or len(artifact["tasks"]) != len(state["artifact"]["tasks"]):
+        raise ValueError("the current Correction Round artifact changes its latest authority")
     selected = None
     if task is not None:
         if isinstance(task, bool) or not isinstance(task, int) or task < 1 \
@@ -117,9 +119,12 @@ def resolve_correction(built, round_number, task=None):
             raise ValueError("the Correction Round task does not exist")
         selected = artifact["tasks"][task - 1]
     ref_root = f"refs/bwr/{WORKSPACE.name}/{built}/correction-{round_number}"
-    head = git_output("rev-parse", "HEAD")
-    tree = git_output("rev-parse", "HEAD^{tree}")
-    tree_authority = {"rewind": None, "commit": head, "tree": tree, "gate": None}
+    tree_authority = {
+        "rewind": state.get("rewind_proof"),
+        "commit": state.get("execution_commit", state["commit"]),
+        "tree": state.get("execution_tree", state["tree"]),
+        "gate": state.get("execution_gate"),
+    }
     execution_authority = {
         "schema": 1,
         "contract_authority": authority_sha256,
@@ -130,7 +135,7 @@ def resolve_correction(built, round_number, task=None):
         "unit": unit,
         "readable": readable_work_unit(unit),
         "authority": {
-            "kind": "correction.round.opened",
+            "kind": state["kind"],
             "proof": authority_proof,
             "sha256": authority_sha256,
         },
