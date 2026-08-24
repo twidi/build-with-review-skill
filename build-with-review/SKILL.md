@@ -1853,6 +1853,13 @@ The pair is the resume test:
   early boundary. At its current round, `design.review.blocked` freezes the complete
   immutable batch without an implementer disposition. It allocates no later Design
   round. The controller uses the reportless C3.9b or C3.9d plan-fault route.
+  A Construction AMENDMENT can instead supersede one unresolved current Design or code
+  batch. After a clean Reach close and an exact controller-owned task-contract change,
+  `attempt-failed.sh` derives one immutable `amendment_supersession` account. It does not
+  invent a checker blocker or settlement. The account binds both task generations and
+  refuses a controller change to Design or Disagreement. The first later plan publication
+  must match that replacement exactly. A later C2.5 successor binds its prior publication
+  and incomplete C2 result. The replacement attempt replays the complete chain.
   Round 10 never allocates round 11. Its implementer-owned settlement statuses are
   `accepted`, `refuted` and `alternative`.
   An accepted defect fails through C3.9. A complete account

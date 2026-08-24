@@ -116,6 +116,8 @@ COMMITTED_OWNERSHIP_ID=$(printf '%s\n' "$COMMITTED_STATE" \
 plan. Only task $N's Design and documented Disagreement are implementer-owned. Restore
 the committed controller-owned plan, or complete a controller-owned re-cut before
 starting another attempt. Nothing was marked and no session exists."
+"$PROGRESS" construction-plan-successor-check "$LOT" "$N" >/dev/null \
+    || die "the replacement attempt does not consume the exact durable AMENDMENT plan publication. Nothing was marked and no session exists."
 
 # task-0 is the durable lot opening. Every real task before N must already be
 # validated, N and every later task must not be. A rewind moves the whole

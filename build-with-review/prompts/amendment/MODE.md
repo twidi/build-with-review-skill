@@ -1044,7 +1044,15 @@ amendment is committed. Only the restart waits for that commit.
    the routing rewrites the plan itself.
 2. **Preserve and reset** — `attempt-failed.sh <lot> <N> <K> <the classification>`. **The
    blocked implementer left half-written code in the tree**, and a fresh attempt must not
-   find it there.
+   find it there. When the AMENDMENT followed an unresolved Design or code finding, do
+   not invent a checker settlement or a frozen-contract blocker. After the clean Reach
+   close and the exact controller-owned task-contract correction, the closer derives
+   one `amendment_supersession` account. It freezes the opening, clean sweep, immutable
+   finding batch, old task generation and corrected task generation. It refuses if the
+   task contract did not change, or if the controller changed Design or Disagreement.
+   The first later `plan-commit.sh` must publish that exact corrected generation. An
+   incomplete C2 result can authorize a separate plan-only successor. The replacement
+   attempt replays this publication chain before it starts.
 3. **Retire it `superseded`**, never `failed`. It stopped rather than invent, which is
    what it had to do.
 4. **On a `C3.9d`, run C3.9's rewind now** — the one that resets to `task-<K-1>` and takes

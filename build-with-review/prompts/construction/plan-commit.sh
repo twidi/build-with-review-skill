@@ -55,7 +55,6 @@ for id in ${IDS[@]+"${IDS[@]}"}; do
     python3 "$CONSTRUCTION_REVIEW" plan-state "$LOT" "$id" >/dev/null \
         || die "$SOURCE Task $id has no valid controller/implementer ownership boundary. Nothing was copied, staged, committed or marked."
 done
-
 cd "$REPO"
 # The pending marker is the operation's identity AND its prepared payload,
 # published atomically. "HEAD touches the plan copy" cannot be an identity —
@@ -99,6 +98,10 @@ staged, committed or marked."
 fi
 if [ ! -f "$PENDING" ] && ! controller_operation_refuse_pending "$WORKSPACE" gate-check; then
     die "$CONTROLLER_OPERATION_ERROR. This fresh plan commit cannot pass the frozen gate candidate. Nothing was copied, staged or committed."
+fi
+if [ ! -f "$PENDING" ]; then
+    "$PROGRESS" construction-plan-publication-check "$LOT" "$TASKS" >/dev/null \
+        || die "the plan is not the exact pending AMENDMENT replacement or an authenticated C2 successor. Nothing was copied, staged, committed or marked."
 fi
 # The shared copy boundary revalidates the source and every repository
 # component, writes a real same-directory temporary, then renames atomically.
@@ -176,7 +179,9 @@ fi
 # happened. Finish, say the real state, and hand back the one retryable line.
 # The note carries the operation's own mark: it is what lets a later call
 # tell this completed operation's orphan marker from a live interrupted one.
-NOTE=("$PROGRESS" note plan.written --data "{\"tasks\":$TASKS,\"op\":\"$OP_NONCE\"}")
+PLAN_ACCOUNT=$("$PROGRESS" construction-plan-publication-account "$LOT" "$TASKS" "$OP_NONCE") \
+    || die "the committed plan cannot produce its exact publication account. The commit and pending marker remain; rerun this same call."
+NOTE=("$PROGRESS" note plan.written --data "$PLAN_ACCOUNT")
 JOURNAL_MISSING=
 "${NOTE[@]}" || JOURNAL_MISSING=$(printf '%q ' "${NOTE[@]}")
 # The marker lives until the whole tail is durable — the journal line included.

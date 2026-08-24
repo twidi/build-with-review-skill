@@ -81,6 +81,8 @@ FAILURE_DATA=$("$WORKSPACE/prompts/common/progress.py" construction-failure-chec
     || die "the failure is not admitted by the exact checker state.
 Settle implementer-owned Design or code round 10, or record the exact controller-owned
 Design or code blocker at the round where it was found, before the plan changes.
+An open Construction AMENDMENT can instead supersede one unresolved current checker
+batch after its clean Reach close and one exact controller-owned task-contract change.
 When it accepts an implementer-owned defect, complete its authenticated failure report
 first. Nothing was moved, staged, recorded or bound."
 

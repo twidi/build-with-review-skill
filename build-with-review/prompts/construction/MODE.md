@@ -686,7 +686,8 @@ git -c core.hooksPath=/dev/null commit -m "<subject>" -- docs/plans/<workspace n
 document-copy.sh finish plans/<lot>-plan.md docs/plans/<workspace name>-<lot>-plan.md replace
 git update-ref refs/bwr/<run>/<lot>/task-0 HEAD    # only if it does not exist yet
 
-progress.py note plan.written --data '{"tasks":<N>,"op":"<the operation's mark>"}'
+ACCOUNT=$(progress.py construction-plan-publication-account <lot> <N> "<the operation's mark>")
+progress.py note plan.written --data "$ACCOUNT"
 ```
 
 **The helper sequence is the physical copy boundary, not optional shorthand.** The
@@ -1663,6 +1664,22 @@ Read what it is asking, and answer in one of three ways:
      attempt. Do not request a settlement or failure report for either controller-owned
      blocker.
 
+     A Construction AMENDMENT can make an implementer-owned Design or code finding
+     obsolete before that batch has a settlement. Do not fabricate
+     `design.review.blocked`, `code.review.blocked`, or a round-10 settlement. After the
+     AMENDMENT has one clean Reach close, update only the controller-owned task contract.
+     The closer then derives and freezes one `amendment_supersession` account. It binds
+     the opening, clean sweep, immutable checker batch, prior task generation and exact
+     replacement task generation. It refuses an unchanged contract or changed Design
+     or Disagreement bytes. This account does not authorize an arbitrary later plan.
+     The first `plan-commit.sh` call must publish that exact frozen replacement. Its
+     schema-2 `plan.written` terminal binds the failure, task state, plan commit and
+     content hash. A later C2.5 plan generation requires one exact incomplete C2 result
+     after the prior publication. It becomes a separately authenticated successor and
+     must still preserve the AMENDMENT replacement boundary. The next attempt consumes
+     the current complete publication chain. It does not inherit the superseded checker
+     finding as a final-checker obligation.
+
      **A blocked implementer may have written code before it stopped**, and none of it may
      reach the next attempt — that is the whole point of one session per attempt.
   3. **Retire it `superseded`**, never `failed`. It did exactly what it had to by stopping
@@ -1679,11 +1696,14 @@ Read what it is asking, and answer in one of three ways:
      <workspace>/prompts/construction/plan-commit.sh <lot> "<subject>"
      ```
 
-     Repeat C2 against that exact plan generation. If C2 changes the plan, publish its
-     final corrected generation through the same command. Then open and close the C2.7
+     `plan-commit.sh` refuses before copying when the workspace plan differs from the
+     frozen `amendment_supersession` task state. Repeat C2 against that exact published
+     generation. If C2 finds a real gap, its incomplete result authorizes one later
+     plan-only successor through the same command. Then open and close the C2.7
      baseline gate for the resulting clean plan commit. Only that green current baseline
-     can precede `attempt-started.sh` for the replacement. Never restore the old
-     committed controller bytes to make the start pass.
+     can precede `attempt-started.sh` for the replacement. Attempt admission replays the
+     complete publication chain. Never restore the old committed controller bytes to
+     make the start pass.
 
      This step does not replace the C3.9d route. C3.9d still performs its existing
      re-cut, plan commit, C2 proof, rewind, and baseline sequence.

@@ -678,6 +678,93 @@ def seed_active_attempt(lot="lot-1", task=3, attempt=2):
         )
 
 
+def seed_committed_construction_attempt_with_spec(lot="lot-1", task=3, attempt=2):
+    spec_relative = "docs/plans/construction-attempt-design.md"
+    committed_plan = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
+    plan = ["# Plan", "", f"Spec: {spec_relative}", ""]
+    for number in range(1, task + 1):
+        plan.extend([
+            f"## Task {number} - Task {number}",
+            f"Achieves: Complete task {number}.",
+            f"To verify: Task {number} is complete.",
+            "",
+            "### Design",
+            "Implement the accepted task contract.",
+        ])
+        plan.append("")
+    plan_text = "\n".join(plan)
+    write_report(f"plans/{lot}-plan.md", plan_text)
+    write_project(spec_relative, spec_document())
+    write_project(committed_plan, plan_text)
+    write_project(".gitignore", ".superpowers/\n")
+    subprocess.run(
+        ["git", "-C", REPO, "add", ".gitignore", spec_relative, committed_plan], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "seed active construction attempt"],
+        check=True,
+    )
+    append_note(
+        "run.started", {"cap": 3}, "construction attempt",
+        mode="construction", lot=lot, job="controller",
+    )
+    append_note(
+        "plan.written", {"tasks": task, "op": "construction-attempt-plan"},
+        mode="construction", lot=lot, job="controller",
+    )
+    helper = os.path.join(WORKSPACE, "prompts", "construction", "construction_review.py")
+    state = json.loads(subprocess.check_output(
+        [sys.executable, helper, "plan-state", lot, str(task)], text=True, cwd=REPO,
+    ))
+    base = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    subprocess.run([
+        "git", "-C", REPO, "update-ref", f"refs/bwr/test-run/{lot}/attempt-base", base,
+    ], check=True)
+    headings = "".join(f"## Task {number} - Task {number}\n" for number in range(1, task + 1))
+    manifest = subprocess.check_output(
+        ["git", "-C", REPO, "hash-object", "--stdin"], input=headings, text=True,
+    ).strip()
+    with open(os.path.join(WORKSPACE, "attempt-in-flight"), "w", encoding="utf-8") as target:
+        target.write(
+            f"{lot} {task} {attempt}\n"
+            f"plan {manifest} {task} ownership {state['plan_ownership_sha256']} "
+            f"contract {state['contract_sha256']} retry -\n"
+        )
+    return spec_relative
+
+
+def open_clean_construction_amendment_for_attempt(
+        lot="lot-1", task=3, attempt=2, *, ruling="R1",
+):
+    state_path = seed_direct_ruling(ruling=ruling, route="amendment")
+    order = f"apply {ruling} and return to {lot} task {task} attempt {attempt}"
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", json.dumps({
+            "amendment": 1,
+            "origin": "construction",
+            "ruling": ruling,
+            "authority_kind": "ruling.ready",
+            "authority_ref": ruling,
+            "authority_sha256": file_sha256(state_path),
+        }),
+        "--text", order,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    write_report("amendments/1.md", amendment_document(1, order, (ruling,)))
+    os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "1"), exist_ok=True)
+    written = run_progress(
+        "note", "amendment.written", "--data", '{"amendment":1}',
+        "--text", os.path.join(WORKSPACE, "amendments", "1.md"),
+    )
+    check(written.returncode == 0, written.stdout + written.stderr)
+    accept_reach_sweep(
+        1, reach_report(sources=(ruling,)), f"amendment-supersession-{ruling}-reach",
+    )
+
+
 def seed_review_gate(lot="lot-1", task=3, attempt=2, round_number=1):
     write_project(".superpowers/bwr/gate.md", "true\n")
     candidate = write_project("fixture-code-review.txt", f"round {round_number}\n")
@@ -1997,6 +2084,265 @@ def design_parity_requires_one_correction_account_before_the_next_round():
     finish_design_round(2, opening, previous=previous)
     proof = run_progress("construction-verdict-check", "design", "lot-1", "3", "2")
     check(proof.returncode == 0, proof.stdout + proof.stderr)
+
+
+@test
+def amendment_superseded_design_finding_closes_without_a_false_checker_terminal():
+    seed_committed_construction_attempt_with_spec()
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1,
+        "where": "Design Step 1",
+        "what": "The product behavior needed by this Design is not specified.",
+        "why": "Only a product decision can define the required task outcome.",
+        "impact": "IMPORTANT",
+        "previous": [],
+    }])
+
+    open_clean_construction_amendment_for_attempt()
+
+    plan_path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
+    plan_text = open(plan_path, encoding="utf-8").read()
+    refused_after(
+        run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9b"),
+        len(journal_lines()), "an AMENDMENT that did not replace the task contract",
+    )
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(plan_text.replace(
+            "Implement the accepted task contract.",
+            "The controller must not rewrite this implementer-owned Design.",
+        ))
+    refused_after(
+        run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9b"),
+        len(journal_lines()), "an AMENDMENT route that changed the Design",
+    )
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(plan_text.replace(
+            "Achieves: Complete task 3.",
+            "Achieves: Complete task 3 under the accepted R1 product behavior.",
+        ))
+
+    admitted = run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9b")
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    account = json.loads(admitted.stdout)
+    supersession = account.get("amendment_supersession")
+    check(
+        isinstance(supersession, dict)
+        and supersession.get("amendment") == 1
+        and supersession.get("checker") == "design"
+        and supersession.get("finding_ids") == [1],
+        f"the failure admission omitted its exact amendment supersession: {account}",
+    )
+
+    closer = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", json.dumps(account),
+    )
+    check(closer.returncode == 0, closer.stdout + closer.stderr)
+    failure = next(entry for entry in journal_lines() if entry.get("kind") == "attempt.failed")
+    check(failure["data"] == account, "the closer changed its admitted supersession account")
+    check(not any(entry.get("kind") in {"design.review.blocked", "design.review.resolved"}
+                  for entry in journal_lines()),
+          "the amendment route fabricated a Design checker terminal")
+    unpublished_start = run_progress(
+        "construction-plan-successor-check", "lot-1", "3",
+    )
+    check(unpublished_start.returncode != 0,
+          "replacement attempt admission accepted no durable plan publication")
+
+    accepted_plan_text = open(plan_path, encoding="utf-8").read()
+    head_before_publication = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(plan_text.replace(
+            "Achieves: Complete task 3.",
+            "Achieves: A foreign post-failure plan replaces the accepted correction.",
+        ))
+    plan_commit = os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh")
+    changed_publication = subprocess.run(
+        [plan_commit, "lot-1", "Publish the wrong amendment replacement"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(changed_publication.returncode != 0, changed_publication.stdout + changed_publication.stderr)
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip() == head_before_publication,
+          "a changed post-failure plan committed before replacement authentication")
+
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(accepted_plan_text)
+    published = subprocess.run(
+        [plan_commit, "lot-1", "Publish the exact amendment replacement"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    publication = journal_lines()[-1]
+    check(publication.get("kind") == "plan.written"
+          and publication.get("data", {}).get("schema") == 2
+          and publication["data"]["amendment_supersession"]["failure"]
+          == load_common_module("progress").journal_line_proof(
+              journal_lines().index(failure)
+          ), publication)
+    load_common_module("progress").validate_plan_written_entry(
+        journal_lines(), len(journal_lines()) - 1, publication,
+    )
+
+    marker = os.path.join(WORKSPACE, "plan-commit-in-progress")
+    marker_tree = subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    ).strip()
+    with open(marker, "w", encoding="utf-8") as target:
+        target.write(f"lot-1\n{marker_tree}\n{publication['data']['op']}\n")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(accepted_plan_text.replace(
+            "Complete task 3 under the accepted R1 product behavior.",
+            "Replace the accepted correction after its orphan marker.",
+        ))
+    orphan_bypass = subprocess.run(
+        [plan_commit, "lot-1", "Do not bypass C2 after orphan cleanup"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(orphan_bypass.returncode != 0,
+          "an orphan marker bypassed the required C2 successor proof")
+    check(not os.path.exists(marker), "the exact completed operation marker was not retired")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(accepted_plan_text)
+
+    c2_started = run_progress("subagent-started", "completeness")
+    check(c2_started.returncode == 0, c2_started.stdout + c2_started.stderr)
+    c2_ended = run_progress(
+        "subagent-ended", "completeness",
+        "--data", json.dumps({
+            "decisions": "1/1", "tasks": "2/3", "deps": "2/2",
+            "constraints": "ok", "parent": "n/a",
+        }),
+    )
+    check(c2_ended.returncode == 0, c2_ended.stdout + c2_ended.stderr)
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(accepted_plan_text.replace(
+            "Complete task 3 under the accepted R1 product behavior.",
+            "Complete task 3 under R1 with the exact C2 ownership correction.",
+        ))
+    c2_publication = subprocess.run(
+        [plan_commit, "lot-1", "Publish the authenticated C2 plan successor"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(c2_publication.returncode == 0, c2_publication.stdout + c2_publication.stderr)
+    publication = journal_lines()[-1]
+    check(publication["data"]["amendment_supersession"]["previous_publication"] is not None
+          and publication["data"]["amendment_supersession"]["c2"] is not None,
+          publication)
+    load_common_module("progress").validate_plan_written_entry(
+        journal_lines(), len(journal_lines()) - 1, publication,
+    )
+
+    published_commit = publication["data"]["commit"]
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    seed_baseline_gate(f"plan/lot-1/{published_commit}", published_commit,
+                       head_before_publication)
+    os.remove(os.path.join(WORKSPACE, "attempt-in-flight"))
+    for number in range(3):
+        subprocess.run([
+            "git", "-C", REPO, "update-ref",
+            f"refs/bwr/test-run/lot-1/task-{number}", published_commit,
+        ], check=True)
+    replacement_start = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "lot-1", "3", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement_start.returncode == 0,
+          replacement_start.stdout + replacement_start.stderr)
+    os.remove(os.path.join(WORKSPACE, "attempt-in-flight"))
+
+    durable = journal_lines()
+    publication_index = max(
+        index for index, entry in enumerate(durable)
+        if entry.get("kind") == "plan.written"
+        and entry.get("data", {}).get("schema") == 2
+    )
+    changed_publication = json.loads(json.dumps(durable))
+    changed_publication[publication_index]["data"]["amendment_supersession"][
+        "task_state_sha256"
+    ] = "0" * 64
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed_publication:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_history = run_progress("construction-verdict-check", "history")
+    check(changed_history.returncode != 0,
+          "historical validation accepted a changed plan publication proof")
+
+    changed_c2 = json.loads(json.dumps(durable))
+    c2_index = max(
+        index for index, entry in enumerate(changed_c2)
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "completeness"
+    )
+    changed_c2[c2_index]["data"]["tasks"] = "3/3"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed_c2:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_history = run_progress("construction-verdict-check", "history")
+    check(changed_history.returncode != 0,
+          "historical validation accepted a clean C2 result as successor authority")
+
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in durable:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(plan_text.replace(
+            "Achieves: Complete task 3.",
+            "Achieves: A later plan generation changes this contract again.",
+        ))
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    lines = journal_lines()
+    durable_failure = next(entry for entry in lines if entry.get("kind") == "attempt.failed")
+    durable_failure["data"]["amendment_supersession"]["replacement_task"][
+        "contract_sha256"
+    ] = "0" * 64
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in lines:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed = run_progress("construction-verdict-check", "history")
+    check(changed.returncode != 0,
+          "historical validation accepted a changed replacement task contract")
+
+
+@test
+def amendment_superseded_code_finding_uses_the_same_exact_account():
+    seed_committed_construction_attempt_with_spec()
+    append_checker_verdict(
+        "code", lot="lot-1", task=3, attempt=2, round_number=1, findings=1,
+        text="The implementation needs a product decision before it can be corrected.",
+    )
+    open_clean_construction_amendment_for_attempt(ruling="R2")
+    plan_path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
+    plan_text = open(plan_path, encoding="utf-8").read()
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(plan_text.replace(
+            "Achieves: Complete task 3.",
+            "Achieves: Complete task 3 under the accepted R2 product behavior.",
+        ))
+
+    admitted = run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9b")
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    account = json.loads(admitted.stdout)
+    supersession = account.get("amendment_supersession")
+    check(
+        supersession.get("checker") == "code"
+        and supersession.get("finding_ids") == [1]
+        and "code_review" not in account,
+        f"the code finding did not use the exact AMENDMENT supersession account: {account}",
+    )
+    appended = run_progress(
+        "note", "attempt.failed", "--task", "3", "--data", json.dumps(account),
+    )
+    check(appended.returncode == 0, appended.stdout + appended.stderr)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
 
 
 @test
@@ -8568,7 +8914,7 @@ def main():
         os.makedirs(os.path.join(WORKSPACE, "prompts", "construction"))
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
-            "construction_review.py", "plan-commit.sh",
+            "construction_review.py", "plan-commit.sh", "attempt-started.sh",
         ):
             destination = os.path.join(WORKSPACE, "prompts", "construction", name)
             shutil.copyfile(os.path.join(HERE, "prompts", "construction", name), destination)

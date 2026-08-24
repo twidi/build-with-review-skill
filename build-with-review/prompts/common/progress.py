@@ -1597,8 +1597,11 @@ def construction_run_and_plan(entries, before, lot, subject):
             or not isinstance(plan_data.get("tasks"), int) \
             or isinstance(plan_data.get("tasks"), bool) \
             or plan_data["tasks"] < 1 or not isinstance(plan_data.get("op"), str) \
-            or not plan_data["op"] or set(plan_data) != {"tasks", "op"}:
+            or not plan_data["op"]:
         fail(f"{subject}'s latest plan publication is malformed")
+    if plan_data.get("schema") != 2 and set(plan_data) != {"tasks", "op"}:
+        fail(f"{subject}'s latest plan publication is malformed")
+    validate_plan_written_entry(entries, plan_index, plan)
     return starts[0], (plan_index, plan)
 
 
@@ -2989,10 +2992,10 @@ def construction_logical_identity(entries, context, check, round_number, subject
     fail(f"{subject} has an unknown construction check", check)
 
 
-def construction_plan_generation(identity, subject):
+def read_construction_plan_state(lot, task, subject):
     result = subprocess.run(
         [sys.executable, CONSTRUCTION_REVIEW, "plan-state",
-         identity["lot"], str(identity["task"])],
+         lot, str(task)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -3007,9 +3010,19 @@ def construction_plan_generation(identity, subject):
         "contract_sha256", "design_sha256", "disagreement_sha256",
     }
     if not isinstance(state, dict) or set(state) != required \
-            or state.get("contract_sha256") != identity.get("contract_sha256") \
-            or state.get("plan_ownership_sha256") != identity.get("plan_ownership_sha256") \
-            or not re.fullmatch(r"[0-9a-f]{64}", state.get("design_sha256") or ""):
+            or any(not re.fullmatch(r"[0-9a-f]{64}", state.get(key) or "")
+                   for key in ("plan_sha256", "plan_projection_sha256",
+                               "plan_ownership_sha256", "contract_sha256", "design_sha256")) \
+            or state.get("disagreement_sha256") is not None \
+            and not re.fullmatch(r"[0-9a-f]{64}", state["disagreement_sha256"]):
+        fail(f"{subject} returned a malformed task contract and Design")
+    return state
+
+
+def construction_plan_generation(identity, subject):
+    state = read_construction_plan_state(identity["lot"], identity["task"], subject)
+    if state.get("contract_sha256") != identity.get("contract_sha256") \
+            or state.get("plan_ownership_sha256") != identity.get("plan_ownership_sha256"):
         fail(f"{subject} does not use the frozen controller contract and one complete Design")
     return {
         "contract_sha256": state["contract_sha256"],
@@ -4161,7 +4174,342 @@ def code_contract_failure_handoff(entries, before, lot, task, attempt, subject):
     }
 
 
-def failure_report_state(entries, before, lot, task, attempt, classification, subject):
+AMENDMENT_SUPERSESSION_TASK_KEYS = {
+    "plan", "plan_sha256", "plan_projection_sha256", "plan_ownership_sha256",
+    "contract_sha256", "design_sha256", "disagreement_sha256",
+}
+
+
+def unresolved_checker_candidates(entries, before, lot, task, attempt, subject):
+    candidates = []
+    for checker, verdicts, resolutions, blockers, immutable_result in (
+        ("design", design_verdicts, design_resolutions, design_blockers, immutable_design_result),
+        ("code", code_verdicts, code_resolutions, code_blockers, immutable_code_result),
+    ):
+        for verdict_index, verdict in verdicts(entries, before, lot, task, attempt):
+            verdict_data = note_data(verdict)
+            if verdict_data.get("outcome") != "findings":
+                continue
+            round_number = verdict_data.get("round")
+            settled = [entry for _, entry in resolutions(entries, before, lot, task, attempt)
+                       if note_data(entry).get("round") == round_number]
+            blocked = [entry for _, entry in blockers(entries, before, lot, task, attempt)
+                       if note_data(entry).get("round") == round_number]
+            if settled or blocked:
+                continue
+            _, findings = immutable_result(verdict_data, subject)
+            candidates.append((checker, verdict_index, verdict, findings))
+    return candidates
+
+
+def unresolved_checker_for_amendment(entries, before, lot, task, attempt, subject):
+    candidates = unresolved_checker_candidates(
+        entries, before, lot, task, attempt, subject,
+    )
+    if len(candidates) != 1:
+        fail(f"{subject} requires one exact unresolved checker batch", f"found {len(candidates)}")
+    checker, verdict_index, verdict, findings = candidates[0]
+    if any(candidate.get("event") == "note" and candidate.get("kind") == "verdict.consumed"
+           and note_data(candidate).get("check") in {"design", "code"}
+           for candidate in entries[verdict_index + 1:before]):
+        fail(f"{subject}'s unresolved checker batch is not the current construction verdict")
+    verdict_data = note_data(verdict)
+    logical = construction_frozen_logical(
+        entries, verdict_index,
+        {"check": checker, "lot": lot, "task": task, "attempt": attempt,
+         "round": verdict_data.get("round")},
+        subject,
+    )
+    return {
+        "checker": checker,
+        "verdict": journal_line_proof(verdict_index),
+        "round": verdict_data["round"],
+        "result": verdict_data["report"],
+        "result_sha256": verdict_data["report_sha256"],
+        "finding_ids": [item["id"] for item in findings],
+        "logical": logical,
+    }
+
+
+def amendment_attempt_supersession_account(
+        entries, before, lot, task, attempt, classification, subject, *, recorded=None,
+):
+    if classification != "C3.9b":
+        fail(f"{subject}'s unresolved Design or code finding requires C3.9b")
+    unresolved = unresolved_checker_for_amendment(
+        entries, before, lot, task, attempt, subject,
+    )
+    openings = amendment_openings(entries, before)
+    if not openings:
+        fail(f"{subject} has no current AMENDMENT authority")
+    opening_index, opening = openings[-1]
+    opening_data = note_data(opening)
+    validate_amendment_opening_entry(entries, opening_index, opening)
+    if opening_data.get("origin") != "construction" \
+            or (opening_data.get("construction_source") or {}).get("lot") != lot:
+        fail(f"{subject}'s AMENDMENT does not own this Construction lot")
+    if any(entry.get("kind") == "amendment.committed"
+           for entry in entries[opening_index + 1:before]):
+        fail(f"{subject}'s AMENDMENT already committed before the attempt reset")
+    sweeps = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:before], opening_index + 1,
+    ) if entry.get("kind") == "sweep.reported"]
+    if not sweeps:
+        fail(f"{subject}'s AMENDMENT has no accepted Reach result")
+    sweep_index, sweep = sweeps[-1]
+    _, _, sweep_data, audit = validate_sweep_entry(entries, sweep_index, sweep)
+    if not reach_sweep_is_clean(audit):
+        fail(f"{subject}'s AMENDMENT has no clean Reach close")
+
+    logical = unresolved["logical"]
+    previous = {
+        key: logical.get(key) for key in (
+            "plan_ownership_sha256", "contract_sha256", "design_sha256",
+            "plan_projection_sha256", "disagreement_sha256",
+        )
+    }
+    if recorded is None:
+        replacement = read_construction_plan_state(lot, task, subject)
+    else:
+        replacement = recorded.get("replacement_task") if isinstance(recorded, dict) else None
+    if not isinstance(replacement, dict) or set(replacement) != AMENDMENT_SUPERSESSION_TASK_KEYS \
+            or replacement.get("plan") != f"plans/{lot}-plan.md" \
+            or any(not re.fullmatch(r"[0-9a-f]{64}", replacement.get(key) or "")
+                   for key in ("plan_sha256", "plan_projection_sha256",
+                               "plan_ownership_sha256", "contract_sha256", "design_sha256")) \
+            or replacement.get("disagreement_sha256") is not None \
+            and not re.fullmatch(r"[0-9a-f]{64}", replacement["disagreement_sha256"]):
+        fail(f"{subject} has no exact replacement task contract")
+    if replacement["contract_sha256"] == previous["contract_sha256"] \
+            or replacement["plan_ownership_sha256"] == previous["plan_ownership_sha256"]:
+        fail(f"{subject}'s AMENDMENT did not replace the controller-owned task contract")
+    if replacement["design_sha256"] != previous["design_sha256"] \
+            or replacement["disagreement_sha256"] != previous["disagreement_sha256"]:
+        fail(f"{subject}'s AMENDMENT route changed implementer-owned Design bytes")
+
+    expected = {
+        "schema": 1,
+        "amendment": opening_data["amendment"],
+        "opening": journal_line_proof(opening_index),
+        "opening_sha256": opening_data["opening_sha256"],
+        "sweep": sweep_data["sweep"],
+        "sweep_proof": journal_line_proof(sweep_index),
+        "amendment_sha256": sweep_data["amendment_sha256"],
+        "checker": unresolved["checker"],
+        "verdict": unresolved["verdict"],
+        "round": unresolved["round"],
+        "result": unresolved["result"],
+        "result_sha256": unresolved["result_sha256"],
+        "finding_ids": unresolved["finding_ids"],
+        "previous_task": previous,
+        "replacement_task": replacement,
+        "replacement_task_sha256": sha256_bytes(json.dumps(
+            replacement, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")),
+    }
+    if recorded is not None and recorded != expected:
+        fail(f"{subject} changes its exact AMENDMENT supersession account", expected)
+    return expected
+
+
+def active_amendment_plan_supersession(entries, before, lot, subject):
+    candidates = []
+    for index, entry in enumerate(entries[:before]):
+        if entry.get("kind") != "attempt.failed" or entry.get("lot") != lot:
+            continue
+        data = note_data(entry)
+        supersession = data.get("amendment_supersession")
+        if not isinstance(supersession, dict):
+            continue
+        task = entry.get("task")
+        attempt = data.get("attempt")
+        later_terminal = any(
+            candidate.get("lot") == lot and candidate.get("task") == task
+            and candidate.get("kind") in {"attempt.failed", "attempt.succeeded", "paused", "aborted"}
+            and construction_positive_integer(note_data(candidate).get("attempt"))
+            and note_data(candidate)["attempt"] > attempt
+            for candidate in entries[index + 1:before]
+        )
+        if not later_terminal:
+            candidates.append((index, entry, supersession))
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        fail(f"{subject} has several active AMENDMENT plan supersessions")
+    return candidates[0]
+
+
+def normalized_committed_plan_state(lot, task, commit, subject):
+    result = subprocess.run(
+        [sys.executable, CONSTRUCTION_REVIEW, "committed-plan-state",
+         lot, str(task), commit],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        fail(f"{subject} cannot authenticate its committed task contract",
+             result.stderr or result.stdout)
+    try:
+        state = json.loads(result.stdout)
+    except ValueError:
+        fail(f"{subject}'s committed task-state helper returned malformed JSON")
+    state["plan"] = f"plans/{lot}-plan.md"
+    if set(state) != AMENDMENT_SUPERSESSION_TASK_KEYS \
+            or any(not re.fullmatch(r"[0-9a-f]{64}", state.get(key) or "")
+                   for key in ("plan_sha256", "plan_projection_sha256",
+                               "plan_ownership_sha256", "contract_sha256", "design_sha256")) \
+            or state.get("disagreement_sha256") is not None \
+            and not re.fullmatch(r"[0-9a-f]{64}", state["disagreement_sha256"]):
+        fail(f"{subject}'s committed task-state helper returned a malformed account")
+    return state
+
+
+def incomplete_completeness_proof(entries, after, before, lot, subject):
+    terminals = [(index, entry) for index, entry in enumerate(
+        entries[after + 1:before], after + 1,
+    ) if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "completeness" and entry.get("lot") == lot
+        and "unusable" not in note_data(entry)]
+    if not terminals:
+        fail(f"{subject} has no C2 result authorizing a later plan successor")
+    index, terminal = terminals[-1]
+    data = note_data(terminal)
+    required = {"decisions", "tasks", "deps", "constraints", "parent"}
+    if set(data) != required:
+        fail(f"{subject}'s C2 successor proof is incomplete")
+    complete_fraction = re.compile(r"([0-9]+)/\1")
+    clean = all(complete_fraction.fullmatch(str(data[key])) for key in (
+        "decisions", "tasks", "deps",
+    )) and data["constraints"] == "ok" and data["parent"] in {"ok", "n/a"}
+    if clean:
+        fail(f"{subject}'s C2 result does not authorize another plan generation")
+    starts = [candidate for candidate in entries[after + 1:index]
+              if candidate.get("event") == "subagent-started"
+              and candidate.get("kind") == "completeness"
+              and candidate.get("lot") == lot
+              and subagent_terminal_matches(candidate, terminal)]
+    if len(starts) != 1:
+        fail(f"{subject}'s C2 successor has no one exact physical checker opening")
+    open_subagent_brackets(entries[:index + 1])
+    return journal_line_proof(index)
+
+
+def amendment_plan_publication_account(
+        entries, before, lot, tasks, operation, subject, *, commit=None, live=False,
+):
+    if not isinstance(tasks, int) or isinstance(tasks, bool) or tasks < 1 \
+            or not isinstance(operation, str) or not operation:
+        fail(f"{subject} has malformed plan publication identity")
+    active = active_amendment_plan_supersession(entries, before, lot, subject)
+    if active is None:
+        return {"tasks": tasks, "op": operation}
+    failure_index, failure, supersession = active
+    validate_attempt_failed_entry(entries, failure_index, failure)
+    failure_proof = journal_line_proof(failure_index)
+    task = failure.get("task")
+    prior = [(index, entry) for index, entry in enumerate(
+        entries[failure_index + 1:before], failure_index + 1,
+    ) if entry.get("kind") == "plan.written" and entry.get("lot") == lot
+        and note_data(entry).get("schema") == 2
+        and note_data(entry).get("amendment_supersession", {}).get("failure") == failure_proof]
+    if commit is None:
+        state = read_construction_plan_state(lot, task, subject)
+        commit_value = None
+    else:
+        if live:
+            head = subprocess.run(
+                ["git", "-C", project_root(), "rev-parse", "--verify", "HEAD^{commit}"],
+                capture_output=True, text=True,
+            )
+            if head.returncode != 0 or head.stdout.strip() != commit:
+                fail(f"{subject} is not the current committed plan generation")
+        state = normalized_committed_plan_state(lot, task, commit, subject)
+        target = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
+        payload = committed_regular_payload(commit, target, subject)
+        if len(plan_task_manifest(payload, subject)) != tasks \
+                or not commit_changes_only(commit, target):
+            fail(f"{subject} changes another path or records another task manifest")
+        commit_value = commit
+    replacement = supersession["replacement_task"]
+    root_digest = supersession["replacement_task_sha256"]
+    previous_publication = journal_line_proof(prior[-1][0]) if prior else None
+    c2_proof = None
+    if not prior:
+        if state != replacement:
+            fail(f"{subject} changes the AMENDMENT replacement before its first publication")
+    else:
+        c2_proof = incomplete_completeness_proof(
+            entries, prior[-1][0], before, lot, subject,
+        )
+        previous = supersession["previous_task"]
+        if state["contract_sha256"] == previous["contract_sha256"] \
+                or state["plan_ownership_sha256"] == previous["plan_ownership_sha256"] \
+                or state["design_sha256"] != previous["design_sha256"] \
+                or state["disagreement_sha256"] != previous["disagreement_sha256"]:
+            fail(f"{subject}'s C2 successor loses the AMENDMENT replacement boundary")
+    if commit is None:
+        return {
+            "failure": failure_proof,
+            "previous_publication": previous_publication,
+            "c2": c2_proof,
+        }
+    task_digest = sha256_bytes(json.dumps(
+        state, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    return {
+        "schema": 2,
+        "tasks": tasks,
+        "op": operation,
+        "commit": commit_value,
+        "plan_sha256": state["plan_sha256"],
+        "amendment_supersession": {
+            "failure": failure_proof,
+            "root_replacement_task_sha256": root_digest,
+            "previous_publication": previous_publication,
+            "c2": c2_proof,
+            "task": task,
+            "task_state_sha256": task_digest,
+        },
+    }
+
+
+def normalize_plan_written(entries, data, context, subject):
+    if not isinstance(data, dict):
+        fail(f"{subject} requires structured plan publication data")
+    if data.get("schema") != 2:
+        active = active_amendment_plan_supersession(
+            entries, len(entries), context.get("lot"), subject,
+        )
+        if active is not None:
+            fail(f"{subject} must publish the exact pending AMENDMENT replacement")
+        if set(data) != {"tasks", "op"}:
+            fail(f"{subject} has malformed legacy plan publication data")
+        return data
+    expected = amendment_plan_publication_account(
+        entries, len(entries), context.get("lot"), data.get("tasks"), data.get("op"),
+        subject, commit=data.get("commit"), live=True,
+    )
+    if data != expected:
+        fail(f"{subject} changes its AMENDMENT plan publication account", expected)
+    return expected
+
+
+def validate_plan_written_entry(entries, index, entry):
+    data = note_data(entry)
+    if data.get("schema") != 2:
+        if set(data) != {"tasks", "op"}:
+            fail("a durable legacy plan publication is malformed")
+        return
+    expected = amendment_plan_publication_account(
+        entries, index, entry.get("lot"), data.get("tasks"), data.get("op"),
+        "a durable AMENDMENT plan publication", commit=data.get("commit"), live=False,
+    )
+    if data != expected:
+        fail("a durable AMENDMENT plan publication changes its frozen account", expected)
+
+
+def failure_report_state(
+        entries, before, lot, task, attempt, classification, subject, *, allow_unresolved=False,
+):
     design_state = design_failure_handoff(entries, before, lot, task, attempt, subject)
     code_state = final_code_failure_handoff(entries, before, lot, task, attempt, subject)
     code_blocked = code_contract_failure_handoff(entries, before, lot, task, attempt, subject)
@@ -4170,8 +4518,17 @@ def failure_report_state(entries, before, lot, task, attempt, classification, su
         fail(f"{subject} has conflicting checker failure obligations")
     state = states[0] if states else None
     if state is None:
+        unresolved = unresolved_checker_candidates(
+            entries, before, lot, task, attempt, subject,
+        )
+        if unresolved:
+            if allow_unresolved:
+                return {"unresolved": True}
+            fail(f"{subject} cannot close unresolved checker findings")
         return None
     if state.get("unresolved"):
+        if allow_unresolved:
+            return {"unresolved": True}
         fail(f"{subject} cannot close unresolved checker findings")
     review = "design" if design_state is not None else "code"
     if review == "design" and state.get("blocked"):
@@ -5124,6 +5481,33 @@ def validate_code_blocker_entry(entries, index, entry):
         fail("a durable code-review blocker changes its immutable batch", expected)
 
 
+def attempt_failure_account(
+        entries, before, identity, classification, subject, *, recorded=None,
+):
+    base = {"attempt": identity["attempt"], "classification": classification}
+    if classification not in CONSTRUCTION_CLASSIFICATIONS:
+        fail(f"{subject} has an unknown C3.9 classification")
+    report = failure_report_state(
+        entries, before, identity["lot"], identity["task"], identity["attempt"],
+        classification, subject, allow_unresolved=True,
+    )
+    if report == {"unresolved": True}:
+        supersession = amendment_attempt_supersession_account(
+            entries, before, identity["lot"], identity["task"], identity["attempt"],
+            classification, subject,
+            recorded=(recorded or {}).get("amendment_supersession"),
+        )
+        expected = {**base, "amendment_supersession": supersession}
+    else:
+        expected = {**base, **(report or {})}
+    if identity.get("retry"):
+        accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
+        expected["retry"] = identity["retry"]
+    if recorded is not None and recorded != expected:
+        fail("attempt.failed does not carry its exact checker obligation", expected)
+    return expected
+
+
 def normalize_attempt_failed(entries, data, context):
     if not isinstance(data, dict):
         fail("attempt.failed requires structured failure data")
@@ -5131,20 +5515,10 @@ def normalize_attempt_failed(entries, data, context):
     identity = active_attempt_identity(
         identity_context, "the attempt failure", allow_closer=True,
     )
-    base = {"attempt": identity["attempt"], "classification": data.get("classification")}
-    if base["classification"] not in CONSTRUCTION_CLASSIFICATIONS:
-        fail("attempt.failed has an unknown C3.9 classification")
-    report = failure_report_state(
-        entries, len(entries), identity["lot"], identity["task"], identity["attempt"],
-        base["classification"], "the attempt failure",
+    return attempt_failure_account(
+        entries, len(entries), identity, data.get("classification"),
+        "the attempt failure", recorded=data,
     )
-    expected = {**base, **(report or {})}
-    if identity.get("retry"):
-        accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
-        expected["retry"] = identity["retry"]
-    if data != expected:
-        fail("attempt.failed does not carry its exact checker obligation", expected)
-    return expected
 
 
 def normalize_attempt_succeeded(entries, data, context):
@@ -5199,17 +5573,14 @@ def validate_attempt_failed_entry(entries, index, entry):
             or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", entry["lot"]) \
             or not construction_positive_integer(entry.get("task")):
         fail("a durable attempt.failed has malformed construction identity")
-    report = failure_report_state(
-        entries, index, entry["lot"], entry["task"], attempt_number, classification,
-        "the durable attempt failure",
+    identity = {
+        "lot": entry["lot"], "task": entry["task"], "attempt": attempt_number,
+        "retry": data.get("retry"),
+    }
+    attempt_failure_account(
+        entries, index, identity, classification,
+        "the durable attempt failure", recorded=data,
     )
-    base = {"attempt": attempt_number, "classification": classification}
-    expected = {**base, **(report or {})}
-    if data.get("retry") is not None:
-        accepted_retry_from_proof(entries, data["retry"], "the durable propagated retry")
-        expected["retry"] = data["retry"]
-    if data != expected:
-        fail("a durable attempt.failed changes or drops its checker obligation", expected)
 
 
 def validate_attempt_succeeded_entry(entries, index, entry):
@@ -5261,6 +5632,8 @@ def validate_construction_verdict_history(entries):
             validate_attempt_failed_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "attempt.succeeded":
             validate_attempt_succeeded_entry(entries, index, entry)
+        elif entry.get("event") == "note" and entry.get("kind") == "plan.written":
+            validate_plan_written_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") in {"paused", "aborted"} \
                 and isinstance(note_data(entry).get("attempt"), int):
             expected = expected_attempt_stop_data(
@@ -7867,7 +8240,16 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             journal_entries(), data, text, "a product-review sub-lot opening",
         )
 
-    if kind in {"plan.written", "lot.built"}:
+    if kind == "plan.written":
+        data = normalize_plan_written(
+            journal_entries(), data or {}, context, "a Construction plan publication",
+        )
+        validate_construction_lot_origin(
+            journal_entries(), len(journal_entries()), context.get("lot"),
+            "plan.written construction entry",
+        )
+
+    if kind == "lot.built":
         validate_construction_lot_origin(
             journal_entries(), len(journal_entries()), context.get("lot"),
             f"{kind} construction entry",
@@ -8506,16 +8888,63 @@ def cmd_construction_failure_check(args):
     validate_construction_verdict_history(entries)
     context = {"lot": args.lot, "task": args.task, "attempt": args.attempt}
     identity = active_attempt_identity(context, "the failure closer", allow_closer=True)
-    base = {"attempt": args.attempt, "classification": args.classification}
-    report = failure_report_state(
-        entries, len(entries), args.lot, args.task, args.attempt,
-        args.classification, "the failure closer",
+    expected = attempt_failure_account(
+        entries, len(entries), identity, args.classification, "the failure closer",
     )
-    expected = {**base, **(report or {})}
-    if identity.get("retry"):
-        accepted_retry_from_proof(entries, identity["retry"], "the inherited retry obligation")
-        expected["retry"] = identity["retry"]
     print(json.dumps(expected, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def cmd_construction_plan_publication_check(args):
+    entries = journal_entries()
+    amendment_plan_publication_account(
+        entries, len(entries), args.lot, args.tasks, "preflight",
+        "the Construction plan publication preflight",
+    )
+
+
+def cmd_construction_plan_publication_account(args):
+    entries = journal_entries()
+    head = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", "HEAD^{commit}"],
+        capture_output=True, text=True,
+    )
+    if head.returncode != 0:
+        fail("the Construction plan publication has no committed HEAD")
+    account = amendment_plan_publication_account(
+        entries, len(entries), args.lot, args.tasks, args.operation,
+        "the Construction plan publication", commit=head.stdout.strip(), live=True,
+    )
+    print(json.dumps(account, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def cmd_construction_plan_successor_check(args):
+    entries = journal_entries()
+    active = active_amendment_plan_supersession(
+        entries, len(entries), args.lot, "the replacement attempt admission",
+    )
+    if active is None:
+        return
+    failure_index, failure, _supersession = active
+    if failure.get("task") != args.task:
+        return
+    failure_proof = journal_line_proof(failure_index)
+    publications = [(index, entry) for index, entry in enumerate(
+        entries[failure_index + 1:], failure_index + 1,
+    ) if entry.get("kind") == "plan.written" and entry.get("lot") == args.lot]
+    bound = [(index, entry) for index, entry in publications
+             if note_data(entry).get("schema") == 2
+             and note_data(entry).get("amendment_supersession", {}).get("failure")
+             == failure_proof]
+    if not bound or publications[-1][0] != bound[-1][0]:
+        fail("the replacement attempt has no exact current AMENDMENT plan publication")
+    for index, entry in bound:
+        validate_plan_written_entry(entries, index, entry)
+    head = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", "HEAD^{commit}"],
+        capture_output=True, text=True,
+    )
+    if head.returncode != 0 or note_data(bound[-1][1]).get("commit") != head.stdout.strip():
+        fail("the replacement attempt is not on its exact published plan commit")
 
 
 def cmd_construction_retry_check(args):
@@ -8687,6 +9116,22 @@ def build_parser():
     sp.add_argument("attempt", type=positive_int)
     sp.add_argument("classification", choices=tuple(sorted(CONSTRUCTION_CLASSIFICATIONS)))
     sp.set_defaults(func=cmd_construction_failure_check)
+
+    sp = sub.add_parser("construction-plan-publication-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("tasks", type=positive_int)
+    sp.set_defaults(func=cmd_construction_plan_publication_check)
+
+    sp = sub.add_parser("construction-plan-publication-account", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("tasks", type=positive_int)
+    sp.add_argument("operation")
+    sp.set_defaults(func=cmd_construction_plan_publication_account)
+
+    sp = sub.add_parser("construction-plan-successor-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("task", type=positive_int)
+    sp.set_defaults(func=cmd_construction_plan_successor_check)
 
     sp = sub.add_parser("construction-retry-check", help=argparse.SUPPRESS)
     sp.add_argument("lot")
