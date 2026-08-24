@@ -474,14 +474,18 @@ else:
         run = "refs/bwr/2026-08-19-demo/lot-1"
         self.git("update-ref", f"{run}/task-0", self.base)
         self.git("update-ref", f"{run}/attempt-base", self.base)
-        headings = "## Task 1 - One\n"
+        task_headings = [
+            line for line in self.plan.read_text(encoding="utf-8").splitlines()
+            if line.startswith("## Task ")
+        ]
+        headings = "\n".join(task_headings) + "\n"
         manifest = self.git("hash-object", "--stdin", input=headings).stdout.strip()
         helper = self.workspace / "prompts" / "construction" / "construction_review.py"
         state = json.loads(self.run(
             sys.executable, helper, "plan-state", "lot-1", "1", ok=True,
         ).stdout)
         (self.workspace / "attempt-in-flight").write_text(
-            f"lot-1 1 1\nplan {manifest} 1 ownership {state['plan_ownership_sha256']} "
+            f"lot-1 1 1\nplan {manifest} {len(task_headings)} ownership {state['plan_ownership_sha256']} "
             f"contract {state['contract_sha256']} retry -\n",
             encoding="utf-8",
         )
@@ -1667,6 +1671,161 @@ def task_acceptance_consumes_exact_gate_tree_and_rejects_done_repair():
         fixture.close()
 
 
+def prepare_accepted_first_task_in_two_task_plan(fixture):
+    plan = (
+        "# Plan\n\n## Task 1 - One\n"
+        "Achieves: Change the application value.\n"
+        "To verify: The changed value is covered.\n\n"
+        "### Design\n"
+        "[written at C3.1 - see below]\n\n"
+        "## Task 2 - Two\n"
+        "Achieves: Preserve the second contract.\n"
+        "To verify: The second contract remains visible.\n\n"
+        "### Design\n"
+        "Task 2 Design placeholder.\n"
+    )
+    fixture.plan.write_text(plan, encoding="utf-8")
+    fixture.plan_copy.write_text(plan, encoding="utf-8")
+    fixture.git("add", str(fixture.plan_copy.relative_to(fixture.repo)))
+    fixture.git("commit", "-q", "-m", "two-task plan")
+    fixture.base = fixture.git("rev-parse", "HEAD").stdout.strip()
+    fixture.prepare_task_candidate()
+    op = fixture.open_task_gate()
+    fixture.close_gate(op)
+    sha = fixture.commit_task()
+    succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+    fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
+    return op, sha
+
+
+@test
+def historical_task_gate_ignores_later_task_design_and_disagreement():
+    fixture = Fixture()
+    try:
+        op, sha = prepare_accepted_first_task_in_two_task_plan(fixture)
+        fixture.plan.write_text(
+            fixture.plan.read_text(encoding="utf-8").replace(
+                "Task 2 Design placeholder.",
+                "Design the second task without changing the accepted first task.",
+            ).rstrip()
+            + "\n\n### Disagreement\n#### Finding 1 — alternative\n"
+            "The second task records its own later disagreement.\n",
+            encoding="utf-8",
+        )
+
+        current = fixture.run("bash", fixture.gate_check, "require-current", ok=True)
+        check(current.stdout.strip() == op, current.stdout + current.stderr)
+        found = fixture.run(
+            "bash", fixture.gate_check, "find-task", "lot-1", "1", "1", sha, ok=True,
+        )
+        check(found.stdout.strip() == op, found.stdout + found.stderr)
+        passed = fixture.run("bash", fixture.gate_check, "require-pass", op, sha, ok=True)
+        check(passed.stdout.split()[0] == "task", passed.stdout + passed.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def historical_task_gate_refuses_changed_proof_artifacts():
+    fixture = Fixture()
+    try:
+        op, _ = prepare_accepted_first_task_in_two_task_plan(fixture)
+        entries = fixture.journal()
+        verdict = next(
+            entry for entry in entries if entry.get("kind") == "verdict.consumed"
+            and (entry.get("data") or {}).get("check") == "code"
+        )
+        manifest = fixture.workspace / verdict["data"]["manifest"]
+        manifest_bytes = manifest.read_bytes()
+        manifest.write_bytes(manifest_bytes + b"\n")
+        fixture.run("bash", fixture.gate_check, "require-current", ok=False)
+        manifest.write_bytes(manifest_bytes)
+
+        result = fixture.workspace / verdict["data"]["report"]
+        result_bytes = result.read_bytes()
+        result.write_bytes(result_bytes + b"\n")
+        fixture.run("bash", fixture.gate_check, "require-current", ok=False)
+        result.write_bytes(result_bytes)
+
+        journal = fixture.workspace / "progress.jsonl"
+        journal_bytes = journal.read_bytes()
+        rows = fixture.journal()
+        changed = next(
+            entry for entry in rows if entry.get("kind") == "verdict.consumed"
+            and (entry.get("data") or {}).get("check") == "code"
+        )
+        changed["data"]["report_sha256"] = "0" * 64
+        journal.write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in rows),
+            encoding="utf-8",
+        )
+        fixture.run("bash", fixture.gate_check, "require-current", ok=False)
+        journal.write_bytes(journal_bytes)
+
+        journal_bytes = journal.read_bytes()
+        rows = fixture.journal()
+        gate_opening = next(
+            entry for entry in rows if entry.get("event") == "subagent-started"
+            and entry.get("kind") == "gate-runner"
+            and (entry.get("data") or {}).get("op") == op
+        )
+        gate_opening["data"]["code"] = "0:" + "0" * 64
+        journal.write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in rows),
+            encoding="utf-8",
+        )
+        fixture.run("bash", fixture.gate_check, "require-current", ok=False)
+        journal.write_bytes(journal_bytes)
+
+        report = fixture.workspace / "reports" / "gate" / f"{op}.json"
+        report_bytes = report.read_bytes()
+        gate_report = json.loads(report_bytes)
+        gate_report["tree"] = fixture.base
+        report.write_text(json.dumps(gate_report, separators=(",", ":")), encoding="utf-8")
+        fixture.run("bash", fixture.gate_check, "require-current", ok=False)
+        report.write_bytes(report_bytes)
+
+        journal_bytes = journal.read_bytes()
+        rows = fixture.journal()
+        gate_terminal = next(
+            entry for entry in rows if entry.get("event") == "subagent-ended"
+            and entry.get("kind") == "gate-runner"
+            and (entry.get("data") or {}).get("op") == op
+            and (entry.get("data") or {}).get("green") is True
+        )
+        gate_terminal["data"]["tree"] = fixture.base
+        journal.write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in rows),
+            encoding="utf-8",
+        )
+        fixture.run("bash", fixture.gate_check, "require-current", ok=False)
+        journal.write_bytes(journal_bytes)
+    finally:
+        fixture.close()
+
+
+@test
+def live_task_gate_still_rejects_a_changed_current_task_projection():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        fixture.plan.write_text(
+            fixture.plan.read_text(encoding="utf-8").replace(
+                "Change app.txt and verify its observable result.",
+                "Replace the current task Design after its final checker.",
+            ),
+            encoding="utf-8",
+        )
+        fixture.run(
+            "bash", fixture.gate_check, "open", "task", "lot-1/task-1/attempt-1",
+            "lot-1", "1", "1", "refs/bwr/2026-08-19-demo/lot-1/attempt-base", ok=False,
+        )
+        check(not (fixture.workspace / "gate-check-in-progress").exists(),
+              "a changed current task projection opened a final gate")
+    finally:
+        fixture.close()
+
+
 @test
 def task_gate_refuses_an_unproved_historical_code_verdict():
     fixture = Fixture()
@@ -1718,6 +1877,9 @@ def round_ten_resolution_without_an_accepted_defect_can_finish_the_task():
             "rev-parse", "refs/bwr/2026-08-19-demo/lot-1/task-1"
         ).stdout.strip()
         check(stable == sha, "the resolved round-ten candidate did not publish its stable ref")
+        current = fixture.run("bash", fixture.gate_check, "require-current", ok=True)
+        check(current.stdout.strip() == op,
+              "the resolved round-ten task gate could not replay its historical code proof")
     finally:
         fixture.close()
 

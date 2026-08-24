@@ -9112,9 +9112,57 @@ def cmd_construction_verdict_check(args):
             fail("construction verdict history takes no lot, task or attempt")
         print("CONSTRUCTION VERDICTS VALID")
         return
+    if args.check == "historical-code":
+        if not isinstance(args.lot, str) \
+                or not construction_positive_integer(args.task) \
+                or not construction_positive_integer(args.attempt) \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(args.tree)):
+            fail("a historical code proof requires lot, task, attempt, proof and tree")
+        proof_index, _ = journal_entry_from_proof(
+            entries, args.proof, "the historical task gate's code proof",
+        )
+        prefix = entries[:proof_index + 1]
+        validate_construction_verdict_history(prefix)
+        verdicts = code_verdicts(prefix, len(prefix), args.lot, args.task, args.attempt)
+        if not verdicts:
+            fail("the historical task gate has no proved code-checker verdict")
+        verdict_index, verdict = verdicts[-1]
+        verdict_data = note_data(verdict)
+        manifest = verdict_data.get("manifest", "")
+        disagreement = "-"
+        expected_proof = journal_line_proof(verdict_index)
+        if verdict_data.get("outcome") != "clean":
+            if verdict_data.get("round") != CONSTRUCTION_CHECKER_ROUNDS["code"]:
+                fail("the historical task gate consumes unfinished code findings")
+            resolutions = [(index, entry) for index, entry in code_resolutions(
+                prefix, len(prefix), args.lot, args.task, args.attempt,
+            ) if note_data(entry).get("round") == verdict_data.get("round")]
+            if len(resolutions) != 1:
+                fail("the historical task gate has no exact final code resolution")
+            resolution_index, resolution = resolutions[0]
+            resolution_data = note_data(resolution)
+            if resolution_data.get("verdict") != journal_line_proof(verdict_index) \
+                    or resolution_data.get("accepted") != 0:
+                fail("the historical task gate has no accepted final code resolution")
+            expected_proof = journal_line_proof(resolution_index)
+            manifest = resolution_data.get("manifest", "")
+            disagreement = resolution_data.get("disagreement_sha256") or "-"
+        if args.proof != expected_proof:
+            fail("the historical task gate names another final code proof")
+        final = subprocess.run(
+            [sys.executable, CONSTRUCTION_REVIEW, "historical-final-tree",
+             manifest, args.tree, disagreement],
+            capture_output=True, text=True,
+        )
+        if final.returncode != 0:
+            fail("the historical task gate does not bind its reviewed candidate",
+                 final.stderr or final.stdout)
+        print(args.proof)
+        return
     if args.check not in {"design", "code"} or not isinstance(args.lot, str) \
             or not construction_positive_integer(args.task) \
-            or not construction_positive_integer(args.attempt):
+            or not construction_positive_integer(args.attempt) \
+            or args.proof is not None or args.tree is not None:
         fail("a checker verdict proof requires design or code, lot, task and attempt")
     if args.check == "design":
         verdicts = design_verdicts(
@@ -9456,10 +9504,12 @@ def build_parser():
     sp.set_defaults(func=cmd_amendment_sweep_check)
 
     sp = sub.add_parser("construction-verdict-check", help=argparse.SUPPRESS)
-    sp.add_argument("check", choices=("history", "design", "code"))
+    sp.add_argument("check", choices=("history", "design", "code", "historical-code"))
     sp.add_argument("lot", nargs="?")
     sp.add_argument("task", nargs="?", type=positive_int)
     sp.add_argument("attempt", nargs="?", type=positive_int)
+    sp.add_argument("proof", nargs="?")
+    sp.add_argument("tree", nargs="?")
     sp.set_defaults(func=cmd_construction_verdict_check)
 
     sp = sub.add_parser("construction-origin-check", help=argparse.SUPPRESS)

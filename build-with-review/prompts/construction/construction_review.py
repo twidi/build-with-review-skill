@@ -1018,12 +1018,13 @@ def strict_design_result(manifest_relative, source):
     }
 
 
-def final_tree(manifest_relative, current_tree, resolved_disagreement="-"):
+def final_tree(manifest_relative, current_tree, resolved_disagreement="-", *, historical=False):
     _, _, frozen = load_manifest(manifest_relative)
     if not re.fullmatch(r"[0-9a-f]{40,64}", current_tree):
         refuse("the final candidate tree identity is malformed")
     git_bytes("cat-file", "-e", f"{current_tree}^{{tree}}")
-    state = plan_state(frozen["lot"], frozen["task"])
+    state = committed_plan_state(frozen["lot"], frozen["task"], current_tree) \
+        if historical else plan_state(frozen["lot"], frozen["task"])
     for key in ("contract_sha256", "design_sha256", "plan_projection_sha256",
                 "plan_ownership_sha256"):
         if state[key] != frozen[key]:
@@ -1040,10 +1041,11 @@ def final_tree(manifest_relative, current_tree, resolved_disagreement="-"):
     paths = [item.decode("utf-8", "surrogateescape") for item in changed.split(b"\0") if item]
     if any(path != plan_copy for path in paths):
         refuse("the final gate candidate changes bytes outside the reviewed candidate and plan projection")
-    committed_plan = tree_file(current_tree, plan_copy)
-    workspace_plan = real_workspace_file(state["plan"], "the construction plan").read_bytes()
-    if committed_plan != workspace_plan:
-        refuse("the final tree does not carry the exact reviewed plan publication")
+    if not historical:
+        committed_plan = tree_file(current_tree, plan_copy)
+        workspace_plan = real_workspace_file(state["plan"], "the construction plan").read_bytes()
+        if committed_plan != workspace_plan:
+            refuse("the final tree does not carry the exact reviewed plan publication")
     print(json.dumps({"tree": current_tree, "plan": plan_copy}, separators=(",", ":")))
 
 
@@ -1089,6 +1091,8 @@ def main():
         print(json.dumps(strict_design_result(*args), separators=(",", ":"), sort_keys=True))
     elif command == "final-tree" and len(args) in {2, 3}:
         final_tree(*args)
+    elif command == "historical-final-tree" and len(args) in {2, 3}:
+        final_tree(*args, historical=True)
     else:
         refuse("unknown command or wrong argument count")
 

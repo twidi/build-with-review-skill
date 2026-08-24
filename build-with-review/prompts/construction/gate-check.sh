@@ -359,14 +359,23 @@ lost_check() {
 }
 
 validate_result() {
-    local op=$1 mode=$2 lot=${3:--} task=${4:-0} attempt=${5:-0} commit=${6:-} result code_proof=-
+    local op=$1 mode=$2 lot=${3:--} task=${4:-0} attempt=${5:-0} commit=${6:-} historical=${7:-false} result code_proof=- tree
     validate_gate
     result=$(journal_gate_result "$op")
     [ "$(printf '%s\n' "$result" | sed '/^$/d' | wc -l)" -eq 1 ] \
         || die "logical gate check $op has no unique terminal result"
     if [ "$mode" = task ]; then
-        code_proof=$(latest_code_proof "$lot" "$task" "$attempt") \
-            || die "the task gate consumes no exact proved final code-review result"
+        if [ "$historical" = true ]; then
+            code_proof=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["data"]["code"])' "$result") \
+                || die "the historical task gate has no stored final code proof"
+            tree=$(git rev-parse "$commit^{tree}")
+            "$PROGRESS" construction-verdict-check historical-code \
+                "$lot" "$task" "$attempt" "$code_proof" "$tree" >/dev/null \
+                || die "the task gate consumes no exact historical final code-review result"
+        else
+            code_proof=$(latest_code_proof "$lot" "$task" "$attempt") \
+                || die "the task gate consumes no exact proved final code-review result"
+        fi
     fi
     python3 - "$JOURNAL" "$result" "$op" "$mode" "$lot" "$task" "$attempt" "$commit" "$GATE_SHA" "$REPO" "$GATE_REPORT" "$code_proof" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
@@ -380,6 +389,31 @@ if event.get("event") != "subagent-ended" or event.get("kind") != "gate-runner" 
         or "unusable" in (event.get("data") or {}):
     raise SystemExit("the selected gate result is not one accepted terminal")
 d = event["data"]
+events = [json.loads(raw) for raw in raw_lines]
+terminal_indexes = [index for index, candidate in enumerate(events) if candidate == event]
+if len(terminal_indexes) != 1:
+    raise SystemExit("the selected gate result has no unique historical terminal")
+active = None
+for candidate in events[:terminal_indexes[0]]:
+    if candidate.get("kind") != "gate-runner" or (candidate.get("data") or {}).get("op") != op:
+        continue
+    if candidate.get("event") == "subagent-started":
+        if active is not None:
+            raise SystemExit("the selected gate result has overlapping physical openings")
+        active = candidate["data"]
+    elif candidate.get("event") == "subagent-ended":
+        if active is None:
+            raise SystemExit("the selected gate result has a terminal without its opening")
+        active = None
+if active is None:
+    raise SystemExit("the selected gate result has no exact physical opening")
+identity = {
+    "op", "scope", "owner", "lot", "task", "attempt", "head", "base", "tree", "gate", "code",
+}
+if "execution" in d:
+    identity.add("execution")
+if set(active) != identity or any(active[key] != d[key] for key in identity):
+    raise SystemExit("the selected gate result changes its physical opening identity")
 required = {"op","scope","owner","lot","task","attempt","head","base","tree","gate","code",
             "green","surface","report","report_sha256","commands"}
 if set(d) not in (required, required | {"execution"}) \
@@ -485,7 +519,7 @@ raise SystemExit("current HEAD has no accepted green gate proof for the current 
 PY
     ) || die "current HEAD has no accepted green gate proof for the current gate.md"
     read -r op scope lot task attempt <<< "$fields"
-    validate_result "$op" "$scope" "$lot" "$task" "$attempt" "$head"
+    validate_result "$op" "$scope" "$lot" "$task" "$attempt" "$head" true
     printf '%s\n' "$op"
 }
 
@@ -520,7 +554,7 @@ print("task", d.get("owner"), matches[0]["lot"], matches[0]["task"], data["attem
 PY
 ) || die "gate operation $op is not an accepted proof for reviewed commit $commit"
     read -r scope owner lot task attempt <<< "$fields"
-    validate_result "$op" "$scope" "$lot" "$task" "$attempt" "$commit"
+    validate_result "$op" "$scope" "$lot" "$task" "$attempt" "$commit" true
     printf '%s\n' "$fields"
 }
 
@@ -543,7 +577,7 @@ if len(matches) != 1:
 print(matches[0])
 PY
 ) || die "cannot recover one exact final gate operation for $lot task $task attempt $attempt"
-    validate_result "$op" task "$lot" "$task" "$attempt" "$commit"
+    validate_result "$op" task "$lot" "$task" "$attempt" "$commit" true
     printf '%s\n' "$op"
 }
 
