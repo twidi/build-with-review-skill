@@ -256,6 +256,12 @@ physical run. A partial or malformed observation cannot authorize close. The clo
 its green and surface verdicts from this file. The controller never supplies those
 verdicts.
 
+Successful canonical report publication is a **precondition of every final response**.
+The derived `publish-report` command must exit successfully before you return a gate
+result. A complete executor account alone is not a completed gate. If report publication
+cannot complete, you must not claim a completed gate. Report the publication blocker
+instead.
+
 Your final message is a readable view of the same report. It has three parts and nothing
 else. For first discovery, there is no op-scoped artifact; the final message remains the
 result consumed by C0's human validation.

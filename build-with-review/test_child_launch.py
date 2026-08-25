@@ -185,6 +185,15 @@ def gate_runner_requires_the_exact_workspace_and_output_path():
               f"{subject} does not derive the exact gate-runner input")
         check("gate-check.sh publish-report <op>" in text,
               f"{subject} does not use mechanical report publication")
+    normalized_prompt = " ".join(prompt.lower().split())
+    check("precondition of every final response" in normalized_prompt,
+          "gate-runner.md does not make report publication a final-response precondition")
+    check("`publish-report` command must exit successfully" in normalized_prompt,
+          "gate-runner.md can finish before canonical report publication succeeds")
+    check("complete executor account alone is not a completed gate" in normalized_prompt,
+          "gate-runner.md can mistake executor completion for gate completion")
+    check("must not claim a completed gate" in normalized_prompt,
+          "gate-runner.md can claim completion after report publication fails")
     for subject, text in (("C0 launch", c0), ("final gate launch", final)):
         check("only this operation-specific input" in text,
               f"{subject} does not limit the launch message to the operation")
