@@ -3776,7 +3776,7 @@ def construction_domain_text(logical):
     return "diagnostic ran - once per task"
 
 
-def construction_domain_spends(entries, before, logical):
+def construction_raw_domain_spends(entries, before, logical):
     spends = [entry for entry in entries[:before] if entry.get("event") == "note"
               and entry.get("kind") == "bound.spent"
               and entry.get("lot") == logical["lot"] and entry.get("task") == logical["task"]
@@ -3786,6 +3786,111 @@ def construction_domain_spends(entries, before, logical):
     if any(note_data(entry) != logical for entry in spends):
         fail(f"the {logical['check']} logical spend has malformed durable identity")
     return spends
+
+
+def construction_spend_recoveries(entries, before, logical):
+    return [(index, entry) for index, entry in enumerate(entries[:before])
+            if entry.get("event") == "note"
+            and entry.get("kind") == "construction.spend.recovered"
+            and note_data(entry).get("check") == logical["check"]
+            and entry.get("lot") == logical["lot"]
+            and entry.get("task") == logical["task"]
+            and entry.get("attempt") == logical["attempt"]
+            and (logical["check"] == "diagnostic"
+                 or entry.get("round") == logical["round"])]
+
+
+def construction_spend_recovery_logical(data):
+    return {key: value for key, value in data.items() if key not in {
+        "schema", "physical_owner", "opening", "spends", "canonical_spend",
+    }}
+
+
+def construction_spend_recovery_account(entries, before, base, subject):
+    logical = construction_frozen_logical(entries, before, base, subject)
+    raw_spends = construction_raw_domain_spends(entries, before, logical)
+    if len(raw_spends) < 2:
+        fail(f"{subject} has no duplicate logical spends")
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if construction_event_matches(entry, logical, "subagent-started")]
+    paired = construction_physical_calls(
+        entries, before, logical, subject, require_closed=False,
+    )
+    if len(starts) != 1 or len(paired) != 1 or paired[0][1] is not None:
+        fail(f"{subject} has no one exact first open physical call")
+    opening_index, opening = starts[0]
+    spend_indexes = [index for index, entry in enumerate(entries[:before])
+                     if entry is not None and any(entry is spend for spend in raw_spends)]
+    if any(index <= opening_index for index in spend_indexes):
+        fail(f"{subject} has a logical spend outside its first physical bracket")
+    opening_context = {key: opening[key] for key in CONTEXT_FIELDS if key in opening}
+    expected_context = {
+        "mode": "construction", "lot": logical["lot"], "task": logical["task"],
+        "attempt": logical["attempt"],
+    }
+    if logical["check"] in CONSTRUCTION_CHECKERS:
+        expected_context["round"] = logical["round"]
+    if any(opening_context.get(key) != value for key, value in expected_context.items()) \
+            or "mandate" in opening_context \
+            or any({key: spend[key] for key in CONTEXT_FIELDS if key in spend}
+                   != opening_context for spend in raw_spends):
+        fail(f"{subject} changes its physical-call journal context")
+    physical_owner = opening.get("by")
+    if not isinstance(physical_owner, str) or not physical_owner \
+            or any(spend.get("by") != physical_owner for spend in raw_spends):
+        fail(f"{subject} changes its physical owner")
+    return {
+        **logical,
+        "schema": 1,
+        "physical_owner": physical_owner,
+        "opening": journal_line_proof(opening_index),
+        "spends": [journal_line_proof(index) for index in spend_indexes],
+        "canonical_spend": journal_line_proof(spend_indexes[0]),
+    }
+
+
+def validate_construction_spend_recovery_entry(entries, index, entry):
+    data = note_data(entry)
+    check = data.get("check")
+    base = {key: data.get(key) for key in ("check", "lot", "task", "attempt")}
+    if check in CONSTRUCTION_CHECKERS:
+        base["round"] = data.get("round")
+    elif check != "diagnostic":
+        fail("a durable logical-spend recovery has an unknown checker identity")
+    if entry.get("mode") != "construction" or entry.get("job") != "controller" \
+            or entry.get("lot") != base["lot"] or entry.get("task") != base["task"] \
+            or entry.get("attempt") != base["attempt"] \
+            or check in CONSTRUCTION_CHECKERS and entry.get("round") != base.get("round") \
+            or check == "diagnostic" and "round" in entry \
+            or "mandate" in entry or entry.get("text") is not None:
+        fail("a durable logical-spend recovery changes its journal context")
+    if construction_spend_recoveries(entries, index, data):
+        fail("a logical-spend identity has more than one recovery")
+    expected = construction_spend_recovery_account(
+        entries, index, base, "the durable logical-spend recovery",
+    )
+    if data != expected:
+        fail("a durable logical-spend recovery changes its complete authority", expected)
+
+
+def construction_domain_spends(entries, before, logical):
+    spends = construction_raw_domain_spends(entries, before, logical)
+    recoveries = construction_spend_recoveries(entries, before, logical)
+    if len(spends) <= 1:
+        if recoveries:
+            fail(f"the {logical['check']} logical spend has a recovery without duplicates")
+        return spends
+    if len(recoveries) != 1:
+        fail(f"the {logical['check']} logical spend has unowned duplicate events")
+    recovery_index, recovery = recoveries[0]
+    validate_construction_spend_recovery_entry(entries, recovery_index, recovery)
+    spend_indexes = [index for index, candidate in enumerate(entries[:before])
+                     if any(candidate is spend for spend in spends)]
+    spend_proofs = [journal_line_proof(index) for index in spend_indexes]
+    if note_data(recovery).get("spends") != spend_proofs \
+            or note_data(recovery).get("canonical_spend") != spend_proofs[0]:
+        fail(f"the {logical['check']} logical spend recovery omits a duplicate event")
+    return spends[:1]
 
 
 def construction_task_diagnostic_spends(entries, before, lot, task):
@@ -5904,6 +6009,13 @@ def validate_construction_verdict_history(entries):
             validate_construction_session_start(
                 entry, "the durable construction implementer start",
                 entries=entries, index=index,
+            )
+    for index, entry in enumerate(entries):
+        if entry.get("event") == "note" \
+                and entry.get("kind") == "construction.spend.recovered":
+            validate_construction_spend_recovery_entry(entries, index, entry)
+            construction_domain_spends(
+                entries, len(entries), construction_spend_recovery_logical(note_data(entry)),
             )
     for index, entry in enumerate(entries):
         if entry.get("event") != "note" or entry.get("kind") != "verdict.consumed":
@@ -8173,8 +8285,9 @@ def validate_conflict_partial(notes, kind, data, text):
             fail(f"{subject} settlement omits an opened answer", sorted(opened_ids - seen))
 
 
-def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None, context=None):
-    notes = journal_entries()
+def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None, context=None,
+                       notes=None):
+    notes = journal_entries() if notes is None else notes
     context = context or {}
     if kind == "attempt.launch.abandoned":
         fail("attempt.launch.abandoned is helper-owned; use construction-launch-abandoned")
@@ -8645,13 +8758,50 @@ def write_line(entry):
         print(f"**progress WARNING** · {recovery}")
 
 
-def append_event(by, event, **fields):
-    entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "by": by, "event": event}
+def write_validated_line(builder):
+    """Validate one semantic event against the exact locked append prefix."""
+    recovery = None
+    with open(JOURNAL_LOCK, "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fd = os.open(JOURNAL, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o666)
+        try:
+            append_start, recovery = _repair_incomplete_tail(fd)
+            entries = journal_entries()
+            entry = builder(entries)
+            payload = (
+                json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            try:
+                written = os.write(fd, payload)
+            except OSError:
+                os.ftruncate(fd, append_start)
+                raise
+            if written != len(payload):
+                os.ftruncate(fd, append_start)
+                raise OSError(
+                    f"short journal write: wrote {written} of {len(payload)} bytes"
+                )
+        finally:
+            os.close(fd)
+    if recovery:
+        print(f"**progress WARNING** · {recovery}")
+
+
+def event_entry(by, event, **fields):
+    entry = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "by": by,
+        "event": event,
+    }
     for key in LINE_FIELDS:
         value = fields.get(key)
-        if value is not None:  # absent, never null — the file is read by hand too
+        if value is not None:
             entry[key] = value
-    write_line(entry)
+    return entry
+
+
+def append_event(by, event, **fields):
+    write_line(event_entry(by, event, **fields))
 
 
 def refresh_dashboard():
@@ -9024,6 +9174,28 @@ def cmd_note(args):
         journal_entries(), data, context.get("round"),
     ):
         return
+    if args.kind == "bound.spent":
+        def build(entries):
+            locked_context = dict(context)
+            locked_data = validate_note_data(
+                args.kind, data, text, round_number=locked_context.get("round"),
+                mandate=locked_context.get("mandate"), context=locked_context,
+                notes=entries,
+            )
+            if isinstance(locked_data, dict) \
+                    and locked_data.get("check") in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
+                locked_context.update({key: locked_data[key]
+                                       for key in ("lot", "task", "attempt")})
+                if locked_data.get("check") == "diagnostic":
+                    locked_context.pop("round", None)
+            return event_entry(
+                me["session_id"], "note", kind=args.kind,
+                text=text if text is not None else None, data=locked_data,
+                **locked_context,
+            )
+
+        write_validated_line(build)
+        return
     data = validate_note_data(
         args.kind, data, text, round_number=context.get("round"),
         mandate=context.get("mandate"), context=context,
@@ -9042,6 +9214,49 @@ def cmd_note(args):
                  **context)
     if args.kind == "sweep.reported":
         remove_amendment_sweep_preflight(data, "sweep.reported", journaled=True)
+
+
+def cmd_construction_spend_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+    if caller.get("mode") != "construction" or caller.get("job") != "controller" \
+            or caller.get("lot") != args.lot:
+        fail("logical-spend recovery requires the exact Construction controller and lot")
+    if args.check in CONSTRUCTION_CHECKERS and args.round is None:
+        fail("checker logical-spend recovery requires its exact round")
+    if args.check == "diagnostic" and args.round is not None:
+        fail("diagnostic logical-spend recovery takes no round")
+    context = {
+        "mode": "construction", "lot": args.lot, "task": args.task,
+        "attempt": args.attempt, "job": "controller",
+    }
+    if args.round is not None:
+        context["round"] = args.round
+
+    def build(entries):
+        validate_construction_verdict_history(entries)
+        base = construction_logical_identity(
+            entries, context, args.check, args.round,
+            "the duplicate logical-spend recovery",
+        )
+        logical = construction_frozen_logical(
+            entries, len(entries), base, "the duplicate logical-spend recovery",
+        )
+        if construction_spend_recoveries(entries, len(entries), logical):
+            fail("this logical-spend identity already has its recovery")
+        data = construction_spend_recovery_account(
+            entries, len(entries), base, "the duplicate logical-spend recovery",
+        )
+        candidate = event_entry(
+            me["session_id"], "note", kind="construction.spend.recovered",
+            data=data, **context,
+        )
+        validate_construction_spend_recovery_entry(
+            [*entries, candidate], len(entries), candidate,
+        )
+        return candidate
+
+    write_validated_line(build)
 
 
 def cmd_spec_close_check(args):
@@ -9442,6 +9657,14 @@ def build_parser():
     sp.add_argument("task", type=positive_int)
     sp.add_argument("attempt", type=positive_int)
     sp.set_defaults(func=cmd_construction_launch_check)
+
+    sp = sub.add_parser("construction-spend-recover", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("attempt", type=positive_int)
+    sp.add_argument("check", choices=(*CONSTRUCTION_CHECKERS, "diagnostic"))
+    sp.add_argument("round", nargs="?", type=positive_int)
+    sp.set_defaults(func=cmd_construction_spend_recover)
 
     sp = sub.add_parser("session-status", help="change a session's bwr.status, and record it")
     sp.add_argument("session_id")

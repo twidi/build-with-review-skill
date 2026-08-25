@@ -17,6 +17,7 @@ instance and no file of this repository is ever touched.
 import hashlib
 import importlib.util
 import json
+import fcntl
 import multiprocessing
 import os
 import re
@@ -25,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -3701,6 +3703,162 @@ def code_checker_regenerates_under_one_logical_spend():
     proof = run_progress("construction-verdict-check", "code", "lot-1", "3", "2")
     check(proof.returncode == 0 and re.fullmatch(r"[0-9]+:[0-9a-f]{64}\n", proof.stdout),
           proof.stdout + proof.stderr)
+
+
+@test
+def construction_logical_spend_append_is_atomic():
+    seed_active_attempt()
+    opened = run_progress("subagent-started", "design-checker", "--round", "1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+
+    command = [
+        sys.executable, SCRIPT, "note", "bound.spent", "--round", "1",
+        "--text", "design checker round 1 of 10",
+    ]
+    lock_path = os.path.join(WORKSPACE, "progress.jsonl.lock")
+    with open(lock_path, "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        processes = [subprocess.Popen(command, env=ENV, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            waiting = []
+            for process in processes:
+                try:
+                    with open(f"/proc/{process.pid}/wchan", encoding="utf-8") as source:
+                        waiting.append("lock" in source.read())
+                except OSError:
+                    waiting.append(False)
+            if waiting == [True, True]:
+                break
+            time.sleep(0.01)
+        check(waiting == [True, True], "both logical spends did not reach the journal lock")
+        fcntl.flock(lock, fcntl.LOCK_UN)
+
+    results = [process.communicate(timeout=30) + (process.returncode,) for process in processes]
+    check(sorted(result[2] for result in results) == [0, 1], results)
+    check(any("already exists" in result[0] for result in results if result[2] != 0), results)
+    spends = [entry for entry in journal_lines() if entry.get("kind") == "bound.spent"]
+    check(len(spends) == 1, "concurrent logical-spend admission appended a duplicate")
+
+
+@test
+def construction_duplicate_logical_spend_recovers_the_open_physical_result():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    before = len(journal_lines())
+    refused_after(
+        run_progress(
+            "construction-spend-recover", "lot-1", "3", "2", "design", "1",
+        ),
+        before, "logical-spend recovery without a duplicate",
+    )
+    entries = journal_lines()
+    spend = next(entry for entry in entries if entry.get("kind") == "bound.spent")
+    duplicate = json.loads(json.dumps(spend))
+    duplicate["ts"] = "duplicate"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+
+    before = len(journal_lines())
+    blocked = run_progress(
+        "subagent-ended", "design-checker", "--round", "1",
+        "--data", json.dumps({"result": write_design_result(
+            "duplicate-spend-result.json", design_result_payload(opening),
+        )}),
+    )
+    refused_after(blocked, before, "a physical result before duplicate-spend recovery")
+
+    recovered = run_progress(
+        "construction-spend-recover", "lot-1", "3", "2", "design", "1",
+    )
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    recovery = journal_lines()[-1]
+    check(recovery.get("kind") == "construction.spend.recovered", recovery)
+    check(len(recovery["data"]["spends"]) == 2, recovery)
+
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--round", "1",
+        "--data", json.dumps({"result": os.path.join(
+            BASE, "duplicate-spend-result.json",
+        )}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    verdict = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"design","outcome":"clean"}',
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    before = len(journal_lines())
+    duplicate_recovery = run_progress(
+        "construction-spend-recover", "lot-1", "3", "2", "design", "1",
+    )
+    refused_after(duplicate_recovery, before, "a duplicate spend recovery")
+
+    journal = journal_lines()
+    recovery = next(entry for entry in journal
+                    if entry.get("kind") == "construction.spend.recovered")
+    recovery["data"]["spends"][0] = recovery["data"]["spends"][1]
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    damaged = run_progress("construction-verdict-check", "history")
+    check(damaged.returncode != 0, "changed duplicate-spend authority passed historical replay")
+
+
+@test
+def construction_duplicate_logical_spend_recovery_rejects_a_foreign_owner():
+    seed_active_attempt()
+    open_design_round(1)
+    spend = next(entry for entry in journal_lines() if entry.get("kind") == "bound.spent")
+    duplicate = json.loads(json.dumps(spend))
+    duplicate["ts"] = "duplicate"
+    duplicate["by"] = "foreign-physical-owner"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+    before = len(journal_lines())
+    refused_after(
+        run_progress(
+            "construction-spend-recover", "lot-1", "3", "2", "design", "1",
+        ),
+        before, "duplicate-spend recovery across physical owners",
+    )
+    journal = journal_lines()
+    journal[-1]["by"] = spend["by"]
+    journal[-1]["data"]["contract_sha256"] = "f" * 64
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in journal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_after(
+        run_progress(
+            "construction-spend-recover", "lot-1", "3", "2", "design", "1",
+        ),
+        before, "duplicate-spend recovery across logical identities",
+    )
+
+
+@test
+def construction_duplicate_logical_spend_recovery_rejects_a_late_duplicate():
+    seed_active_attempt()
+    open_design_round(1)
+    spend = next(entry for entry in journal_lines() if entry.get("kind") == "bound.spent")
+    duplicate = json.loads(json.dumps(spend))
+    duplicate["ts"] = "duplicate-before-recovery"
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+    recovered = run_progress(
+        "construction-spend-recover", "lot-1", "3", "2", "design", "1",
+    )
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    duplicate["ts"] = "duplicate-after-recovery"
+    with open(journal_path, "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode != 0, "a post-recovery duplicate spend passed historical replay")
 
 
 @test
