@@ -27,6 +27,7 @@ happen. `notes` prints the notes back, and writes nothing.
 The rules for calling this script are in progress-rules.md, next to it.
 """
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -145,6 +146,7 @@ WORKSPACE = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 JOURNAL = os.path.join(WORKSPACE, "progress.jsonl")
 JOURNAL_LOCK = f"{JOURNAL}.lock"
 AMENDMENT_SWEEP_PREFLIGHT = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
+BARE_STOP_MARKER = os.path.join(WORKSPACE, "bare-stop-in-progress")
 DASHBOARD_DIR = os.path.join(WORKSPACE, "dashboard")
 DASHBOARD_COPY = os.path.join(DASHBOARD_DIR, "data", "progress.jsonl")
 GATE_CHECK = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
@@ -6578,12 +6580,397 @@ PASS_OPENING_KEYS = {
     "built", "commit", "gate", "source_scope", "source_owner",
     "source_lot", "source_task", "source_attempt",
 }
+PASS_OPENING_RECOVERY_KEYS = {
+    "schema", "opening", "owner", "built", "commit", "gate", "from", "to", "stop",
+}
+
+
+def pass_opening_context(data, mode):
+    return {"mode": mode, "lot": data["built"], "job": "controller"}
+
+
+def validate_pass_opening_context(entries, opening_index, before, subject):
+    opening = entries[opening_index]
+    data = note_data(opening)
+    expected = pass_opening_context(data, "product-review")
+    actual = {key: opening[key] for key in CONTEXT_FIELDS if key in opening}
+    recoveries = [
+        (index, entry) for index, entry in enumerate(entries[opening_index + 1:before],
+                                                       opening_index + 1)
+        if entry.get("kind") == "pass.opening.context.recovered"
+    ]
+    if actual == expected:
+        if recoveries:
+            fail(f"{subject} has an unexpected pass-opening context recovery")
+        return
+
+    legacy = pass_opening_context(data, "construction")
+    if actual != legacy:
+        fail(f"{subject} has no exact PRODUCT REVIEW controller context", actual)
+    if not isinstance(opening.get("by"), str) or not opening["by"]:
+        fail(f"{subject} has no exact physical controller owner")
+
+    proof = journal_line_proof(opening_index)
+    if len(recoveries) != 1:
+        fail(f"{subject} has no one exact pass-opening context recovery",
+             f"found {len(recoveries)}")
+    recovery_index, recovery = recoveries[0]
+    stop_state = pass_opening_stop_suffix(
+        entries, opening_index + 1, recovery_index, subject,
+    )
+    if stop_state["phase"] not in {"active", "resumed"}:
+        fail(f"{subject}'s pass-opening context recovery crosses a current run stop")
+    recovery_data = note_data(recovery)
+    expected_data = {
+        "schema": 1,
+        "opening": proof,
+        "owner": opening["by"],
+        "built": data["built"],
+        "commit": data["commit"],
+        "gate": data["gate"],
+        "from": legacy,
+        "to": expected,
+        "stop": pass_opening_stop_account(stop_state),
+    }
+    recovery_context = {key: recovery[key] for key in CONTEXT_FIELDS if key in recovery}
+    if recovery.get("event") != "note" \
+            or recovery.get("by") != opening["by"] \
+            or set(recovery_data) != PASS_OPENING_RECOVERY_KEYS \
+            or recovery_data != expected_data \
+            or recovery_context != expected:
+        fail(f"{subject} has a malformed pass-opening context recovery", recovery_data)
 
 
 def pass_closes(entries, opening_index, before):
     return [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:before], opening_index + 1
     ) if entry.get("kind") == "pass.closed"]
+
+
+def pass_opening_stop_suffix(entries, start, before, subject):
+    opening = entries[start - 1]
+    opening_data = note_data(opening)
+    owner = opening.get("by")
+    expected_context = pass_opening_context(opening_data, "product-review")
+    state = {
+        "phase": "active", "mode": None, "op": None, "pending": {},
+        "terminal": None, "retirements": [], "report": None, "resumed": None,
+        "cleanup": None,
+    }
+    with open(JOURNAL, "rb") as source:
+        durable_lines = source.read().splitlines()
+
+    def proof(index, entry):
+        encoded = json.dumps(
+            entry, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        if index < len(durable_lines):
+            payload = durable_lines[index]
+            if payload != encoded:
+                fail(f"{subject} changes a stop-owned durable journal event",
+                     f"progress.jsonl line {index + 1}")
+        elif index == len(durable_lines):
+            payload = encoded
+        else:
+            fail(f"{subject} names a journal proof beyond its append boundary", index)
+        return f"{index}:{hashlib.sha256(payload).hexdigest()}"
+
+    def context(entry):
+        return {key: entry[key] for key in CONTEXT_FIELDS if key in entry}
+
+    def controller_event(entry):
+        return entry.get("by") == owner and context(entry) == expected_context
+
+    def active_sessions(at):
+        starts = {}
+        retired = set()
+        for index, entry in enumerate(entries[:at]):
+            event, session = entry.get("event"), entry.get("session")
+            if event == "session-started":
+                if not isinstance(session, str) or not session or session in starts:
+                    fail(f"{subject} has a malformed physical-session history",
+                         f"progress.jsonl line {index + 1}")
+                starts[session] = entry
+            elif event == "session-retired" and session in starts:
+                if session in retired:
+                    fail(f"{subject} has duplicate physical-session retirement",
+                         f"progress.jsonl line {index + 1}")
+                retired.add(session)
+        return {session: entry for session, entry in starts.items()
+                if session not in retired}
+
+    def exact_helper_stop(entry):
+        data = note_data(entry)
+        return entry.get("event") == "note" \
+            and entry.get("kind") in {"paused", "aborted"} \
+            and controller_event(entry) \
+            and set(data) == {"sha", "op"} \
+            and isinstance(data["sha"], str) \
+            and re.fullmatch(r"[0-9a-f]{40,64}", data["sha"]) \
+            and isinstance(data["op"], str) \
+            and re.fullmatch(r"[0-9a-f]{64}", data["op"]) \
+            and isinstance(entry.get("text"), str) and bool(entry["text"])
+
+    def exact_retirement(entry, started):
+        session = entry.get("session")
+        started_context = context(started)
+        watchdog = started_context.get("job") == "watchdog"
+        allowed_statuses = {"done"} if watchdog else {"done", "cancelled"}
+        return entry.get("event") == "session-retired" \
+            and entry.get("by") == owner \
+            and context(entry) == started_context \
+            and entry.get("status") in allowed_statuses \
+            and entry.get("archived") is True \
+            and entry.get("hidden") is True \
+            and "kind" not in entry and "text" not in entry and "data" not in entry \
+            and isinstance(session, str)
+
+    def exact_controller_report(entry):
+        return entry.get("event") == "note" \
+            and entry.get("kind") == state["mode"] \
+            and controller_event(entry) \
+            and "data" not in entry \
+            and isinstance(entry.get("text"), str) and bool(entry["text"])
+
+    def exact_resume(entry):
+        return entry.get("event") == "note" and entry.get("kind") == "resumed" \
+            and controller_event(entry) and "data" not in entry and "text" not in entry
+
+    def abort_account():
+        return {
+            "opening": proof(start - 1, opening),
+            "owner": owner,
+            "mode": "aborted",
+            "op": state["op"],
+            "terminal": state["terminal"],
+            "retirements": state["retirements"],
+            "report": state["report"],
+        }
+
+    def exact_cleanup(entry):
+        return entry.get("event") == "note" \
+            and entry.get("kind") == "cleanup.started" \
+            and controller_event(entry) \
+            and note_data(entry) == {
+                "schema": 1,
+                "reason": "aborted", "scope": "whole-run", "choice": "clean",
+                "abort": abort_account(),
+            } \
+            and "text" not in entry
+
+    for index, entry in enumerate(entries[start:before], start):
+        phase = state["phase"]
+        if phase == "active" and exact_helper_stop(entry):
+            mode = entry["kind"]
+            pending = active_sessions(index)
+            watchdogs = [session for session, started in pending.items()
+                         if context(started).get("job") == "watchdog"]
+            if len(watchdogs) != 1:
+                fail(f"{subject} has no one exact active watchdog at its stop boundary",
+                     f"found {len(watchdogs)}")
+            state = {
+                "phase": "retirements" if pending else "controller-report",
+                "mode": mode,
+                "op": note_data(entry)["op"],
+                "pending": pending,
+                "terminal": proof(index, entry),
+                "retirements": [],
+                "report": None,
+                "resumed": None,
+                "cleanup": None,
+            }
+        elif phase == "retirements":
+            session = entry.get("session")
+            started = state["pending"].get(session)
+            if started is None or not exact_retirement(entry, started):
+                fail(f"{subject} has a foreign or malformed stop-owned retirement",
+                     f"progress.jsonl line {index + 1}")
+            if context(started).get("job") == "watchdog" \
+                    and any(context(candidate).get("job") != "watchdog"
+                            for candidate in state["pending"].values()):
+                fail(f"{subject} retires its watchdog before another stopped child",
+                     f"progress.jsonl line {index + 1}")
+            state["pending"] = dict(state["pending"])
+            state["pending"].pop(session)
+            state["retirements"] = [*state["retirements"], proof(index, entry)]
+            if not state["pending"]:
+                state["phase"] = "controller-report"
+        elif phase == "controller-report" and exact_controller_report(entry):
+            state["phase"] = "pause-reported" \
+                if state["mode"] == "paused" else "aborted"
+            state["report"] = proof(index, entry)
+        elif phase == "pause-reported" and exact_resume(entry):
+            state["phase"] = "resumed"
+            state["resumed"] = proof(index, entry)
+        elif phase == "aborted" and exact_cleanup(entry):
+            state["phase"] = "cleanup"
+            state["cleanup"] = proof(index, entry)
+        else:
+            fail(f"{subject} has an event outside its exact stop-owned suffix",
+                 f"progress.jsonl line {index + 1}")
+    return state
+
+
+def pass_opening_cleanup_account(entries, opening_index, before, subject):
+    opening = entries[opening_index]
+    state = pass_opening_stop_suffix(entries, opening_index + 1, before, subject)
+    if state["phase"] != "cleanup" or state["mode"] != "aborted" \
+            or state["pending"] or state["report"] is None \
+            or state["cleanup"] is None or state["resumed"] is not None:
+        fail(f"{subject} has no exact completed abort and whole-run cleanup account")
+    abort = {
+        "opening": journal_line_proof(opening_index),
+        "owner": opening["by"],
+        "mode": "aborted",
+        "op": state["op"],
+        "terminal": state["terminal"],
+        "retirements": state["retirements"],
+        "report": state["report"],
+    }
+    return {
+        "schema": 1,
+        "reason": "aborted", "scope": "whole-run", "choice": "clean",
+        "abort": abort,
+        "cleanup": state["cleanup"],
+    }
+
+
+def pass_opening_cleanup_data(entries, owner, supplied, subject):
+    expected_input = {"reason": "aborted", "scope": "whole-run", "choice": "clean"}
+    if supplied != expected_input or owner["stop"]["phase"] != "aborted":
+        fail(f"{subject} has no exact completed abort cleanup request", supplied)
+    state = owner["stop"]
+    opening_index = owner["opening_index"]
+    opening = owner["opening"]
+    return {
+        "schema": 1,
+        **expected_input,
+        "abort": {
+            "opening": journal_line_proof(opening_index),
+            "owner": opening["by"],
+            "mode": "aborted",
+            "op": state["op"],
+            "terminal": state["terminal"],
+            "retirements": state["retirements"],
+            "report": state["report"],
+        },
+    }
+
+
+def pass_opening_stop_account(state):
+    if state["phase"] == "active":
+        return None
+    if state["phase"] != "resumed" or state["mode"] != "paused" \
+            or state["pending"] or state["report"] is None or state["resumed"] is None:
+        fail("the pass-opening context recovery has no complete pause/resume account")
+    return {
+        "mode": "paused",
+        "op": state["op"],
+        "terminal": state["terminal"],
+        "retirements": state["retirements"],
+        "report": state["report"],
+        "resumed": state["resumed"],
+    }
+
+
+def validate_pass_opening_bare_stop_marker(entry, subject):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(BARE_STOP_MARKER, flags)
+    except OSError as exc:
+        fail(f"{subject} has no exact physical bare-stop owner", exc)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            fail(f"{subject}'s bare-stop owner is not one regular file")
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None
+            payload = source.read()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{subject}'s bare-stop owner is not valid UTF-8", exc)
+    lines = text.splitlines()
+    data = note_data(entry)
+    mode = {"paused": "pause", "aborted": "abort"}.get(entry.get("kind"))
+    call_prefix = f"call prompts/common/stop.sh {mode}"
+    valid_call = lines[3] == call_prefix if len(lines) == 6 else False
+    if mode == "abort" and len(lines) == 6:
+        valid_call = valid_call or lines[3].startswith(f"{call_prefix} ")
+    if not payload.endswith(b"\n") or len(lines) != 6 \
+            or lines[0] != f"op {data.get('op')}" \
+            or lines[1] != f"mode {mode}" \
+            or not re.fullmatch(r"hash [0-9a-f]{64}", lines[2]) \
+            or not valid_call \
+            or lines[4] != f"phase tree-settled {data.get('sha')}" \
+            or not lines[5].startswith("report "):
+        fail(f"{subject} does not match its exact physical bare-stop owner")
+    encoded = lines[5][len("report "):]
+    try:
+        report = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, UnicodeError) as exc:
+        fail(f"{subject}'s bare-stop owner has a malformed report", exc)
+    if base64.b64encode(report.encode("utf-8")).decode("ascii") != encoded \
+            or report != entry.get("text"):
+        fail(f"{subject} changes its physical bare-stop report")
+
+
+def pending_malformed_pass_opening(entries, before, subject):
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "pass.opened"]
+    if not openings:
+        return None
+    opening_index, opening = openings[-1]
+    if pass_closes(entries, opening_index, before):
+        return None
+    data = note_data(opening)
+    if set(data) != PASS_OPENING_KEYS:
+        return None
+    actual = {key: opening[key] for key in CONTEXT_FIELDS if key in opening}
+    if actual == pass_opening_context(data, "product-review"):
+        return None
+    if actual != pass_opening_context(data, "construction") \
+            or not isinstance(opening.get("by"), str) or not opening["by"]:
+        return None
+    recoveries = [entry for entry in entries[opening_index + 1:before]
+                  if entry.get("kind") == "pass.opening.context.recovered"]
+    if recoveries:
+        validate_pass_opening_context(entries, opening_index, before, subject)
+        return None
+    return {
+        "opening_index": opening_index,
+        "opening": opening,
+        "data": data,
+        "stop": pass_opening_stop_suffix(
+            entries, opening_index + 1, before, subject,
+        ),
+    }
+
+
+def validate_pending_pass_opening_append(entries, candidate, subject):
+    owner = pending_malformed_pass_opening(entries, len(entries), subject)
+    if owner is None:
+        return
+    kind = candidate.get("kind")
+    event = candidate.get("event")
+    state = owner["stop"]
+    phase = state["phase"]
+    if event == "note" and kind == "pass.opening.context.recovered" \
+            and phase in {"active", "resumed"}:
+        return
+    if phase in {
+        "active", "retirements", "controller-report", "pause-reported", "aborted",
+    }:
+        if phase == "active" and event == "note" and kind in {"paused", "aborted"}:
+            validate_pass_opening_bare_stop_marker(candidate, subject)
+        pass_opening_stop_suffix(
+            [*entries, candidate], owner["opening_index"] + 1, len(entries) + 1,
+            subject,
+        )
+        return
+    fail(f"{subject} is blocked by the pending PRODUCT REVIEW opening-context recovery")
 
 
 def exact_pass_gate_result(entries, before, data, subject):
@@ -6852,7 +7239,9 @@ def validate_pass_opening_history(entries, opening_index, subject, *, validate_o
     return data
 
 
-def current_pass_opening(entries, before, subject, *, validate_origin=True):
+def current_pass_opening(
+    entries, before, subject, *, validate_origin=True, validate_context=False,
+):
     openings = [(index, entry) for index, entry in enumerate(entries[:before])
                 if entry.get("kind") == "pass.opened"]
     if not openings:
@@ -6861,10 +7250,16 @@ def current_pass_opening(entries, before, subject, *, validate_origin=True):
     data = validate_pass_opening_history(
         entries, opening_index, subject, validate_origin=validate_origin,
     )
+    has_recovery = any(
+        entry.get("kind") == "pass.opening.context.recovered"
+        for entry in entries[opening_index + 1:before]
+    )
+    if validate_context or has_recovery:
+        validate_pass_opening_context(entries, opening_index, before, subject)
     return opening_index, opening, data["built"], data["commit"]
 
 
-def normalize_pass_opened(data):
+def normalize_pass_opened(data, context):
     """A pass consumes one exact task success or amendment-owned successor."""
     if not isinstance(data, dict) or set(data) != {"built", "commit", "gate"}:
         fail("pass.opened must name one built lot, reviewed commit and accepted gate operation", data)
@@ -6875,6 +7270,10 @@ def normalize_pass_opened(data):
         fail("pass.opened has an invalid reviewed commit", commit)
     if not isinstance(gate, str) or not re.fullmatch(r"[0-9a-f]{64}", gate):
         fail("pass.opened has an invalid gate operation", gate)
+    expected_context = pass_opening_context(data, "product-review")
+    if {key: context[key] for key in CONTEXT_FIELDS if key in context} != expected_context:
+        fail("pass.opened requires the exact PRODUCT REVIEW controller context",
+             {key: context[key] for key in CONTEXT_FIELDS if key in context})
     entries = journal_entries()
     prior = [(index, entry) for index, entry in enumerate(entries)
              if entry.get("kind") == "pass.opened"]
@@ -6897,7 +7296,9 @@ def normalize_pass_opened(data):
         **data, "source_scope": scope, "source_owner": owner,
         "source_lot": source_lot, "source_task": task, "source_attempt": attempt,
     }
-    candidate = {"event": "note", "kind": "pass.opened", "data": normalized}
+    candidate = {
+        "event": "note", "kind": "pass.opened", "data": normalized, **expected_context,
+    }
     validate_pass_opening_history(entries + [candidate], len(entries), "the new product-review pass")
     return normalized
 
@@ -7042,7 +7443,7 @@ def normalize_product_report(entries, data, mandate):
     ):
         fail("a product-review receipt must carry exactly four typed finding counts", data)
     opening_index, opening, built, _ = current_pass_opening(
-        entries, len(entries), "the new product-review receipt",
+        entries, len(entries), "the new product-review receipt", validate_context=True,
     )
     if pass_closes(entries, opening_index, len(entries)):
         fail("a product-review receipt cannot enter a closed pass")
@@ -7763,6 +8164,7 @@ def validate_pass_close(
     before = len(entries)
     opening_index, opening, built, _ = current_pass_opening(
         entries, before, subject, validate_origin=validate_origin,
+        validate_context=validate_current_gate,
     )
     if any(entry.get("kind") == "pass.closed" for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s current pass is already closed")
@@ -7819,6 +8221,7 @@ def current_pass_close(
 ):
     opening_index, opening, built, _ = current_pass_opening(
         entries, len(entries), subject, validate_origin=validate_origin,
+        validate_context=validate_current_gate,
     )
     closes = [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:], opening_index + 1
@@ -8670,7 +9073,7 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         )
 
     if kind == "pass.opened":
-        data = normalize_pass_opened(data or {})
+        data = normalize_pass_opened(data or {}, context)
 
     if kind == "pass.closed":
         validate_pass_close(journal_entries(), data or {}, "a product-review pass close")
@@ -8733,29 +9136,7 @@ def repair_journal_tail():
 
 
 def write_line(entry):
-    payload = (json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-    # The lock makes tail recovery, one append, and a short-write rollback one
-    # operation. O_APPEND keeps the final write at EOF. A successful return
-    # therefore means that one complete newline-terminated line landed.
-    with open(JOURNAL_LOCK, "a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        fd = os.open(JOURNAL, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o666)
-        try:
-            append_start, recovery = _repair_incomplete_tail(fd)
-            try:
-                written = os.write(fd, payload)
-            except OSError:
-                os.ftruncate(fd, append_start)
-                raise
-            if written != len(payload):
-                os.ftruncate(fd, append_start)
-                raise OSError(
-                    f"short journal write: wrote {written} of {len(payload)} bytes"
-                )
-        finally:
-            os.close(fd)
-    if recovery:
-        print(f"**progress WARNING** · {recovery}")
+    write_validated_line(lambda _entries: entry)
 
 
 def write_validated_line(builder):
@@ -8768,6 +9149,9 @@ def write_validated_line(builder):
             append_start, recovery = _repair_incomplete_tail(fd)
             entries = journal_entries()
             entry = builder(entries)
+            validate_pending_pass_opening_append(
+                entries, entry, "the journal append",
+            )
             payload = (
                 json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
             ).encode("utf-8")
@@ -8835,6 +9219,17 @@ def cmd_session_started(args):
     target = created_session(args.session_id)
     context = context_of(target)
     data = None
+    if context.get("mode") == "product-review" and context.get("job") == "reviewer":
+        entries = journal_entries()
+        _, _, built, _ = current_pass_opening(
+            entries, len(entries), "the product-review reviewer start",
+            validate_context=True,
+        )
+        caller = caller_context(me)
+        expected_caller = {"mode": "product-review", "lot": built, "job": "controller"}
+        if context.get("lot") != built \
+                or {key: caller[key] for key in CONTEXT_FIELDS if key in caller} != expected_caller:
+            fail("the product-review reviewer start has no exact current pass controller")
     if context.get("mode") == "construction" and context.get("job") == "implementer":
         entries = journal_entries()
         validate_construction_launch_candidate(
@@ -8911,11 +9306,25 @@ def cmd_session_status(args):
         fail(f"unknown status `{args.status}`", "Statuses: " + " · ".join(STATUSES))
     me = whoami()
     target = run(["session", args.session_id])
-    # The act and its record in one call: run() exits loudly on failure, so a
-    # status that did not change is a line that never gets written.
-    run(["update-session", args.session_id, "annotations", f"set:bwr.status={args.status}"])
-    append_event(me["session_id"], "session-status",
-                 session=args.session_id, status=args.status, **context_of(target))
+    context = context_of(target)
+
+    def build(entries):
+        candidate = event_entry(
+            me["session_id"], "session-status",
+            session=args.session_id, status=args.status, **context,
+        )
+        validate_pending_pass_opening_append(
+            entries, candidate, "the session status change",
+        )
+        # The act and its record share the journal transaction. A refused
+        # pending owner therefore changes no external session state.
+        run([
+            "update-session", args.session_id, "annotations",
+            f"set:bwr.status={args.status}",
+        ])
+        return candidate
+
+    write_validated_line(build)
 
 
 def cmd_session_retired(args):
@@ -8926,47 +9335,60 @@ def cmd_session_retired(args):
     me = whoami()
     target = run(["session", args.session_id])
     target_context = context_of(target)
-    reach_preflight = None
-    if target_context.get("mode") == "amendment" \
-            and target_context.get("mandate") == "reach" and args.status == "done":
-        sweep = target_context.get("round")
-        if not isinstance(sweep, int) or isinstance(sweep, bool) or sweep < 1:
-            fail("the Reach reviewer retirement has no exact sweep identity")
-        entries = journal_entries()
-        reach_preflight = amendment_sweep_preflight(
-            entries, sweep, "the Reach reviewer retirement",
+    result = {"reach_preflight": None, "failed_step": None}
+
+    def build(entries):
+        if target_context.get("mode") == "amendment" \
+                and target_context.get("mandate") == "reach" and args.status == "done":
+            sweep = target_context.get("round")
+            if not isinstance(sweep, int) or isinstance(sweep, bool) or sweep < 1:
+                fail("the Reach reviewer retirement has no exact sweep identity")
+            result["reach_preflight"] = amendment_sweep_preflight(
+                entries, sweep, "the Reach reviewer retirement",
+            )
+            frozen = read_amendment_sweep_preflight("the Reach reviewer retirement")
+            if frozen != result["reach_preflight"] or frozen["session"] != args.session_id:
+                fail("the Reach reviewer retirement does not consume its exact preflight")
+
+        provisional = event_entry(
+            me["session_id"], "session-retired",
+            session=args.session_id, status=args.status,
+            archived=True if args.archive else None,
+            hidden=True if args.hide else None,
+            **target_context,
         )
-        frozen = read_amendment_sweep_preflight("the Reach reviewer retirement")
-        if frozen != reach_preflight or frozen["session"] != args.session_id:
-            fail("the Reach reviewer retirement does not consume its exact preflight")
-
-    ok, detail = attempt(["update-session", args.session_id, "annotations",
-                          f"set:bwr.status={args.status}"])
-    if not ok:
-        fail("the status change failed, so the retirement did not happen", detail)
-
-    # Status, then archive, then hide — hiding first silences the broadcasts
-    # that carry the archive to the UI. The chain stops at the first failure
-    # for the same reason: a hidden-but-not-archived session is exactly the
-    # state the order exists to prevent.
-    outcome = {}
-    failed_step = None
-    for step, wanted, key in (("archive", args.archive, "archived"),
-                              ("hide", args.hide, "hidden")):
-        if not wanted:
-            continue
-        if failed_step:
-            outcome[key] = False  # not attempted — so it did not happen
-            continue
-        ok, detail = attempt(["update-session", args.session_id, step])
-        outcome[key] = ok
+        validate_pending_pass_opening_append(
+            entries, provisional, "the session retirement",
+        )
+        ok, detail = attempt([
+            "update-session", args.session_id, "annotations",
+            f"set:bwr.status={args.status}",
+        ])
         if not ok:
-            failed_step = (step, detail)
+            fail("the status change failed, so the retirement did not happen", detail)
 
-    append_event(me["session_id"], "session-retired",
-                 session=args.session_id, status=args.status,
-                 archived=outcome.get("archived"), hidden=outcome.get("hidden"),
-                 **target_context)
+        # Status, then archive, then hide. The journal lock retains the
+        # preflight owner until this complete external sequence is recorded.
+        outcome = {}
+        for step, wanted, key in (("archive", args.archive, "archived"),
+                                  ("hide", args.hide, "hidden")):
+            if not wanted:
+                continue
+            if result["failed_step"]:
+                outcome[key] = False
+                continue
+            ok, detail = attempt(["update-session", args.session_id, step])
+            outcome[key] = ok
+            if not ok:
+                result["failed_step"] = (step, detail)
+        return event_entry(
+            me["session_id"], "session-retired",
+            session=args.session_id, status=args.status,
+            archived=outcome.get("archived"), hidden=outcome.get("hidden"),
+            **target_context,
+        )
+
+    write_validated_line(build)
     if target_context.get("mode") == "amendment" \
             and target_context.get("mandate") == "reach" and args.status != "done":
         frozen = read_amendment_sweep_preflight(
@@ -8974,9 +9396,9 @@ def cmd_session_retired(args):
         )
         if frozen is not None and frozen.get("session") == args.session_id:
             remove_amendment_sweep_preflight(frozen, "the non-successful Reach retirement")
-    if failed_step:
+    if result["failed_step"]:
         refresh_dashboard()  # the line above must reach the dashboard before we exit
-        step, detail = failed_step
+        step, detail = result["failed_step"]
         fail(f"`{step}` failed after the status change", detail, journaled=True)
 
 
@@ -9174,6 +9596,27 @@ def cmd_note(args):
         journal_entries(), data, context.get("round"),
     ):
         return
+    if args.kind == "cleanup.started":
+        def build(entries):
+            locked_data = validate_note_data(
+                args.kind, data, text, round_number=context.get("round"),
+                mandate=context.get("mandate"), context=context, notes=entries,
+            )
+            owner = pending_malformed_pass_opening(
+                entries, len(entries), "the whole-run cleanup append",
+            )
+            if owner is not None:
+                locked_data = pass_opening_cleanup_data(
+                    entries, owner, locked_data, "the whole-run cleanup append",
+                )
+            return event_entry(
+                me["session_id"], "note", kind=args.kind,
+                text=text if text is not None else None, data=locked_data,
+                **context,
+            )
+
+        write_validated_line(build)
+        return
     if args.kind == "bound.spent":
         def build(entries):
             locked_context = dict(context)
@@ -9257,6 +9700,79 @@ def cmd_construction_spend_recover(args):
         return candidate
 
     write_validated_line(build)
+
+
+def cmd_pass_opening_context_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+    expected_caller = {
+        "mode": "product-review", "lot": caller.get("lot"), "job": "controller",
+    }
+    if {key: caller[key] for key in CONTEXT_FIELDS if key in caller} != expected_caller \
+            or not isinstance(caller.get("lot"), str):
+        fail("pass-opening recovery requires the exact PRODUCT REVIEW controller context")
+
+    def build(entries):
+        owner = pending_malformed_pass_opening(
+            entries, len(entries), "the pass-opening recovery",
+        )
+        if owner is None:
+            fail("pass-opening recovery has no durable pass.opened boundary")
+        opening_index, opening, data = (
+            owner["opening_index"], owner["opening"], owner["data"]
+        )
+        if owner["stop"]["phase"] not in {"active", "resumed"}:
+            fail("pass-opening recovery cannot cross a current run stop")
+        if opening.get("by") != me["session_id"]:
+            fail("pass-opening recovery requires the original physical controller owner")
+        if data.get("built") != caller.get("lot"):
+            fail("pass-opening recovery does not match the controller's current lot")
+        legacy = pass_opening_context(data, "construction")
+        opening_context = {key: opening[key] for key in CONTEXT_FIELDS if key in opening}
+        if opening_context != legacy:
+            fail("pass-opening recovery requires one exact Construction-context opening")
+        expected = pass_opening_context(data, "product-review")
+        recovery_data = {
+            "schema": 1,
+            "opening": journal_line_proof(opening_index),
+            "owner": me["session_id"],
+            "built": data["built"],
+            "commit": data["commit"],
+            "gate": data["gate"],
+            "from": legacy,
+            "to": expected,
+            "stop": pass_opening_stop_account(owner["stop"]),
+        }
+        candidate = event_entry(
+            me["session_id"], "note", kind="pass.opening.context.recovered",
+            data=recovery_data, **expected,
+        )
+        validate_pass_opening_history(
+            [*entries, candidate], opening_index, "the recovered product-review pass",
+        )
+        validate_pass_opening_context(
+            [*entries, candidate], opening_index, len(entries) + 1,
+            "the recovered product-review pass",
+        )
+        return candidate
+
+    write_validated_line(build)
+
+
+def cmd_pass_opening_cleanup_check(args):
+    entries = journal_entries()
+    owner = pending_malformed_pass_opening(
+        entries, len(entries), "the whole-run cleanup consumer",
+    )
+    if owner is None:
+        return
+    pass_opening_cleanup_account(
+        entries, owner["opening_index"], len(entries),
+        "the whole-run cleanup consumer",
+    )
+    if args.scope != "whole-run":
+        fail("a pending whole-run cleanup cannot authorize one lot-scoped consumer",
+             {"consumer": args.consumer, "scope": args.scope})
 
 
 def cmd_spec_close_check(args):
@@ -9665,6 +10181,14 @@ def build_parser():
     sp.add_argument("check", choices=(*CONSTRUCTION_CHECKERS, "diagnostic"))
     sp.add_argument("round", nargs="?", type=positive_int)
     sp.set_defaults(func=cmd_construction_spend_recover)
+
+    sp = sub.add_parser("pass-opening-context-recover", help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_pass_opening_context_recover)
+
+    sp = sub.add_parser("pass-opening-cleanup-check", help=argparse.SUPPRESS)
+    sp.add_argument("consumer", choices=("audit", "refs-clear", "workspace-delete"))
+    sp.add_argument("scope", choices=("whole-run", "lot"))
+    sp.set_defaults(func=cmd_pass_opening_cleanup_check)
 
     sp = sub.add_parser("session-status", help="change a session's bwr.status, and record it")
     sp.add_argument("session_id")

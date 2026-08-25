@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused behavior tests for the read-only review pool helper."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -161,8 +162,106 @@ class ReviewPoolTest(unittest.TestCase):
         self.append({
             "event": "note",
             "kind": "pass.opened",
+            "by": "product-controller",
+            "mode": "product-review",
+            "lot": "lot-1",
+            "job": "controller",
             "data": {"built": "lot-1", "commit": "c" * 40, "gate": "g" * 64},
         })
+
+    def test_product_pass_requires_exact_context_or_one_stop_safe_recovery(self):
+        child = {
+            "event": "session-started", "session": "lens",
+            "mode": "product-review", "lot": "lot-1",
+            "mandate": "unlooked", "job": "reviewer",
+        }
+        watchdog = {
+            "event": "session-started", "session": "watchdog", "job": "watchdog",
+        }
+        self.append(child, watchdog)
+        opening = {
+            "event": "note",
+            "kind": "pass.opened",
+            "by": "product-controller",
+            "mode": "construction",
+            "lot": "lot-1",
+            "job": "controller",
+            "data": {"built": "lot-1", "commit": "c" * 40, "gate": "g" * 64},
+        }
+        self.append(opening)
+        refused = self.run_helper("product-review")
+        self.assertNotEqual(refused.returncode, 0)
+
+        def proof(index, entry):
+            raw = json.dumps(entry, separators=(",", ":")).encode()
+            return f"{index}:{hashlib.sha256(raw).hexdigest()}"
+
+        opening_proof = proof(3, opening)
+        helper_stop = {
+            "event": "note", "kind": "paused", "by": "product-controller",
+            "mode": "product-review", "lot": "lot-1", "job": "controller",
+            "text": "nothing in flight", "data": {"sha": "c" * 40, "op": "d" * 64},
+        }
+        child_retirement = {
+            "event": "session-retired", "session": "lens", "by": "product-controller",
+            "mode": "product-review", "lot": "lot-1",
+            "mandate": "unlooked", "job": "reviewer",
+            "status": "cancelled", "archived": True, "hidden": True,
+        }
+        watchdog_retirement = {
+            "event": "session-retired", "session": "watchdog", "by": "product-controller",
+            "job": "watchdog", "status": "done", "archived": True, "hidden": True,
+        }
+        controller_stop = {
+            "event": "note", "kind": "paused", "by": "product-controller",
+            "mode": "product-review", "lot": "lot-1", "job": "controller",
+            "text": "The Product Review run is paused.",
+        }
+        resumed = {
+            "event": "note", "kind": "resumed", "by": "product-controller",
+            "mode": "product-review", "lot": "lot-1", "job": "controller",
+        }
+        self.append(
+            helper_stop, child_retirement, watchdog_retirement, controller_stop, resumed,
+        )
+        self.append({
+            "event": "note",
+            "kind": "pass.opening.context.recovered",
+            "by": "product-controller",
+            "mode": "product-review",
+            "lot": "lot-1",
+            "job": "controller",
+            "data": {
+                "schema": 1,
+                "opening": opening_proof,
+                "owner": "product-controller",
+                "built": "lot-1",
+                "commit": "c" * 40,
+                "gate": "g" * 64,
+                "from": {"mode": "construction", "lot": "lot-1", "job": "controller"},
+                "to": {"mode": "product-review", "lot": "lot-1", "job": "controller"},
+                "stop": {
+                    "mode": "paused", "op": "d" * 64,
+                    "terminal": proof(4, helper_stop),
+                    "retirements": [
+                        proof(5, child_retirement), proof(6, watchdog_retirement),
+                    ],
+                    "report": proof(7, controller_stop),
+                    "resumed": proof(8, resumed),
+                },
+            },
+        })
+        recovered = self.run_helper("product-review")
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+
+        self.entries[-1]["data"]["opening"] = "0:" + "f" * 64
+        changed = self.run_helper("product-review")
+        self.assertNotEqual(changed.returncode, 0)
+
+        self.entries[-1]["data"]["opening"] = opening_proof
+        self.entries[8]["kind"] = "aborted"
+        aborted = self.run_helper("product-review")
+        self.assertNotEqual(aborted.returncode, 0)
 
     def test_spec_refill_excludes_fixer_and_unrelated_sessions(self):
         self.open_spec_round()

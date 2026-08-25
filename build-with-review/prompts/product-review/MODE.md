@@ -87,6 +87,11 @@ finish.
 reviewer told to write into a directory that does not exist fails on its very last action,
 with all its work already done.
 
+Before the opening command, update your own annotations to exactly
+`bwr.mode=product-review`, `bwr.lot=<built lot>` and `bwr.job=controller`. Remove any
+task, attempt, round or mandate context from your controller. The helper refuses a stale
+mode transition before it journals the pass.
+
 ```
 progress.py note pass.opened --data \
   '{"built":"<built lot>","commit":"<sha>","gate":"<accepted gate op>"}'

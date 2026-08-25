@@ -126,6 +126,21 @@ def set_config(cfg):
         json.dump(cfg, f)
 
 
+def set_caller_bwr(**values):
+    with open(os.path.join(FAKE_DIR, "config.json")) as source:
+        config = json.load(source)
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        for key, value in values.items():
+            if value is None:
+                payload.pop(key, None)
+            else:
+                payload[key] = value
+    set_config(config)
+
+
 def reset():
     for path in (os.path.join(FAKE_DIR, "calls.jsonl"),
                  os.path.join(WORKSPACE, "progress.jsonl"),
@@ -139,7 +154,7 @@ def reset():
     shutil.rmtree(os.path.join(WORKSPACE, "amendments"), ignore_errors=True)
     for marker in (
         "amendment-commit-in-progress", "document-copy-in-progress", "attempt-in-flight",
-        "amendment-sweep-preflight.json",
+        "amendment-sweep-preflight.json", "bare-stop-in-progress",
     ):
         path = os.path.join(WORKSPACE, marker)
         if os.path.lexists(path):
@@ -1570,6 +1585,9 @@ def seed_task_gate(built="lot-1", token=None, *, tasks=1, add_lot_built=True,
     )
     if add_lot_built:
         append_note("lot.built", {"tasks": tasks, "attempts": tasks}, lot=built)
+    set_caller_bwr(
+        mode="product-review", lot=built, job="controller", task=None, attempt=None,
+    )
     return commit, gate, owner
 
 
@@ -1604,7 +1622,7 @@ def seed_review_pass(*, built="lot-1", commit=None, confirmed=0, omit=None):
         "built": built, "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": owner, "source_lot": built,
         "source_task": 1, "source_attempt": 1,
-    })
+    }, by=CALLER, mode="product-review", lot=built, job="controller")
     seed_review_receipts(built, confirmed=confirmed, omit=omit)
     return commit
 
@@ -5145,6 +5163,70 @@ def batch_close_rejects_malformed_identity_and_unproved_prior_terminal():
 
 # ------------------------------------------------ product-review terminals
 
+def seed_pending_legacy_pass_opening(*, stop_sessions=False):
+    commit, gate, owner = seed_task_gate("lot-1", "pending-opening-context")
+    stop_contexts = {}
+    if stop_sessions:
+        stop_contexts = {
+            TARGET: {
+                "mode": "product-review", "lot": "lot-1",
+                "mandate": "unlooked", "job": "reviewer",
+            },
+            "watchdog-session": {"job": "watchdog"},
+        }
+        with open(os.path.join(WORKSPACE, "progress.jsonl"), "a", encoding="utf-8") as target:
+            for session, context in stop_contexts.items():
+                target.write(json.dumps({
+                    "ts": "t", "by": CALLER, "event": "session-started",
+                    "session": session, **context,
+                }, separators=(",", ":")) + "\n")
+    append_note(
+        "pass.opened",
+        {
+            "built": "lot-1",
+            "commit": commit,
+            "gate": gate,
+            "source_scope": "task",
+            "source_owner": owner,
+            "source_lot": "lot-1",
+            "source_task": 1,
+            "source_attempt": 1,
+        },
+        by=CALLER,
+        mode="construction",
+        lot="lot-1",
+        job="controller",
+    )
+    config = default_config()
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload.update(mode="product-review", lot="lot-1", job="controller")
+        payload.pop("task", None)
+        payload.pop("attempt", None)
+    for session, context in stop_contexts.items():
+        config["sessions"][session] = {
+            "id": session,
+            "annotations": {"bwr": {
+                "schema": 1, "feature": "demo-feature", "status": "working",
+                **context,
+            }},
+        }
+    if not stop_sessions:
+        config["sessions"][TARGET]["annotations"]["bwr"] = {
+            "schema": 1,
+            "job": "reviewer",
+            "mode": "product-review",
+            "feature": "demo-feature",
+            "lot": "lot-1",
+            "mandate": "unlooked",
+            "status": "working",
+        }
+    set_config(config)
+    return commit, gate
+
+
 @test
 def task_pass_accepts_a_precommit_final_gate():
     commit, gate, _ = seed_task_gate(
@@ -5155,6 +5237,568 @@ def task_pass_accepts_a_precommit_final_gate():
         "--data", json.dumps({"built": "lot-1", "commit": commit, "gate": gate}),
     )
     check(opening.returncode == 0, opening.stdout + opening.stderr)
+
+
+@test
+def pass_opening_context_requires_product_review_and_recovers_one_exact_legacy_opening():
+    commit, gate, owner = seed_task_gate("lot-1", "opening-context")
+    data = {"built": "lot-1", "commit": commit, "gate": gate}
+
+    construction = default_config()
+    set_config(construction)
+    before = len(journal_lines())
+    wrong_mode = run_progress("note", "pass.opened", "--data", json.dumps(data))
+    check(wrong_mode.returncode != 0 and len(journal_lines()) == before,
+          "a fresh PRODUCT REVIEW pass opened from Construction context")
+
+    append_note(
+        "pass.opened",
+        {
+            **data,
+            "source_scope": "task",
+            "source_owner": owner,
+            "source_lot": "lot-1",
+            "source_task": 1,
+            "source_attempt": 1,
+        },
+        by=CALLER,
+        mode="construction",
+        lot="lot-1",
+        job="controller",
+    )
+    legacy_index = len(journal_lines()) - 1
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "rb") as journal:
+        legacy_raw = journal.read().splitlines()[legacy_index]
+    legacy_proof = f"{legacy_index}:{hashlib.sha256(legacy_raw).hexdigest()}"
+
+    premature = run_progress("pass-opening-context-recover")
+    check(premature.returncode != 0 and len(journal_lines()) == legacy_index + 1,
+          "Construction context recovered its own malformed pass opening")
+
+    product_review = default_config()
+    for payload in (
+        product_review["whoami"]["session"]["annotations"]["bwr"],
+        product_review["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload.update(mode="product-review", lot="lot-1", job="controller")
+        payload.pop("task", None)
+        payload.pop("attempt", None)
+    product_review["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1,
+        "job": "reviewer",
+        "mode": "product-review",
+        "feature": "demo-feature",
+        "lot": "lot-1",
+        "mandate": "unlooked",
+        "status": "working",
+    }
+    set_config(product_review)
+
+    blocked_reviewer = run_progress("session-started", TARGET)
+    check(blocked_reviewer.returncode != 0 and len(journal_lines()) == legacy_index + 1,
+          "a PRODUCT REVIEW reviewer started before the malformed opening was recovered")
+
+    recovered = run_progress("pass-opening-context-recover")
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    recovery = journal_lines()[-1]
+    check(
+        recovery.get("kind") == "pass.opening.context.recovered"
+        and recovery.get("mode") == "product-review"
+        and recovery.get("lot") == "lot-1"
+        and recovery.get("job") == "controller"
+        and recovery.get("by") == CALLER
+        and recovery.get("data") == {
+            "schema": 1,
+            "opening": legacy_proof,
+            "owner": CALLER,
+            "built": "lot-1",
+            "commit": commit,
+            "gate": gate,
+            "from": {"mode": "construction", "lot": "lot-1", "job": "controller"},
+            "to": {"mode": "product-review", "lot": "lot-1", "job": "controller"},
+            "stop": None,
+        },
+        f"the pass-opening recovery has the wrong account: {recovery}",
+    )
+
+    progress = load_common_module("progress")
+    entries = journal_lines()
+    progress.validate_pass_opening_history(
+        entries, legacy_index, "the recovered product-review pass",
+    )
+
+    reviewer = run_progress("session-started", TARGET)
+    check(reviewer.returncode == 0, reviewer.stdout + reviewer.stderr)
+    entries = journal_lines()
+
+    duplicate = run_progress("pass-opening-context-recover")
+    check(duplicate.returncode != 0 and len(journal_lines()) == len(entries),
+          "the same malformed pass opening received two recoveries")
+
+    entries[legacy_index + 1]["data"]["opening"] = "0:" + "f" * 64
+    try:
+        progress.current_pass_opening(
+            entries, len(entries), "the changed recovered product-review pass",
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("historical replay accepted a changed pass-opening recovery proof")
+
+
+@test
+def pass_opening_context_pending_owner_blocks_every_unrelated_mutation():
+    commands = (
+        ("generic note", ("note", "not-converging", "--text", "blocked"), False),
+        ("subagent opening", ("subagent-started", "completeness"), False),
+        ("session status", ("session-status", TARGET, "blocked"), True),
+        ("session retirement", ("session-retired", TARGET, "failed", "--hide"), True),
+    )
+    for subject, command, external in commands:
+        reset()
+        seed_pending_legacy_pass_opening()
+        before = len(journal_lines())
+        before_mutations = list(mutations())
+        refused_after(run_progress(*command), before, subject)
+        if external:
+            check(mutations() == before_mutations,
+                  f"{subject} changed TwiCC before the pending-owner refusal")
+
+    reset()
+    seed_pending_legacy_pass_opening()
+    lock_path = os.path.join(WORKSPACE, "progress.jsonl.lock")
+    with open(lock_path, "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        generic = subprocess.Popen(
+            [sys.executable, SCRIPT, "note", "not-converging", "--text", "blocked"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV,
+        )
+        recovery = subprocess.Popen(
+            [sys.executable, SCRIPT, "pass-opening-context-recover"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV,
+        )
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    generic_stdout, generic_stderr = generic.communicate(timeout=120)
+    recovery_stdout, recovery_stderr = recovery.communicate(timeout=120)
+    check(recovery.returncode == 0, recovery_stdout + recovery_stderr)
+    entries = journal_lines()
+    recoveries = [
+        index for index, entry in enumerate(entries)
+        if entry.get("kind") == "pass.opening.context.recovered"
+    ]
+    generic_notes = [
+        index for index, entry in enumerate(entries)
+        if entry.get("kind") == "not-converging"
+    ]
+    check(len(recoveries) == 1, entries)
+    check(not generic_notes or generic_notes == [recoveries[0] + 1], entries)
+    if generic.returncode != 0:
+        check(not generic_notes, generic_stdout + generic_stderr)
+
+    reset()
+    seed_pending_legacy_pass_opening()
+    append_note("pass.closed", {"legacy": "already consumed"})
+    old_closed = run_progress("note", "not-converging", "--text", "later history")
+    check(old_closed.returncode == 0, old_closed.stdout + old_closed.stderr)
+
+
+def run_pending_opening_bare_stop(mode):
+    result = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"), mode],
+        capture_output=True, text=True, cwd=REPO, env=ENV, timeout=120,
+    )
+    check(result.returncode == 0, result.stdout + result.stderr)
+    terminal = journal_lines()[-1]
+    check(
+        terminal.get("kind") == {"pause": "paused", "abort": "aborted"}[mode]
+        and set(terminal.get("data", {})) == {"sha", "op"},
+        terminal,
+    )
+    return terminal
+
+
+def retire_pending_opening_stop_sessions():
+    child = run_progress(
+        "session-retired", TARGET, "cancelled", "--archive", "--hide",
+    )
+    check(child.returncode == 0, child.stdout + child.stderr)
+    watchdog = run_progress(
+        "session-retired", "watchdog-session", "done", "--archive", "--hide",
+    )
+    check(watchdog.returncode == 0, watchdog.stdout + watchdog.stderr)
+
+
+@test
+def pass_opening_context_preserves_the_complete_pause_and_abort_stop_tails():
+    reset()
+    seed_pending_legacy_pass_opening(stop_sessions=True)
+    run_pending_opening_bare_stop("pause")
+    retire_pending_opening_stop_sessions()
+    reported = run_progress("note", "paused", "--text", "The Product Review run is paused.")
+    check(reported.returncode == 0, reported.stdout + reported.stderr)
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    recovered = run_progress("pass-opening-context-recover")
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    progress = load_common_module("progress")
+    pause_entries = journal_lines()
+    opening_index = next(
+        index for index, entry in enumerate(pause_entries)
+        if entry.get("kind") == "pass.opened"
+    )
+    progress.validate_pass_opening_context(
+        pause_entries, opening_index, len(pause_entries),
+        "the complete Product Review pause tail",
+    )
+
+    reset()
+    seed_pending_legacy_pass_opening(stop_sessions=True)
+    run_pending_opening_bare_stop("abort")
+    retire_pending_opening_stop_sessions()
+    reported = run_progress("note", "aborted", "--text", "The Product Review run is aborted.")
+    check(reported.returncode == 0, reported.stdout + reported.stderr)
+    before = len(journal_lines())
+    refused_after(
+        run_progress("note", "not-converging", "--text", "must stay stopped"),
+        before, "normal work after the complete abort tail",
+    )
+    refused_after(
+        run_progress("pass-opening-context-recover"),
+        before, "context recovery after the complete abort tail",
+    )
+
+
+@test
+def pass_opening_context_abort_owns_one_exact_whole_run_cleanup():
+    seed_pending_legacy_pass_opening(stop_sessions=True)
+    run_pending_opening_bare_stop("abort")
+    retire_pending_opening_stop_sessions()
+    reported = run_progress(
+        "note", "aborted", "--text", "The Product Review run is aborted.",
+    )
+    check(reported.returncode == 0, reported.stdout + reported.stderr)
+
+    cleanup_data = {"reason": "aborted", "scope": "whole-run", "choice": "clean"}
+    cleanup = run_progress(
+        "note", "cleanup.started", "--data", json.dumps(cleanup_data),
+    )
+    check(cleanup.returncode == 0, cleanup.stdout + cleanup.stderr)
+    cleanup_index = len(journal_lines()) - 1
+    cleanup_event = journal_lines()[cleanup_index]
+    check(
+        cleanup_event.get("data", {}).get("abort", {}).get("op")
+        == next(
+            entry["data"]["op"] for entry in journal_lines()
+            if entry.get("kind") == "aborted" and set(entry.get("data", {})) == {"sha", "op"}
+        ),
+        "cleanup.started does not freeze its exact completed abort authority",
+    )
+
+    checked = run_progress("pass-opening-cleanup-check", "audit", "whole-run")
+    check(checked.returncode == 0, checked.stdout + checked.stderr)
+    checked_again = run_progress("pass-opening-cleanup-check", "audit", "whole-run")
+    check(checked_again.returncode == 0, checked_again.stdout + checked_again.stderr)
+
+    for subject, command in (
+        ("duplicate cleanup", (
+            "note", "cleanup.started", "--data", json.dumps(cleanup_data),
+        )),
+        ("resume after abort cleanup", ("note", "resumed")),
+        ("context recovery after abort cleanup", ("pass-opening-context-recover",)),
+        ("normal work after abort cleanup", (
+            "note", "not-converging", "--text", "must stay stopped",
+        )),
+    ):
+        refused_after(run_progress(*command), cleanup_index + 1, subject)
+
+    entries = journal_lines()
+    opening_index = next(
+        index for index, entry in enumerate(entries)
+        if entry.get("kind") == "pass.opened"
+    )
+    helper_abort_index = next(
+        index for index, entry in enumerate(entries)
+        if entry.get("kind") == "aborted" and set(entry.get("data", {})) == {"sha", "op"}
+    )
+    progress = load_common_module("progress")
+    for label, mutate in (
+        ("abort authority", lambda changed: changed[helper_abort_index]["data"].update(op="f" * 64)),
+        ("cleanup authority", lambda changed: changed[cleanup_index]["data"].update(choice="keep")),
+    ):
+        changed = json.loads(json.dumps(entries))
+        mutate(changed)
+        try:
+            progress.pass_opening_cleanup_account(
+                changed, opening_index, len(changed), f"the changed {label}",
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"historical replay accepted changed {label}")
+
+    refs_clear = os.path.join(
+        WORKSPACE, "prompts", "product-review", "refs-clear.sh",
+    )
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    cleanup_refs = (
+        "refs/bwr/test-run/lot-1/cleanup-proof",
+        "refs/bwr/test-run/lot-2/cleanup-proof",
+    )
+    for ref in cleanup_refs:
+        subprocess.run(
+            ["git", "-C", REPO, "update-ref", ref, head], check=True,
+        )
+    scoped_clear = subprocess.run(
+        [refs_clear, "lot-1"], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(scoped_clear.returncode != 0,
+          "lot-scoped refs-clear consumed a whole-run cleanup")
+    for ref in cleanup_refs:
+        retained = subprocess.run(
+            ["git", "-C", REPO, "show-ref", "--verify", "--quiet", ref],
+        )
+        check(retained.returncode == 0,
+              "lot-scoped refs-clear deleted part of a whole-run cleanup")
+
+    changed = json.loads(json.dumps(entries))
+    changed[cleanup_index]["data"]["choice"] = "keep"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in changed:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_clear = subprocess.run(
+        [refs_clear], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(refused_clear.returncode != 0, "refs-clear accepted changed cleanup authority")
+    for ref in cleanup_refs:
+        retained = subprocess.run(
+            ["git", "-C", REPO, "show-ref", "--verify", "--quiet", ref],
+        )
+        check(retained.returncode == 0,
+              "refs-clear deleted a ref before cleanup validation")
+
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as journal:
+        for entry in entries:
+            journal.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    cleared = subprocess.run(
+        [refs_clear], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(cleared.returncode == 0, cleared.stdout + cleared.stderr)
+    for ref in cleanup_refs:
+        removed = subprocess.run(
+            ["git", "-C", REPO, "show-ref", "--verify", "--quiet", ref],
+        )
+        check(removed.returncode != 0, "whole-run refs-clear retained a run ref")
+
+    deleting = os.path.join(
+        REPO, ".superpowers", "bwr", "2026-01-01-cleanup-test",
+    )
+    shutil.copytree(WORKSPACE, deleting)
+    delete_script = os.path.join(COMMON_PROMPTS, "workspace-delete.sh")
+    deleting_refs = (
+        "refs/bwr/2026-01-01-cleanup-test/lot-1/cleanup-proof",
+        "refs/bwr/2026-01-01-cleanup-test/lot-2/cleanup-proof",
+    )
+    for ref in deleting_refs:
+        subprocess.run(
+            ["git", "-C", REPO, "update-ref", ref, head], check=True,
+        )
+    refused_delete = subprocess.run(
+        [delete_script, deleting], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(refused_delete.returncode != 0 and os.path.isdir(deleting),
+          "workspace-delete crossed a non-empty run ref namespace")
+    deleting_refs_clear = os.path.join(
+        deleting, "prompts", "product-review", "refs-clear.sh",
+    )
+    cleared_deleting = subprocess.run(
+        [deleting_refs_clear], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(cleared_deleting.returncode == 0, cleared_deleting.stdout + cleared_deleting.stderr)
+    resumed_delete = subprocess.run(
+        [delete_script, deleting], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(resumed_delete.returncode == 0 and not os.path.exists(deleting),
+          resumed_delete.stdout + resumed_delete.stderr)
+
+    interrupted = os.path.join(
+        REPO, ".superpowers", "bwr", "2026-01-02-cleanup-retry",
+    )
+    shutil.copytree(WORKSPACE, interrupted)
+    tombstone = interrupted + ".deleting"
+    os.rename(interrupted, tombstone)
+    retried_delete = subprocess.run(
+        [delete_script, tombstone], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(retried_delete.returncode == 0 and not os.path.exists(tombstone),
+          retried_delete.stdout + retried_delete.stderr)
+
+    for ordinal, use_tombstone in ((3, True), (4, False)):
+        partial = os.path.join(
+            REPO, ".superpowers", "bwr", f"2026-01-0{ordinal}-cleanup-partial",
+        )
+        shutil.copytree(WORKSPACE, partial)
+        partial_tombstone = partial + ".deleting"
+        os.rename(partial, partial_tombstone)
+        os.remove(os.path.join(
+            partial_tombstone, "prompts", "common", "authority_precedence.py",
+        ))
+        retry_input = partial_tombstone if use_tombstone else partial
+        partial_retry = subprocess.run(
+            [delete_script, retry_input],
+            capture_output=True, text=True, cwd=REPO, env=ENV,
+        )
+        check(
+            partial_retry.returncode == 0 and not os.path.exists(partial_tombstone),
+            partial_retry.stdout + partial_retry.stderr,
+        )
+
+
+@test
+def pass_opening_context_keeps_ordinary_lot_scoped_ref_cleanup():
+    commit, _, _ = seed_task_gate("lot-1", "ordinary-lot-ref-cleanup")
+    refs = {
+        "lot-1": "refs/bwr/test-run/lot-1/cleanup-proof",
+        "lot-2": "refs/bwr/test-run/lot-2/cleanup-proof",
+    }
+    for ref in refs.values():
+        subprocess.run(
+            ["git", "-C", REPO, "update-ref", ref, commit], check=True,
+        )
+    refs_clear = os.path.join(
+        WORKSPACE, "prompts", "product-review", "refs-clear.sh",
+    )
+    cleared = subprocess.run(
+        [refs_clear, "lot-1"], capture_output=True, text=True, cwd=REPO, env=ENV,
+    )
+    check(cleared.returncode == 0, cleared.stdout + cleared.stderr)
+    lot_one = subprocess.run(
+        ["git", "-C", REPO, "show-ref", "--verify", "--quiet", refs["lot-1"]],
+    )
+    lot_two = subprocess.run(
+        ["git", "-C", REPO, "show-ref", "--verify", "--quiet", refs["lot-2"]],
+    )
+    check(lot_one.returncode != 0 and lot_two.returncode == 0,
+          "ordinary lot-scoped cleanup did not preserve the other lot")
+
+
+@test
+def pass_opening_context_stop_tail_authenticates_owner_context_operation_and_order():
+    reset()
+    seed_pending_legacy_pass_opening(stop_sessions=True)
+    before = len(journal_lines())
+    refused_after(
+        run_progress(
+            "note", "paused", "--text", "foreign stop",
+            "--data", json.dumps({"sha": "a" * 40, "op": "not-an-operation"}),
+        ),
+        before, "a malformed stop operation",
+    )
+    refused_after(
+        run_progress(
+            "note", "paused", "--text", "foreign stop",
+            "--data", json.dumps({"sha": "a" * 40, "op": "f" * 64}),
+        ),
+        before, "a well-formed stop operation without its physical owner",
+    )
+
+    run_pending_opening_bare_stop("pause")
+    before = len(journal_lines())
+    refused_after(
+        run_progress("note", "paused", "--text", "reported before retirement"),
+        before, "a controller stopping point before required retirements",
+    )
+    before_mutations = list(mutations())
+    refused_after(
+        run_progress(
+            "session-retired", "watchdog-session", "done", "--archive", "--hide",
+        ),
+        before, "a watchdog retirement before the stopped child",
+    )
+    check(mutations() == before_mutations,
+          "the out-of-order watchdog retirement changed TwiCC")
+
+    config = default_config()
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload.clear()
+        payload.update({
+            "schema": 1, "feature": "demo-feature", "status": "working",
+            "mode": "product-review", "lot": "lot-1", "job": "controller",
+        })
+    config["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1, "feature": "demo-feature", "status": "working",
+        "mode": "product-review", "lot": "lot-1", "mandate": "quality",
+        "job": "reviewer",
+    }
+    config["sessions"]["watchdog-session"] = {
+        "id": "watchdog-session",
+        "annotations": {"bwr": {
+            "schema": 1, "feature": "demo-feature", "status": "working",
+            "job": "watchdog",
+        }},
+    }
+    set_config(config)
+    refused_after(
+        run_progress("session-retired", TARGET, "cancelled", "--archive", "--hide"),
+        before, "a changed stopped-child context",
+    )
+    check(mutations() == before_mutations,
+          "the changed stopped-child context changed TwiCC")
+
+    reset()
+    seed_pending_legacy_pass_opening(stop_sessions=True)
+    first = run_pending_opening_bare_stop("pause")
+    retire_pending_opening_stop_sessions()
+    reported = run_progress("note", "paused", "--text", "The Product Review run is paused.")
+    check(reported.returncode == 0, reported.stdout + reported.stderr)
+    resumed = run_progress("note", "resumed")
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    recovered = run_progress("pass-opening-context-recover")
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    entries = journal_lines()
+    opening_index = next(
+        index for index, entry in enumerate(entries)
+        if entry.get("kind") == "pass.opened"
+    )
+    first_index = next(
+        index for index, entry in enumerate(entries)
+        if entry.get("data", {}).get("op") == first["data"]["op"]
+    )
+    child_retirement_index = next(
+        index for index, entry in enumerate(entries)
+        if entry.get("event") == "session-retired" and entry.get("session") == TARGET
+    )
+    watchdog_retirement_index = next(
+        index for index, entry in enumerate(entries)
+        if entry.get("event") == "session-retired"
+        and entry.get("session") == "watchdog-session"
+    )
+    progress = load_common_module("progress")
+    for label, mutate in (
+        ("owner", lambda changed: changed[first_index].update(by="another-controller")),
+        ("context", lambda changed: changed[first_index].update(lot="lot-2")),
+        ("operation", lambda changed: changed[first_index]["data"].update(op="f" * 64)),
+        ("retirement", lambda changed: changed[child_retirement_index].update(archived=False)),
+        ("note order", lambda changed: changed.__setitem__(
+            slice(child_retirement_index, watchdog_retirement_index + 1),
+            [changed[watchdog_retirement_index], changed[child_retirement_index]],
+        )),
+    ):
+        changed = json.loads(json.dumps(entries))
+        mutate(changed)
+        try:
+            progress.validate_pass_opening_context(
+                changed, opening_index, len(changed),
+                f"the changed {label} stop tail",
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"historical replay accepted a changed stop {label}")
 
 
 @test
@@ -9318,6 +9962,11 @@ def main():
             destination = os.path.join(WORKSPACE, "prompts", "product-review", name)
             shutil.copyfile(os.path.join(PRODUCT_PROMPTS, name), destination)
             os.chmod(destination, 0o755)
+        destination = os.path.join(
+            WORKSPACE, "prompts", "product-review", "refs-clear.sh",
+        )
+        shutil.copyfile(os.path.join(PRODUCT_PROMPTS, "refs-clear.sh"), destination)
+        os.chmod(destination, 0o755)
         destination = os.path.join(WORKSPACE, "prompts", "amendment", "amendment-commit.sh")
         shutil.copyfile(os.path.join(AMENDMENT_PROMPTS, "amendment-commit.sh"), destination)
         os.chmod(destination, 0o755)

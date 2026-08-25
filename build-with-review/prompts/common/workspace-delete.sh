@@ -99,6 +99,27 @@ if $tombstone_exists; then
         || die "refused: the deletion tombstone is not a real directory: $TOMBSTONE"
 fi
 
+# Recheck cleanup authority and refs only before the durable final-name rename.
+# A tombstone already crossed this boundary. Its partial deletion can remove
+# any internal file in any order, so recovery depends only on this external
+# helper and the authenticated physical tombstone ground above.
+if $workspace_exists; then
+    CLEANUP_CHECK="$WORKSPACE/prompts/common/progress.py"
+    if [ -e "$CLEANUP_CHECK" ] || [ -L "$CLEANUP_CHECK" ]; then
+        [ -f "$CLEANUP_CHECK" ] && [ ! -L "$CLEANUP_CHECK" ] \
+            || die "refused: the workspace cleanup validator is not one real file: $CLEANUP_CHECK"
+        python3 "$CLEANUP_CHECK" pass-opening-cleanup-check workspace-delete whole-run
+    fi
+
+    RUN_PREFIX="refs/bwr/$FINAL_NAME/"
+    RUN_REFS=()
+    mapfile -t RUN_REFS < <(git -C "$CHECKOUT" for-each-ref \
+        "$RUN_PREFIX" --format='%(refname)')
+    [ ${#RUN_REFS[@]} -eq 0 ] \
+        || die "refused: the workspace still owns refs under $RUN_PREFIX
+Clear the complete run namespace before deleting the workspace. Nothing was deleted."
+fi
+
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 case "$SELF" in
     "$WORKSPACE"|"$WORKSPACE"/*|"$TOMBSTONE"|"$TOMBSTONE"/*)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read the exact current SPEC or PRODUCT REVIEW reviewer pool."""
 
+import hashlib
 import json
 import os
 import sys
@@ -19,6 +20,7 @@ REOPEN_PREFIXES = (
     "malformed finding returned:",
     "report returned whole for recalibration",
 )
+CONTEXT_FIELDS = ("mode", "lot", "task", "attempt", "round", "mandate", "job")
 
 
 def fail(message):
@@ -45,6 +47,9 @@ def read_entries():
                 fail(f"progress.jsonl line {number} is unreadable: {exc}")
             if not isinstance(entry, dict):
                 fail(f"progress.jsonl line {number} is not an object")
+            entry["_journal_proof"] = (
+                f"{number - 1}:{hashlib.sha256(raw[:-1]).hexdigest()}"
+            )
             entries.append(entry)
     return entries
 
@@ -57,6 +62,122 @@ def exact_cap(entries):
     if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
         fail("run.started has no positive reviewer cap")
     return cap
+
+
+def pass_opening_stop_suffix(entries, start, before, built):
+    opening = entries[start - 1]
+    owner = opening.get("by")
+    expected_context = {"mode": "product-review", "lot": built, "job": "controller"}
+    state = {
+        "phase": "active", "mode": None, "op": None, "pending": {},
+        "terminal": None, "retirements": [], "report": None, "resumed": None,
+    }
+
+    def context(entry):
+        return {key: entry[key] for key in CONTEXT_FIELDS if key in entry}
+
+    def controller_event(entry):
+        return entry.get("by") == owner and context(entry) == expected_context
+
+    def active_sessions(at):
+        starts = {}
+        retired = set()
+        for entry in entries[:at]:
+            event, session = entry.get("event"), entry.get("session")
+            if event == "session-started":
+                if not isinstance(session, str) or not session or session in starts:
+                    fail("the current PRODUCT REVIEW pass has malformed physical-session history")
+                starts[session] = entry
+            elif event == "session-retired" and session in starts:
+                if session in retired:
+                    fail("the current PRODUCT REVIEW pass has duplicate session retirement")
+                retired.add(session)
+        return {session: entry for session, entry in starts.items()
+                if session not in retired}
+
+    def exact_helper_stop(entry):
+        entry_data = data(entry)
+        return entry.get("event") == "note" \
+            and entry.get("kind") in {"paused", "aborted"} \
+            and controller_event(entry) \
+            and set(entry_data) == {"sha", "op"} \
+            and isinstance(entry_data["sha"], str) \
+            and 40 <= len(entry_data["sha"]) <= 64 \
+            and all(character in "0123456789abcdef" for character in entry_data["sha"]) \
+            and isinstance(entry_data["op"], str) and len(entry_data["op"]) == 64 \
+            and all(character in "0123456789abcdef" for character in entry_data["op"]) \
+            and isinstance(entry.get("text"), str) and bool(entry["text"])
+
+    def exact_retirement(entry, started):
+        started_context = context(started)
+        watchdog = started_context.get("job") == "watchdog"
+        allowed_statuses = {"done"} if watchdog else {"done", "cancelled"}
+        return entry.get("event") == "session-retired" \
+            and entry.get("by") == owner and context(entry) == started_context \
+            and entry.get("status") in allowed_statuses \
+            and entry.get("archived") is True and entry.get("hidden") is True \
+            and "kind" not in entry and "text" not in entry and "data" not in entry
+
+    def exact_controller_report(entry):
+        return entry.get("event") == "note" and entry.get("kind") == state["mode"] \
+            and controller_event(entry) and "data" not in entry \
+            and isinstance(entry.get("text"), str) and bool(entry["text"])
+
+    def exact_resume(entry):
+        return entry.get("event") == "note" and entry.get("kind") == "resumed" \
+            and controller_event(entry) and "data" not in entry and "text" not in entry
+
+    for index, entry in enumerate(entries[start:before], start):
+        phase = state["phase"]
+        if phase == "active" and exact_helper_stop(entry):
+            pending = active_sessions(index)
+            watchdogs = [session for session, started in pending.items()
+                         if context(started).get("job") == "watchdog"]
+            if len(watchdogs) != 1:
+                fail("the current PRODUCT REVIEW pass has no one exact active watchdog")
+            state = {
+                "phase": "retirements" if pending else "controller-report",
+                "mode": entry["kind"], "op": data(entry)["op"], "pending": pending,
+                "terminal": entry["_journal_proof"], "retirements": [],
+                "report": None, "resumed": None,
+            }
+        elif phase == "retirements":
+            session = entry.get("session")
+            started = state["pending"].get(session)
+            if started is None or not exact_retirement(entry, started):
+                fail("the current PRODUCT REVIEW pass has a foreign stop retirement")
+            if context(started).get("job") == "watchdog" \
+                    and any(context(candidate).get("job") != "watchdog"
+                            for candidate in state["pending"].values()):
+                fail("the current PRODUCT REVIEW pass retires its watchdog too early")
+            state["pending"] = dict(state["pending"])
+            state["pending"].pop(session)
+            state["retirements"] = [*state["retirements"], entry["_journal_proof"]]
+            if not state["pending"]:
+                state["phase"] = "controller-report"
+        elif phase == "controller-report" and exact_controller_report(entry):
+            state["phase"] = "pause-reported" \
+                if state["mode"] == "paused" else "aborted"
+            state["report"] = entry["_journal_proof"]
+        elif phase == "pause-reported" and exact_resume(entry):
+            state["phase"] = "resumed"
+            state["resumed"] = entry["_journal_proof"]
+        else:
+            fail("the current PRODUCT REVIEW pass has an event outside its stop-owned suffix")
+    return state
+
+
+def pass_opening_stop_account(state):
+    if state["phase"] == "active":
+        return None
+    if state["phase"] != "resumed" or state["mode"] != "paused" \
+            or state["pending"] or state["report"] is None or state["resumed"] is None:
+        fail("the current PRODUCT REVIEW pass has no complete pause/resume recovery account")
+    return {
+        "mode": "paused", "op": state["op"], "terminal": state["terminal"],
+        "retirements": state["retirements"], "report": state["report"],
+        "resumed": state["resumed"],
+    }
 
 
 def current_generation(entries, mode):
@@ -86,6 +207,42 @@ def current_generation(entries, mode):
     built = data(opening).get("built")
     if not isinstance(built, str) or not built:
         fail("the current PRODUCT REVIEW pass has no built lot")
+    expected = {"mode": "product-review", "lot": built, "job": "controller"}
+    context = {key: opening[key] for key in CONTEXT_FIELDS if key in opening}
+    recoveries = [
+        (candidate_index, candidate)
+        for candidate_index, candidate in enumerate(entries[index + 1:], index + 1)
+        if candidate.get("kind") == "pass.opening.context.recovered"
+    ]
+    if context == expected and recoveries:
+        fail("the current PRODUCT REVIEW pass has an unexpected context recovery")
+    if context != expected:
+        legacy = {"mode": "construction", "lot": built, "job": "controller"}
+        if context != legacy or not isinstance(opening.get("by"), str) or not opening["by"]:
+            fail("the current PRODUCT REVIEW pass has no exact controller context")
+        if len(recoveries) != 1:
+            fail("the current PRODUCT REVIEW pass has no one exact context recovery")
+        recovery_index, recovery = recoveries[0]
+        stop_state = pass_opening_stop_suffix(entries, index + 1, recovery_index, built)
+        if stop_state["phase"] not in {"active", "resumed"}:
+            fail("the current PRODUCT REVIEW pass context recovery crosses a current run stop")
+        expected_data = {
+            "schema": 1,
+            "opening": opening["_journal_proof"],
+            "owner": opening["by"],
+            "built": built,
+            "commit": data(opening).get("commit"),
+            "gate": data(opening).get("gate"),
+            "from": legacy,
+            "to": expected,
+            "stop": pass_opening_stop_account(stop_state),
+        }
+        recovery_context = {key: recovery[key] for key in CONTEXT_FIELDS if key in recovery}
+        if recovery.get("event") != "note" \
+                or recovery.get("by") != opening["by"] \
+                or data(recovery) != expected_data \
+                or recovery_context != expected:
+            fail("the current PRODUCT REVIEW pass has a malformed context recovery")
     return index, PRODUCT_MANDATES, {"lot": built}, built
 
 

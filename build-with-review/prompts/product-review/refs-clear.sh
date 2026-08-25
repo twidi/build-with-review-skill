@@ -25,6 +25,12 @@ fi
 RUN="refs/bwr/$(basename "$WORKSPACE")"
 PREFIX="$RUN/${1:+$1/}"
 
+# Recheck a legacy pass-opening abort owner before the first ref mutation.
+CLEANUP_SCOPE=whole-run
+if [ $# -eq 1 ]; then CLEANUP_SCOPE=lot; fi
+python3 "$WORKSPACE/prompts/common/progress.py" \
+    pass-opening-cleanup-check refs-clear "$CLEANUP_SCOPE"
+
 cd "$REPO"
 mapfile -t refs < <(git for-each-ref "$PREFIX" --format='%(refname)')
 if [ ${#refs[@]} -eq 0 ]; then
