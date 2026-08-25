@@ -372,7 +372,7 @@ class ReviewPoolTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("duplicate active reviewer", result.stdout + result.stderr)
 
-    def test_unusable_verifier_reports_regeneration_then_stable_blocker(self):
+    def test_every_unusable_verifier_reports_exact_regeneration(self):
         self.open_product_pass()
         report_sha = "4" * 64
         self.append(
@@ -391,7 +391,15 @@ class ReviewPoolTest(unittest.TestCase):
         )
         twice = self.run_helper("product-review")
         self.assertEqual(twice.returncode, 0, twice.stdout + twice.stderr)
-        self.assertIn("user: finding verifier failed twice; report stable blocker", twice.stdout)
+        self.assertIn("user: regenerate finding verifier after unusable terminal", twice.stdout)
+
+        self.append(
+            self.verifier_started("user", report_sha),
+            self.verifier_unusable("user", report_sha, "empty"),
+        )
+        three = self.run_helper("product-review")
+        self.assertEqual(three.returncode, 0, three.stdout + three.stderr)
+        self.assertIn("user: regenerate finding verifier after unusable terminal", three.stdout)
 
     def test_positive_malformed_result_keeps_lens_for_settlement(self):
         self.open_product_pass()

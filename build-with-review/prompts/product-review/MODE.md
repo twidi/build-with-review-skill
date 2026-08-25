@@ -342,16 +342,17 @@ their files may be absent. Always call both helpers. Empty stdout is valid absen
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.
 
-The launch message also gives the verifier this bounded invocation rule: before you use
+The launch message also gives the verifier this invocation rule: before you use
 its stdout, compare the invocation you issued with the exact prescribed command and the
 exact RUNTIME INPUTS. If your issued invocation transcribed or reconstructed a different
-value, discard its stdout even when it succeeded. Correct only that invocation once in
-the same live verifier and the same physical bracket, then use only the corrected
-invocation's stdout. Apply the same rule to the exact `verify-open.sh` and
-`verify-close.sh` helper invocations prescribed by the official role prompt. This local
-correction does not consume the one physical verifier regeneration. It creates no
-terminal and no replacement. If the exact corrected invocation refuses, that refusal is
-a blocker. Never repair, infer or replace an invalid authoritative runtime value.
+value, discard its stdout even when it succeeded. Keep correcting only that local
+invocation in the same live verifier and the same physical bracket until it exactly
+matches. Use only the exact invocation's stdout. Apply the same rule to the exact
+`verify-open.sh` and `verify-close.sh` helper invocations prescribed by the official role
+prompt. A local correction does not consume a physical verifier regeneration. It creates
+no terminal and no replacement. If an exact invocation refuses, diagnose the cause from
+its complete technical error before ending the call. Never repair, infer or replace an invalid
+authoritative runtime value.
 
 It returns, per finding: **confirmed**, **disproved with what it observed**, or
 **malformed**.
@@ -391,11 +392,15 @@ progress.py subagent-ended finding-verifier --mandate <slug> \
   --data '{"pass_commit":"<same pass_commit>","pass_gate":"<same pass_gate>","report_sha256":"<same report_sha256>","unusable":"lost"}'
 ```
 
-`error`, `empty`, `lost`, and `unusable` are the only unusable reasons. One unusable
-terminal permits one fresh physical verifier for the same accepted report. A second
-unusable terminal is a stable blocker. A complete terminal forbids another verifier.
-The alternating physical brackets are the durable retry count for this call; do not add
-a second broad retry counter.
+`error`, `empty`, `lost`, and `unusable` are the only unusable reasons. Every unusable
+terminal permits one fresh physical verifier for the same accepted report. A complete
+terminal forbids another verifier. The alternating physical brackets are the durable
+history for this call; do not add a second broad retry counter.
+
+Do not relaunch blindly after repeated technical failures. Read the returned cause,
+diagnose it, and add the exact corrective execution instruction to the next verifier
+message. Ask the BWR Writer for a contract correction when the frozen prompt or helper
+caused the failure. A technical failure never settles or discards a finding.
 
 Never end a turn with a required verifier forgotten. If no useful controller work
 remains, use the provider-native result or wait mechanism. Never use a TwiCC process-wait
@@ -1070,7 +1075,7 @@ with the five lens reports.
 |---|---|
 | **A report whose last journal line for its mandate is `report.received`** — no `bound.spent` return after it, inside the slice | settled as of that receipt. At a resume it is verified exactly as if it had just arrived. |
 | **A report file with no receipt — or whose last line for its mandate is a `bound.spent` return** | it may have been cut mid-write, or mid-rewrite — **a receipt proves the write it closed, never the one a return reopened**, and the completion block opens a report, so its presence proves a start, never an end. Treat it as absent. Use the **R1.2 PRODUCT replacement checkpoint**: stop and retire any surviving owner first, move its file aside, then let the helper select the next assignments. |
-| **A verifier that was running** | inspect the provider's active-subagent roster. Keep an active exact call. Record a completed exact result. If the call is absent or its result is unavailable, close its exact bracket with `unusable:"lost"`; never guess a verdict. Relaunch the same accepted report only when its one physical relaunch remains. Record **which reports are verified and which are not** in the stopping-point note. |
+| **A verifier that was running** | inspect the provider's active-subagent roster. Keep an active exact call. Record a completed exact result. If the call is absent or its result is unavailable, close its exact bracket with `unusable:"lost"`; never guess a verdict. Each unusable terminal permits the next diagnosed physical call for the same accepted report. Before that call, diagnose the technical cause and give it one corrected execution instruction. A complete result forbids every later call. Record **which reports are verified and which are not** in the stopping-point note. |
 | **The copy of the tree that verifier was using** | it outlives the subagent that made it: `verify-close.sh` never ran. Close it only after the provider roster proves no verifier call still writes there and the exact call has a terminal. `git worktree list` shows it at `<repo>/.superpowers/bwr/tmp/bwr-verify-<run>-<report file name>/w`; close it with `verify-close.sh <that report file name>`. The closer repeats the physical-ground checks and removes only an exact worktree registration owned by this repository; a symlink or unregistered directory is refused untouched. |
 
 **A finding whose author was cancelled has nobody to send it back to.** If it turns out

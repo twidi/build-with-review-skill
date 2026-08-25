@@ -227,8 +227,8 @@ def product_verifier_corrects_local_path_transcription_without_physical_relaunch
           "the verifier does not compare each proof command before using a successful result")
     check("different locally derived copy path and fails" not in normalized_prompt,
           "the verifier limits copy-path correction to failed commands")
-    check("correct only that local invocation once" in normalized_prompt,
-          "the verifier does not correct one local copy-path transcription error")
+    check("keep correcting only that local invocation" in normalized_prompt,
+          "the verifier stops after one local copy-path transcription error")
     check("same live verifier" in normalized_prompt and "same physical bracket" in normalized_prompt,
           "the verifier replaces itself for a local copy-path transcription error")
     check("do not close the copy" in normalized_prompt and "before this correction" in normalized_prompt,
@@ -237,8 +237,8 @@ def product_verifier_corrects_local_path_transcription_without_physical_relaunch
           "the verifier does not compare its open and close helper invocations before execution")
     check("reviewed commit and report file name" in normalized_prompt,
           "the verifier does not bind open and close helpers to their authoritative values")
-    check("correct only that helper invocation once" in normalized_prompt,
-          "the verifier cannot correct its own open or close helper invocation")
+    check("keep correcting only that helper invocation" in normalized_prompt,
+          "the verifier stops correcting its own open or close helper invocation")
 
     check("compare the invocation you issued" in normalized_launch,
           "the verifier launch does not require comparison with authoritative runtime inputs")
@@ -246,16 +246,59 @@ def product_verifier_corrects_local_path_transcription_without_physical_relaunch
           "the verifier launch does not compare the helper invocation before successful stdout use")
     check("before you treat an additional-prompt helper refusal" not in normalized_launch,
           "the verifier launch limits helper comparison to refused invocations")
-    check("correct only that invocation once" in normalized_launch,
-          "the verifier launch does not correct one additional-prompt invocation error")
+    check("keep correcting only that local invocation" in normalized_launch,
+          "the verifier launch stops after one additional-prompt invocation error")
     check("same live verifier" in normalized_launch and "same physical bracket" in normalized_launch,
           "the verifier launch replaces the physical call for its own helper invocation error")
-    check("does not consume the one physical verifier regeneration" in normalized_launch,
+    check("does not consume a physical verifier regeneration" in normalized_launch,
           "the verifier launch charges a local helper correction as physical regeneration")
-    check("exact corrected invocation" in normalized_launch and "blocker" in normalized_launch,
-          "the verifier launch does not stop after an authoritative corrected helper refusal")
+    check("exact invocation" in normalized_launch and "diagnose" in normalized_launch,
+          "the verifier launch does not diagnose an authoritative helper refusal")
     check("verify-open.sh" in normalized_launch and "verify-close.sh" in normalized_launch,
           "the verifier launch correction does not propagate to its open and close helpers")
+    check("technical failure is not a verdict" in normalized_prompt,
+          "the verifier can stop at a solvable technical failure")
+    check("a yielded command is still running" in normalized_prompt
+          and "retain its session id" in normalized_prompt,
+          "the verifier treats a yielded command as an empty completed result")
+    check("working directory" in normalized_prompt and "verification copy" in normalized_prompt,
+          "the verifier does not execute proof commands from the detached copy")
+    check("unset `virtual_env`" in normalized_prompt and "twicc_data_dir" in normalized_prompt,
+          "the verifier does not isolate uv project resolution inside the detached copy")
+    check("diagnose the cause" in normalized_launch and "relaunch blindly" in normalized_launch,
+          "the controller repeats technical failures without a diagnosis")
+
+
+@test
+def product_verifier_shared_instructions_have_no_fixed_physical_call_ceiling():
+    failure_rule = " ".join(section(
+        "SKILL.md", "### When a subagent fails", "### When a compaction takes a result",
+    ).lower().split())
+    journal_rule = " ".join(read("prompts/common/progress-rules.md").lower().split())
+
+    check("relaunch it once" in failure_rule,
+          "the generic subagent failure limit changed")
+    for subject, text in (
+        ("shared failure rule", failure_rule),
+        ("journal caller contract", journal_rule),
+    ):
+        check("each unusable terminal permits" in text,
+              f"the {subject} does not permit the next diagnosed PRODUCT verifier")
+        check("no fixed physical-call ceiling" in text,
+              f"the {subject} still gives the PRODUCT verifier a fixed call ceiling")
+    check("carry its one relaunch" not in failure_rule,
+          "the shared failure rule still stops the PRODUCT verifier after two calls")
+
+    resume_rule = " ".join(section(
+        "prompts/product-review/MODE.md", "## When the human stops the run",
+        "## Leaving review",
+    ).lower().split())
+    check("each unusable terminal permits the next diagnosed physical call" in resume_rule,
+          "the PRODUCT resume table retains a one-relaunch ceiling")
+    check("corrected execution instruction" in resume_rule,
+          "the PRODUCT resume table permits a blind technical relaunch")
+    check("complete result forbids" in resume_rule,
+          "the PRODUCT resume table permits a call after a complete result")
 
 
 @test

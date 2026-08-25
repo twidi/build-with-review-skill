@@ -6277,7 +6277,7 @@ def product_verifier_and_physical_copy_consume_one_exact_pass_generation():
         "built": "lot-1", "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
         "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
-    })
+    }, mode="product-review", lot="lot-1", job="controller")
     content = product_report_text("meaning")
     report_sha = write_report("reports/product-review/lot-1/lot-1-meaning.md", content)
     receipt = run_progress(
@@ -6339,7 +6339,7 @@ def product_verifier_unusable_terminal_allows_exact_regeneration():
         "built": "lot-1", "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": owner,
         "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
-    })
+    }, mode="product-review", lot="lot-1", job="controller")
     identities = {}
     for mandate in ("unlooked", "user", "meaning", "quality", "coverage"):
         content = product_report_text(mandate)
@@ -6416,13 +6416,13 @@ def product_verifier_unusable_terminal_allows_exact_regeneration():
 
 
 @test
-def product_verifier_refuses_a_second_physical_relaunch():
+def product_verifier_allows_technical_regeneration_until_one_complete_result():
     commit, gate, _ = seed_task_gate("lot-1", "verifier-relaunch-limit")
     append_note("pass.opened", {
         "built": "lot-1", "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
         "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
-    })
+    }, mode="product-review", lot="lot-1", job="controller")
     content = product_report_text("user")
     report_sha = write_report("reports/product-review/lot-1/lot-1-user.md", content)
     receipt = run_progress(
@@ -6431,7 +6431,7 @@ def product_verifier_refuses_a_second_physical_relaunch():
     )
     check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
     identity = {"pass_commit": commit, "pass_gate": gate, "report_sha256": report_sha}
-    for reason in ("error", "lost"):
+    for reason in ("error", "lost", "empty", "unusable"):
         started = run_progress(
             "subagent-started", "finding-verifier", "--mandate", "user",
             "--data", json.dumps(identity),
@@ -6442,13 +6442,122 @@ def product_verifier_refuses_a_second_physical_relaunch():
             "--data", json.dumps({**identity, "unusable": reason}),
         )
         check(ended.returncode == 0, ended.stdout + ended.stderr)
-    before = len(journal_lines())
-    third = run_progress(
+    final_start = run_progress(
         "subagent-started", "finding-verifier", "--mandate", "user",
         "--data", json.dumps(identity),
     )
-    check(third.returncode != 0 and len(journal_lines()) == before,
-          "a finding verifier received a second physical relaunch")
+    check(final_start.returncode == 0, final_start.stdout + final_start.stderr)
+    final = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps({
+            **identity, "confirmed": 0, "disproved": 0, "malformed": 0,
+            "claims": [],
+        }),
+    )
+    check(final.returncode == 0, final.stdout + final.stderr)
+    before = len(journal_lines())
+    after_complete = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(after_complete.returncode != 0 and len(journal_lines()) == before,
+          "a complete finding-verifier result allowed another physical call")
+
+
+@test
+def product_verifier_append_serializes_duplicate_openings_and_terminals():
+    commit, gate, _ = seed_task_gate("lot-1", "verifier-append-race")
+    append_note("pass.opened", {
+        "built": "lot-1", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
+        "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
+    }, mode="product-review", lot="lot-1", job="controller")
+    content = product_report_text("user")
+    report_sha = write_report("reports/product-review/lot-1/lot-1-user.md", content)
+    receipt = run_progress(
+        "note", "report.received", "--mandate", "user",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    identity = {"pass_commit": commit, "pass_gate": gate, "report_sha256": report_sha}
+
+    def run_concurrently(command):
+        lock_path = os.path.join(WORKSPACE, "progress.jsonl.lock")
+        with open(lock_path, "a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            processes = [
+                subprocess.Popen(
+                    command, env=ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                for _ in range(2)
+            ]
+            deadline = time.monotonic() + 30
+            waiting = [False, False]
+            while time.monotonic() < deadline:
+                waiting = []
+                for process in processes:
+                    try:
+                        with open(f"/proc/{process.pid}/wchan", encoding="utf-8") as source:
+                            waiting.append("lock" in source.read())
+                    except OSError:
+                        waiting.append(False)
+                if waiting == [True, True]:
+                    break
+                time.sleep(0.01)
+            check(waiting == [True, True], "both verifier commands did not reach the journal lock")
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        return [process.communicate(timeout=30) + (process.returncode,) for process in processes]
+
+    start_command = [
+        sys.executable, SCRIPT, "subagent-started", "finding-verifier",
+        "--mandate", "user", "--data", json.dumps(identity),
+    ]
+    start_results = run_concurrently(start_command)
+    check(sorted(result[2] for result in start_results) == [0, 1], start_results)
+    starts = [
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "finding-verifier"
+        and entry.get("mandate") == "user"
+    ]
+    check(len(starts) == 1, "concurrent verifier admission appended duplicate openings")
+
+    unusable = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps({**identity, "unusable": "error"}),
+    )
+    check(unusable.returncode == 0, unusable.stdout + unusable.stderr)
+    next_start = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(next_start.returncode == 0, next_start.stdout + next_start.stderr)
+
+    terminal = {
+        **identity, "confirmed": 0, "disproved": 0, "malformed": 0, "claims": [],
+    }
+    terminal_command = [
+        sys.executable, SCRIPT, "subagent-ended", "finding-verifier",
+        "--mandate", "user", "--data", json.dumps(terminal),
+    ]
+    terminal_results = run_concurrently(terminal_command)
+    check(sorted(result[2] for result in terminal_results) == [0, 1], terminal_results)
+    terminals = [
+        entry for entry in journal_lines()
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "finding-verifier"
+        and entry.get("mandate") == "user"
+        and "unusable" not in (entry.get("data") or {})
+    ]
+    check(len(terminals) == 1, "concurrent verifier admission appended duplicate terminals")
+
+    before = len(journal_lines())
+    after_complete = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "user",
+        "--data", json.dumps(identity),
+    )
+    check(after_complete.returncode != 0 and len(journal_lines()) == before,
+          "the raced complete result did not close the winning physical bracket")
 
 
 @test

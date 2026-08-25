@@ -7561,14 +7561,15 @@ def product_verifier_calls(entries, receipt_index, mandate, identity, receipt_da
     return calls
 
 
-def validate_product_finding_verifier(event, data, mandate):
+def validate_product_finding_verifier(event, data, mandate, entries=None):
     if mandate not in PRODUCT_REVIEW_MANDATES:
         fail("a product finding-verifier has no fixed lens mandate", mandate)
     identity_keys = {"pass_commit", "pass_gate", "report_sha256"}
     if not isinstance(data, dict) or event == "subagent-started" \
             and set(data) != identity_keys:
         fail(f"{event} product finding-verifier has malformed identity or result", data)
-    entries = journal_entries()
+    if entries is None:
+        entries = journal_entries()
     _, opening, _, commit, receipt_index, receipt_data = product_verifier_identity(
         entries, len(entries), mandate, f"the {mandate} finding-verifier",
     )
@@ -7586,8 +7587,6 @@ def validate_product_finding_verifier(event, data, mandate):
     if event == "subagent-started":
         if calls and (calls[-1]["end"] is None or calls[-1]["terminal"] == "complete"):
             fail(f"the current {mandate} report cannot open another finding-verifier call")
-        if len(calls) >= 2:
-            fail(f"the current {mandate} report already used its one physical verifier relaunch")
         return
     if not calls or calls[-1]["end"] is not None:
         fail(f"the {mandate} finding-verifier result has no one exact open bracket")
@@ -9409,13 +9408,16 @@ def cmd_subagent_started(args):
     data = parse_data(args.data)
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
+    product_finding_verifier = args.kind == "finding-verifier" and not (
+        isinstance(data, dict) and data.get("owner") == "spec-loop"
+    )
     if args.kind == "gate-runner":
         validate_gate_subagent("subagent-started", data)
     elif args.kind == "finding-verifier" and isinstance(data, dict) \
             and data.get("owner") == "spec-loop":
         validate_spec_loop_verifier("subagent-started", data)
-    elif args.kind == "finding-verifier":
-        validate_product_finding_verifier("subagent-started", data, args.mandate)
+    elif product_finding_verifier:
+        pass
     elif args.kind == "consolidation":
         data = normalize_consolidation_started(journal_entries(), data, args.round)
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
@@ -9428,10 +9430,24 @@ def cmd_subagent_started(args):
             context.pop("round", None)
     elif data is not None:
         fail(f"subagent-started {args.kind} does not take structured data")
-    validate_subagent_transition(
-        journal_entries(), "subagent-started", me["session_id"], args.kind, context, data,
-    )
-    append_event(me["session_id"], "subagent-started", kind=args.kind, data=data, **context)
+    if product_finding_verifier:
+        def build(entries):
+            validate_product_finding_verifier(
+                "subagent-started", data, args.mandate, entries,
+            )
+            validate_subagent_transition(
+                entries, "subagent-started", me["session_id"], args.kind, context, data,
+            )
+            return event_entry(
+                me["session_id"], "subagent-started", kind=args.kind, data=data, **context,
+            )
+
+        write_validated_line(build)
+    else:
+        validate_subagent_transition(
+            journal_entries(), "subagent-started", me["session_id"], args.kind, context, data,
+        )
+        append_event(me["session_id"], "subagent-started", kind=args.kind, data=data, **context)
     if args.kind in {"design-checker", "code-checker"}:
         print(json.dumps({
             "manifest": data["manifest"], "manifest_sha256": data["manifest_sha256"],
@@ -9458,13 +9474,16 @@ def cmd_subagent_ended(args):
     data = parse_data(args.data)
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
+    product_finding_verifier = args.kind == "finding-verifier" and not (
+        isinstance(data, dict) and data.get("owner") == "spec-loop"
+    )
     if args.kind == "gate-runner":
         validate_gate_subagent("subagent-ended", data)
     elif args.kind == "finding-verifier" and isinstance(data, dict) \
             and data.get("owner") == "spec-loop":
         validate_spec_loop_verifier("subagent-ended", data)
-    elif args.kind == "finding-verifier":
-        validate_product_finding_verifier("subagent-ended", data, args.mandate)
+    elif product_finding_verifier:
+        pass
     elif args.kind == "consolidation":
         data = normalize_consolidation_ended(journal_entries(), data, args.round)
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
@@ -9475,10 +9494,24 @@ def cmd_subagent_ended(args):
         context.update({key: data[key] for key in ("lot", "task", "attempt")})
         if check == "diagnostic":
             context.pop("round", None)
-    validate_subagent_transition(
-        journal_entries(), "subagent-ended", me["session_id"], args.kind, context, data,
-    )
-    append_event(me["session_id"], "subagent-ended", kind=args.kind, data=data, **context)
+    if product_finding_verifier:
+        def build(entries):
+            validate_product_finding_verifier(
+                "subagent-ended", data, args.mandate, entries,
+            )
+            validate_subagent_transition(
+                entries, "subagent-ended", me["session_id"], args.kind, context, data,
+            )
+            return event_entry(
+                me["session_id"], "subagent-ended", kind=args.kind, data=data, **context,
+            )
+
+        write_validated_line(build)
+    else:
+        validate_subagent_transition(
+            journal_entries(), "subagent-ended", me["session_id"], args.kind, context, data,
+        )
+        append_event(me["session_id"], "subagent-ended", kind=args.kind, data=data, **context)
 
 
 def subagent_event_context(entry):

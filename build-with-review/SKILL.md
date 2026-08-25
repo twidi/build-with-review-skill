@@ -1750,11 +1750,15 @@ granted a second. **Before repeating, count only the lines that name THIS call.*
 Models fail transiently, and a second call usually returns.
 
 The PRODUCT finding verifier is the exact structured exception. Its unusable terminal
-and alternating physical bracket count carry its one relaunch. Do not add this generic
+and alternating physical brackets carry the complete retry history. Each unusable
+terminal permits the next diagnosed physical call for the same report. It has no fixed
+physical-call ceiling. A complete terminal forbids another call. Do not add this generic
 `bound.spent` counter to that call.
 
-**Twice means the problem is in its prompt or in what you gave it**, not in the agent.
-Treat it as a blocker: say what you asked, what came back twice, and stop.
+For every other call covered by the generic rule above, **twice means the problem is in
+its prompt or in what you gave it**, not in the agent. Treat it as a blocker: say what
+you asked, what came back twice, and stop. For a PRODUCT finding verifier, diagnose the
+technical cause and correct the next execution instruction instead.
 
 **Never do its work yourself.** That is the exact moment where a controller starts writing
 code it must not write, or a reviewer starts verifying its own findings.
@@ -1780,9 +1784,11 @@ what to act on.
 A PRODUCT REVIEW finding verifier uses its report identity as the physical-call identity.
 Its terminal is the complete structured finding account or `{"unusable":"error"}`,
 `{"unusable":"empty"}`, `{"unusable":"lost"}` or `{"unusable":"unusable"}`, together
-with the unchanged pass commit, gate and report SHA-256. The unusable terminal does not
-settle the report. It permits one physical relaunch against the same report. A second
-unusable call is a stable blocker. A complete result forbids another call.
+with the unchanged pass commit, gate and report SHA-256. An unusable terminal does not
+settle the report. Each unusable terminal permits one fresh physical call against the
+same report. A complete result forbids another call. Repeated technical failure requires
+a diagnosis and corrected execution instruction before another launch. It never discards
+the finding and has no fixed physical-call ceiling.
 
 **A bounded domain round is not the physical call that returns its result.** At the four
 call sites that pair `bound.spent` with `verdict.consumed` — design checker, code checker,

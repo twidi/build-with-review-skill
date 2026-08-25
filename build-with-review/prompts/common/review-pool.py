@@ -373,8 +373,6 @@ def product_verifier_state(entries, receipt_index, mandate, identity):
             fail(f"the {mandate} finding-verifier has a malformed result count")
         expecting = "complete"
         state = "complete-malformed" if malformed else "complete"
-    if state == "unusable" and len(events) == 4:
-        return "exhausted"
     return state
 
 
@@ -476,8 +474,6 @@ def product_state(entries, opening_index, mandates, records):
             continuations.append(f"{mandate}: launch finding verifier")
         elif verifier == "unusable":
             continuations.append(f"{mandate}: regenerate finding verifier after unusable terminal")
-        elif verifier == "exhausted":
-            continuations.append(f"{mandate}: finding verifier failed twice; report stable blocker")
         else:
             unsettled.append(f"{mandate}: finding verifier unsettled; physical subagent reconciliation required")
     return states, continuations, unsettled

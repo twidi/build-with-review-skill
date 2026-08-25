@@ -25,12 +25,12 @@ Before you inspect any claim, open one detached copy for this report:
 
 Before you invoke `verify-open.sh` or `verify-close.sh`, compare the complete command
 that you are about to issue with the exact prescribed command and its authoritative
-workspace, reviewed commit and report file name. If your local command differs, correct
-only that helper invocation once in the same live verifier and the same physical
-bracket. Do not issue the mismatched command. If you discover the mismatch only after
-issuing it, discard its stdout and result even when it succeeded. Then issue and use
-only the exact corrected invocation. An exact corrected refusal is a blocker. Never
-repair, infer or replace an authoritative input.
+workspace, reviewed commit and report file name. If your local command differs, keep
+correcting only that helper invocation in the same live verifier and the same physical
+bracket until it exactly matches. Do not issue the mismatched command. If you discover
+the mismatch only after issuing it, discard its stdout and result even when it
+succeeded. Then issue and use only an exact invocation. An exact refusal is a blocker.
+Never repair, infer or replace an authoritative input.
 
 ```sh
 <workspace>/prompts/product-review/verify-open.sh <reviewed commit> <the file name of the report you are verifying>
@@ -47,11 +47,35 @@ normalize or infer that path from the repository, workspace, report name or any 
 value. Before you run each proof command, compare every copy path that it names with the
 retained output. Before you use its result, repeat that comparison against the command
 you actually issued. A mismatch invalidates the result even when the command succeeded.
-Discard that result and correct only that local invocation once in the same live
-verifier and the same physical bracket, then use only the corrected command's result. Do
-not close the copy, return an unusable result or request a replacement before this
-correction. If the command with the exact retained path still refuses, follow its real
-blocker or error route.
+Discard that result and keep correcting only that local invocation in the same live
+verifier and the same physical bracket until every copy path exactly matches. Use only
+that exact command's result. Do not close the copy, return an unusable result or request
+a replacement before this correction. If the exact command still refuses, diagnose the
+cause from its complete error before you select a blocker or error route.
+
+Use the exact verification copy as the working directory for every proof command. Never
+run a proof command from the real repository. Never let the real repository supply
+imported project code. For an `uv` project, unset `VIRTUAL_ENV` for the proof command.
+When the project instructions use `TWICC_DATA_DIR`, set `TWICC_DATA_DIR` to the exact
+verification copy. Thus a TwiCC drafted test uses the equivalent of:
+
+```sh
+cd <exact verification copy> && env -u VIRTUAL_ENV TWICC_DATA_DIR=<exact verification copy> uv run pytest <drafted test>
+```
+
+Keep both paths equal to the opaque output from `verify-open.sh`.
+
+**A yielded command is still running.** Retain its session ID and collect its final exit
+status, stdout, and stderr. An empty yielded output chunk is not empty command output.
+Never classify or replace the verifier from a partial tool result.
+
+**A technical failure is not a verdict.** Read its complete error. Diagnose the cause.
+Correct a local command, working directory, dependency, or in-copy test fixture when the
+project's own instructions support that correction. Retry inside this same live verifier
+and physical bracket. Return an unusable terminal only when the exact authoritative
+helper blocks, or no supported correction inside the detached copy remains. Tell the
+controller the exact technical cause so it can correct the next launch instead of
+relaunching blindly.
 
 Close the copy once, after every finding has a verdict, and also on every blocker or
 error path:

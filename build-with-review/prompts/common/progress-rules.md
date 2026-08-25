@@ -183,8 +183,9 @@ commit, gate and report SHA-256. Each finding-verifier physical call consumes th
 identities, and `verify-open.sh` refuses any other commit or report generation before
 touching its detached copy. Calls alternate start and terminal. A terminal is one complete
 finding account or one exact `error`, `empty`, `lost` or `unusable` result. An unusable
-terminal permits one relaunch against the same receipt. It never settles that receipt. A
-complete result permits no later call. An ordinary `pass.closed` consumes the latest exact
+terminal never settles that receipt. Each unusable terminal permits the next diagnosed
+physical call against the same receipt. The PRODUCT verifier has no fixed physical-call
+ceiling. A complete result permits no later call. An ordinary `pass.closed` consumes the latest exact
 pass opening, five settled report receipts and their final completed verifier calls. A positive close also authenticates its allocation,
 confirmed artifact, plan and carried batch work. A clean close refuses any allocation or
 unfinished answer work. A voided close consumes one exact product-review amendment
