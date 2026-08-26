@@ -9129,6 +9129,137 @@ def construction_feature_run_opens_an_amendment_from_a_later_root_sublot():
 
 
 @test
+def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec():
+    spec_relative = "docs/plans/product-amendment-source-design.md"
+    append_note(
+        "run.started", {"cap": 3}, "product-amendment-feature",
+        mode="construction", lot="lot-1", job="controller",
+    )
+    write_project(spec_relative, spec_document())
+    seed_review_pass(built="lot-1", confirmed=1, spec_relative=spec_relative)
+    allocation = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps(allocation_data("lot-1"), separators=(",", ":")),
+    )
+    check(allocation.returncode == 0, allocation.stdout + allocation.stderr)
+    write_confirmed(
+        "lot-1", [], lot="lot-1.1",
+        plan_text="Covers: reports/product-review/lot-1/lot-1-confirmed.md\n",
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    sublot = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    check(sublot.returncode == 0, sublot.stdout + sublot.stderr)
+
+    commit, gate, owner = seed_task_gate(
+        built="lot-1.1",
+        plan_spec_lines=("Covers: reports/product-review/lot-1/lot-1-confirmed.md",),
+    )
+    append_note("pass.opened", {
+        "built": "lot-1.1", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": owner, "source_lot": "lot-1.1",
+        "source_task": 1, "source_attempt": 1,
+    }, by=CALLER, mode="product-review", lot="lot-1.1", job="controller")
+    seed_review_receipts("lot-1.1")
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1.1"}',
+        "--text", "apply the Product Review correction and return to lot-1.1",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    entries = journal_lines()
+    opening_index = len(entries) - 1
+    progress = load_common_module("progress")
+    resolved = progress.product_review_amendment_spec_file(
+        entries, opening_index, entries[opening_index], "the Product Amendment",
+    )
+    check(
+        os.path.relpath(resolved, REPO) == spec_relative,
+        f"the Product Amendment selected another specification: {resolved}",
+    )
+    voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
+    check(voided.returncode == 0, voided.stdout + voided.stderr)
+    order = "apply the Product Review correction and return to lot-1.1"
+    write_report("amendments/1.md", amendment_document(1, order))
+    os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "1"), exist_ok=True)
+    written = run_progress(
+        "note", "amendment.written", "--data", '{"amendment":1}',
+        "--text", os.path.join(WORKSPACE, "amendments", "1.md"),
+    )
+    check(written.returncode == 0, written.stdout + written.stderr)
+    accept_reach_sweep(1, reach_report(), "product-sublot-reach")
+    returned = run_progress("note", "fixer.returned", "--data", '{"applied":0,"declined":0}')
+    check(returned.returncode == 0, returned.stdout + returned.stderr)
+    write_project(spec_relative, spec_document(status="amended"))
+    started = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(started.returncode == 0, started.stdout + started.stderr)
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1", "--text", "consolidation round 1 of 3",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    ended = run_progress(
+        "subagent-ended", "consolidation", "--round", "1", "--data", '{"exact":true}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    consumed = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"consolidation","outcome":"exact"}',
+    )
+    check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
+    close_check = run_progress("amendment-close-check", "1", spec_relative)
+    check(close_check.returncode == 0, close_check.stdout + close_check.stderr)
+
+    reset()
+    append_note(
+        "run.started", {"cap": 3}, "changed-product-amendment-feature",
+        mode="construction", lot="lot-1", job="controller",
+    )
+    write_project(spec_relative, spec_document())
+    seed_review_pass(built="lot-1", confirmed=1, spec_relative=spec_relative)
+    append_note("sublot.allocated", allocation_data("lot-1"), text="lot-1.1")
+    write_confirmed(
+        "lot-1", [], lot="lot-1.1",
+        plan_text="Covers: reports/product-review/lot-1/lot-1-confirmed.md\n",
+    )
+    check(run_progress("note", "pass.closed", "--data", '{"confirmed":1}').returncode == 0,
+          "the changed-spec fixture did not close its source pass")
+    check(run_progress("note", "sublot.opened", "--text", "lot-1.1").returncode == 0,
+          "the changed-spec fixture did not open its sub-lot")
+    write_project(spec_relative, spec_document(extra="\nChanged after source review.\n"))
+    subprocess.run(["git", "-C", REPO, "add", spec_relative], check=True)
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "change source specification"], check=True,
+    )
+    commit, gate, owner = seed_task_gate(
+        built="lot-1.1",
+        plan_spec_lines=("Covers: reports/product-review/lot-1/lot-1-confirmed.md",),
+    )
+    append_note("pass.opened", {
+        "built": "lot-1.1", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": owner, "source_lot": "lot-1.1",
+        "source_task": 1, "source_attempt": 1,
+    }, by=CALLER, mode="product-review", lot="lot-1.1", job="controller")
+    seed_review_receipts("lot-1.1")
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1.1"}',
+        "--text", "apply the Product Review correction and return to lot-1.1",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    entries = journal_lines()
+    try:
+        progress.product_review_amendment_spec_file(
+            entries, len(entries) - 1, entries[-1], "the changed Product Amendment",
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError(
+            "a Product Amendment accepted specification bytes changed after source review"
+        )
+
+
+@test
 def construction_only_amendment_source_fails_closed_before_opening():
     for label in ("dirty-spec", "duplicate-spec", "untracked-spec"):
         reset()

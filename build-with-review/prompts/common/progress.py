@@ -2884,45 +2884,20 @@ def product_review_amendment_spec_file(entries, opening_index, opening, subject)
     if pass_index >= opening_index or opening_data.get("built") != built:
         fail(f"{subject} does not consume its exact product-review source pass")
     plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{built}-plan.md"
-    committed = subprocess.run(
-        ["git", "-C", project_root(), "show", f"{commit}:{plan_relative}"],
-        capture_output=True,
+    spec_source = None
+    if "." in built:
+        _, spec_source = construction_lot_origin_and_spec(
+            entries, pass_index, built, subject,
+        )
+    committed, used_fallback = committed_plan_spec_account(
+        commit, plan_relative, subject,
+        fallback_spec=spec_source["spec"] if spec_source is not None else None,
     )
-    if committed.returncode != 0:
-        fail(f"{subject} has no exact committed plan for its product-review source",
-             plan_relative)
-    try:
-        plan_text = committed.stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        fail(f"{subject}'s committed plan is not valid UTF-8", exc)
-    _, visible = markdown_structure_lines(plan_text)
-    task_headings = [
-        index for index, line in enumerate(visible)
-        if isinstance(line, str) and re.fullmatch(r"## Task [1-9][0-9]* - .+", line)
-    ]
-    spec_lines = [
-        (index, line[len("Spec: "):]) for index, line in enumerate(visible)
-        if isinstance(line, str) and line.startswith("Spec: ")
-    ]
-    if len(spec_lines) != 1 or not task_headings or spec_lines[0][0] >= task_headings[0]:
-        fail(f"{subject}'s committed plan has no one exact root Spec source")
-    spec_relative = spec_lines[0][1]
-    spec_path = exact_real_file(
-        project_root(), spec_relative, f"{subject}'s product-review specification",
+    if used_fallback and committed["spec_sha256"] != spec_source["spec_sha256"]:
+        fail(f"{subject}'s source-pass and reviewed specifications differ")
+    return exact_real_file(
+        project_root(), committed["spec"], f"{subject}'s product-review specification",
     )
-    committed_entry = subprocess.run(
-        ["git", "--literal-pathspecs", "-C", project_root(), "ls-tree", "-z",
-         commit, "--", spec_relative],
-        capture_output=True,
-    )
-    entry = committed_entry.stdout.removesuffix(b"\0").split(b"\0")
-    metadata = entry[0].split(b" ", 2) if len(entry) == 1 else []
-    if committed_entry.returncode != 0 or len(metadata) != 3 \
-            or metadata[0] not in {b"100644", b"100755"} \
-            or not metadata[2].endswith(b"\t" + spec_relative.encode("utf-8")):
-        fail(f"{subject}'s product-review specification is absent or not a regular file "
-             "in its reviewed commit", spec_relative)
-    return spec_path
 
 
 def amendment_spec_file(entries, before, opening_index, opening, subject):
