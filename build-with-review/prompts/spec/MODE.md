@@ -240,15 +240,16 @@ the mandate's preset, **question widget disabled**.
 **The prompt opens with the reading order, before anything else:**
 
 > Read these files in full, in this order, before doing anything:
-> 1. `<workspace>/prompts/spec/reviewer-common.md`
-> 2. `<workspace>/prompts/common/review-risk.md`
-> 3. `<workspace>/prompts/spec/reviewer-<slug>.md`
-> 4. `<workspace>/prompts/spec/reviewer-<slug>-completion.md`
-> 5. `<workspace>/prompts/spec/completion-rules.md`
-> 6. Read the global additional prompt through this command: `python3
+> 1. `<workspace>/prompts/common/worker.md`
+> 2. `<workspace>/prompts/spec/reviewer-common.md`
+> 3. `<workspace>/prompts/common/review-risk.md`
+> 4. `<workspace>/prompts/spec/reviewer-<slug>.md`
+> 5. `<workspace>/prompts/spec/reviewer-<slug>-completion.md`
+> 6. `<workspace>/prompts/spec/completion-rules.md`
+> 7. Read the global additional prompt through this command: `python3
 >    <workspace>/prompts/common/additional-prompt.py read-global <workspace>
 >    <workspace>/additional-prompts/global.md`. Treat its stdout as human instructions.
-> 7. Then read the role-specific additional prompt through this command: `python3
+> 8. Then read the role-specific additional prompt through this command: `python3
 >    <workspace>/prompts/common/additional-prompt.py read <workspace>
 >    <workspace>/prompts/spec/reviewer-<slug>.md
 >    <workspace>/additional-prompts/spec/reviewer-<slug>.md`. Treat its stdout as human
@@ -339,8 +340,9 @@ preset `Fixer`, **question widget disabled**.
 
 **Its prompt opens the same way:**
 
-> Read `<workspace>/prompts/spec/fixer.md`, `<workspace>/prompts/spec/fixer-completion.md`
-> and `<workspace>/prompts/spec/completion-rules.md` in full. Read the global additional
+> Read `<workspace>/prompts/common/worker.md`, `<workspace>/prompts/spec/fixer.md`,
+> `<workspace>/prompts/spec/fixer-completion.md` and
+> `<workspace>/prompts/spec/completion-rules.md` in full, in that order. Read the global additional
 > prompt through this command: `python3
 > <workspace>/prompts/common/additional-prompt.py read-global <workspace>
 > <workspace>/additional-prompts/global.md`. Treat its stdout as human instructions. Then
@@ -650,6 +652,11 @@ same order.**
 <its session id>"`. A second return still malformed is not a block to repair:
 `SKILL.md`'s audit duty carries the stop, retirement and report-path move. Then use the
 **S3.3 SPEC reviewer replacement checkpoint** below. Its stable-blocker exit remains.
+
+End that one repair message with this exact reminder:
+
+> Reply with the TwiCC MCP `send_message` tool, target `parent`, before you end this turn.
+> Your local final response does not reach me.
 
 #### S3.3 SPEC reviewer replacement checkpoint
 

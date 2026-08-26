@@ -26,6 +26,21 @@ on a guess.
 available to you, the CLI consumes a fresh message file. Your text is technical: it
 cites code, quotes output and names variables. It is data, never shell source.
 
+### Every parent turn has one delivery boundary
+
+**Every turn from your parent has one delivery boundary.** This includes the initial
+assignment and every later correction, blocker answer, question or status request. You
+must successfully send the complete answer to `parent` before your local final response.
+
+**Your local final response is not delivered to your parent.** It only ends your current
+provider turn. It never substitutes for `send_message parent`, even when it contains the
+same text. A parent must not need to inspect your session to discover your answer.
+
+Use the TwiCC MCP tool when it is available. A successful tool result closes the delivery
+boundary. A failed parent send keeps the turn open: diagnose the invocation, correct it,
+and retry with the same complete answer. Do not end the turn and expect the parent to find
+the local response.
+
 ```sh
 WORKER_MESSAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/bwr-worker-message.XXXXXXXX")
 ```
@@ -45,21 +60,27 @@ The CLI reads the path as the message. Every byte is data, including a physical 
 equal to a common heredoc delimiter and shell-looking lines after it. Remove the file
 after the CLI has consumed it. A failed send uses a new fresh file for its retry.
 
-**You send exactly two kinds of message, and nothing else:**
+**You send only messages that require the parent's attention:**
 
 | | |
 |---|---|
-| **Your result** | once, when the work is finished — see *Your report* below |
+| **Your result** | once for the initial assignment, when the work is finished — see *Your report* below |
+| **A follow-up answer** | once for each explicit parent correction, blocker answer, question or status request |
 | **A blocker** | as soon as you hit one, and then you wait |
+
+**A correction request permits one corrected result message.** It does not violate the
+initial result's once-only rule. Send the complete corrected result, not a patch whose
+meaning depends on your local final response or the earlier message.
 
 **Never send a progress report.** Not *"I have started"*, not *"I am at step 3"*, not
 *"this is taking longer than expected"*. Your parent is watching several sessions; a
 message from you means something needs its attention, and a message that needs nothing
 teaches it to stop reading yours.
 
-**You do not end when you have reported.** Your parent may send back a correction, an
-answer to your blocker, or a question about what you produced. Stay available and
-answer it. **It decides when you are done**, not you.
+**You do not end the session when you have reported.** Your parent may send back a
+correction, an answer to your blocker, or a question about what you produced. Stay
+available. On each new turn, do the requested work and close the new delivery boundary
+with another successful parent message. **It decides when you are done**, not you.
 
 **If your parent asks where you stand**, answer briefly and go back to work. Being
 asked is not a reason to redo anything.

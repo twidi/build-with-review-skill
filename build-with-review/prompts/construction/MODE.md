@@ -1197,6 +1197,11 @@ and the next attempt launches as a reportless retry, the two facts saying the re
 never landed. An accepted round-10 obligation stays with this writer until the exact
 machine-generated handoff is present; the generic reportless route cannot consume it.
 
+End that failure-report repair message with this exact reminder:
+
+> Reply with the TwiCC MCP `send_message` tool, target `parent`, before you end this turn.
+> Your local final response does not reach me.
+
 **An accepted round-10 defect is never reportless.** The report must also end with the
 exact `construction-failure-handoff` block. `attempt-failed.sh` authenticates the full
 immutable checker result, every disposition and the report hash before its first

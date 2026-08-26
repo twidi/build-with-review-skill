@@ -1050,6 +1050,11 @@ The reports need no decision of their own: they live in the workspace, so they f
   carries nothing, and two or three redone checks are what stand in for it.
 - **You never poll a child.** After creating it or messaging it, stop. Children ping
   `parent`; you advance from their messages and from the watchdog's ticks.
+- **A child's local final response is not a parent message.** After you send a correction,
+  question, or blocker answer, stop controller-side work on that child and wait only for
+  its next asynchronous `parent` message. Never inspect the child session as a substitute,
+  and never poll to discover whether it answered locally. Every worker prompt makes the
+  matching send a boundary of each parent-initiated turn.
 - **You never let a child talk to the human.** Everything is routed, batched, and arrives
   in one place.
 
@@ -1103,7 +1108,8 @@ reaches it through an implementer.
   goes**: `progress.py note bound.spent --mandate <slug, when the role has one> --text
   "malformed block returned - <role> <its session id>"` — the id is the generation,
   and after a compaction that line is what says the next return is the second. The
-  session stays live for that one repair. **A second return still malformed is a
+  correction message ends with the fixed parent-delivery reminder below. The session
+  stays live for that one repair. **A second return still malformed is a
   producer that cannot supply the contract** — not a block to repair: treat it as a
   silent child — stop its process, retire it `failed`, free its path, replace it —
   a fixer by its own recreation rule, anyone else by a fresh session on the same
@@ -1455,6 +1461,21 @@ you. Use the CLI only for something the MCP surface does not expose.
 
 The `twicc-*` skills document the same surface in depth if you need the details of one
 call.
+
+### Every child follow-up that expects an answer
+
+The child's frozen role prompt already owns its parent-delivery contract. Reinforce that
+contract at the point where a later turn starts. You append it to every child follow-up
+that expects an answer, including a malformed-report return, correction request,
+blocker answer, status question or request for missing evidence:
+
+> Reply with the TwiCC MCP `send_message` tool, target `parent`, before you end this turn.
+> Your local final response does not reach me.
+
+Do not append it to a one-way stop, retirement or informational message that expects no
+answer. Do not replace the assignment with this reminder. Send the correction or question
+first, then the fixed sentence. After sending it, follow the no-poll rule and wait for the
+new parent message.
 
 ### Everything a session needs exists before you create it
 

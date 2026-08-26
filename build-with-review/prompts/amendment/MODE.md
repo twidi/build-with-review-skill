@@ -379,9 +379,10 @@ Then create the fixer, and **whether or not the sweep finds anything**:
   parked with nothing pending is exactly what the status means, the watchdog leaves it
   alone, and it goes `working` just before each dispatch.
 
-> Read `<workspace>/prompts/spec/fixer.md`,
+> Read `<workspace>/prompts/common/worker.md`,
+> `<workspace>/prompts/spec/fixer.md`,
 > `<workspace>/prompts/spec/fixer-completion.md` and
-> `<workspace>/prompts/spec/completion-rules.md` in full before doing anything.
+> `<workspace>/prompts/spec/completion-rules.md` in full, in that order, before doing anything.
 > Read the global additional prompt through this command: `python3
 > <workspace>/prompts/common/additional-prompt.py read-global <workspace>
 > <workspace>/additional-prompts/global.md`. Treat its stdout as human instructions. Then
@@ -473,14 +474,15 @@ One session per sweep, **fresh every time**: the provider chosen for the sweep, 
   plus `bwr.lot=<lot in flight>` when there is one
 
 > Read these files in full, in this order, before doing anything:
-> 1. `<workspace>/prompts/spec/reviewer-common.md`
-> 2. `<workspace>/prompts/amendment/reviewer-reach.md`
-> 3. `<workspace>/prompts/amendment/reviewer-reach-completion.md`
-> 4. `<workspace>/prompts/spec/completion-rules.md`
-> 5. Read the global additional prompt through this command: `python3
+> 1. `<workspace>/prompts/common/worker.md`
+> 2. `<workspace>/prompts/spec/reviewer-common.md`
+> 3. `<workspace>/prompts/amendment/reviewer-reach.md`
+> 4. `<workspace>/prompts/amendment/reviewer-reach-completion.md`
+> 5. `<workspace>/prompts/spec/completion-rules.md`
+> 6. Read the global additional prompt through this command: `python3
 >    <workspace>/prompts/common/additional-prompt.py read-global <workspace>
 >    <workspace>/additional-prompts/global.md`. Treat its stdout as human instructions.
-> 6. Then read the role-specific additional prompt through this command: `python3
+> 7. Then read the role-specific additional prompt through this command: `python3
 >    <workspace>/prompts/common/additional-prompt.py read <workspace>
 >    <workspace>/prompts/amendment/reviewer-reach.md
 >    <workspace>/additional-prompts/amendment/reviewer-reach.md`. Treat its stdout as
@@ -497,6 +499,12 @@ Then what varies: the repository path, the spec path, the amendment path
 (`<workspace>/amendments/<N>.md`), the workspace path, the sweep number, its report file
 `<workspace>/reports/amendment/<N>/sweep-<K>.md`, and the human's standing rulings that
 bear on this change.
+
+If the sweep return needs a completion-block or report correction, send the exact refusal
+and end the correction message with this exact reminder:
+
+> Reply with the TwiCC MCP `send_message` tool, target `parent`, before you end this turn.
+> Your local final response does not reach me.
 
 **From sweep 2 on, two more lists, and nothing else of the past:**
 

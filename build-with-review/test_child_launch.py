@@ -167,6 +167,86 @@ def shared_runtime_contract_forbids_a_working_directory_fallback():
 
 
 @test
+def every_worker_turn_delivers_to_its_parent_before_local_completion():
+    skill = " ".join(SKILL.read_text(encoding="utf-8").split())
+    worker = " ".join(read("prompts/common/worker.md").split())
+
+    for phrase in (
+        "Every turn from your parent has one delivery boundary",
+        "Your local final response is not delivered to your parent",
+        "successfully send the complete answer to `parent` before your local final response",
+        "A correction request permits one corrected result message",
+        "A failed parent send keeps the turn open",
+    ):
+        check(phrase in worker, f"the worker delivery contract omits: {phrase}")
+
+    for phrase in (
+        "A child's local final response is not a parent message",
+        "After you send a correction, question, or blocker answer",
+        "wait only for its next asynchronous `parent` message",
+        "Reply with the TwiCC MCP `send_message` tool, target `parent`",
+        "append it to every child follow-up that expects an answer",
+    ):
+        check(phrase in skill, f"the controller delivery contract omits: {phrase}")
+
+    for phrase in (
+        "A report without its completion block goes back",
+        "Reply with the TwiCC MCP `send_message` tool, target `parent`",
+    ):
+        check(phrase in skill, f"the malformed-return route omits: {phrase}")
+
+    session_roles = {
+        "SPEC reviewer common": read("prompts/spec/reviewer-common.md"),
+        "SPEC fixer": read("prompts/spec/fixer.md"),
+        "Construction implementer": read("prompts/construction/implementer.md"),
+    }
+    for slug in ("unlooked", "user", "meaning", "quality", "coverage"):
+        session_roles[f"PRODUCT {slug} lens"] = read(
+            f"prompts/product-review/lens-{slug}.md"
+        )
+    for subject, text in session_roles.items():
+        check("prompts/common/worker.md" in text,
+              f"{subject} does not read the shared parent-delivery contract")
+
+    launch_sections = {
+        "SPEC reviewer launch": section("prompts/spec/MODE.md", "### S3.2", "### S3.3"),
+        "SPEC fixer launch": section("prompts/spec/MODE.md", "### S3.4", "### S3.5"),
+        "AMENDMENT fixer launch": section(
+            "prompts/amendment/MODE.md", "### Create the fixer", "### Launching it",
+        ),
+        "AMENDMENT Reach launch": section(
+            "prompts/amendment/MODE.md", "### Launching it", "### The loop",
+        ),
+    }
+    for subject, text in launch_sections.items():
+        check("prompts/common/worker.md" in text,
+              f"{subject} does not put the shared parent-delivery contract in its reading order")
+
+    fixed_reminder = (
+        "Reply with the TwiCC MCP `send_message` tool, target `parent`, before you end "
+        "this turn. Your local final response does not reach me."
+    )
+    repair_routes = {
+        "SPEC completion-block repair": section(
+            "prompts/spec/MODE.md", "### Auditing a completion block",
+            "#### S3.3 SPEC reviewer replacement checkpoint",
+        ),
+        "PRODUCT completion-block repair": section(
+            "prompts/product-review/MODE.md", "### R1.2", "## R2",
+        ),
+        "AMENDMENT sweep repair": section(
+            "prompts/amendment/MODE.md", "### Launching it", "### The loop",
+        ),
+        "Construction failure-report repair": section(
+            "prompts/construction/MODE.md", "### What comes back", "### C3.8",
+        ),
+    }
+    for subject, text in repair_routes.items():
+        check(fixed_reminder in " ".join(text.replace(">", "").split()),
+              f"{subject} does not remind the corrected child to send its answer")
+
+
+@test
 def gate_runner_requires_the_exact_workspace_and_output_path():
     prompt = read("prompts/construction/gate-runner.md")
     c0 = section("prompts/construction/MODE.md", "### C0.3", "### C0.4")

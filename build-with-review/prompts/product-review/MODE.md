@@ -233,6 +233,11 @@ the gesture and its journal line. Before the widget, use `SKILL.md`'s
 and replacement sessions, unavailable reading, attempted lift, and the consequence of
 every available answer. The pass waits on their answer.
 
+End every completion-block repair or lifted-blocker message with this exact reminder:
+
+> Reply with the TwiCC MCP `send_message` tool, target `parent`, before you end this turn.
+> Your local final response does not reach me.
+
 Then go to **R2.1** for that report — **do not wait for the others.**
 
 First obey the report's `CONTROLLER HANDOFF — REVIEW POOL`. Run the helper, fill every
