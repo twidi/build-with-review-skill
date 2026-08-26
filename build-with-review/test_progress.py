@@ -7947,6 +7947,79 @@ def construction_only_run_opens_a_construction_amendment_from_its_committed_plan
 
 
 @test
+def construction_feature_run_opens_an_amendment_from_a_later_root_sublot():
+    append_note(
+        "run.started", {"cap": 3}, "construction-only-feature",
+        mode="construction", lot="lot-1", job="controller",
+    )
+    seed_review_pass(built="lot-2", confirmed=1)
+    allocation = run_progress(
+        "note", "sublot.allocated", "--text", "lot-2.1",
+        "--data", json.dumps(allocation_data("lot-2"), separators=(",", ":")),
+    )
+    check(allocation.returncode == 0, allocation.stdout + allocation.stderr)
+    write_confirmed("lot-2", [], lot="lot-2.1")
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    sublot = run_progress("note", "sublot.opened", "--text", "lot-2.1")
+    check(sublot.returncode == 0, sublot.stdout + sublot.stderr)
+
+    set_caller_bwr(
+        mode="construction", lot="lot-2.1", job="controller", task=None, attempt=None,
+    )
+    spec_relative = "docs/plans/construction-only-direct-design.md"
+    plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-lot-2.1-plan.md"
+    write_project(spec_relative, spec_document())
+    write_project(
+        plan_relative,
+        "# Construction plan\n\n"
+        f"Spec: {spec_relative}\n\n"
+        "## Task 1 - Implement the allocated correction\n"
+        "Achieves: The allocated correction follows the specification.\n"
+        "To verify: The allocated correction matches the specification.\n",
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "add", spec_relative, plan_relative], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "seed later sub-lot authority"], check=True,
+    )
+    append_note(
+        "plan.written", {"tasks": 1, "op": "construction-plan"},
+        mode="construction", lot="lot-2.1", job="controller",
+    )
+    state_path = seed_direct_ruling(ruling="R1", route="amendment")
+    opened = run_progress(
+        "note", "amendment.opened",
+        "--data", json.dumps({
+            "amendment": 1,
+            "origin": "construction",
+            "ruling": "R1",
+            "authority_kind": "ruling.ready",
+            "authority_ref": "R1",
+            "authority_sha256": file_sha256(state_path),
+        }),
+        "--text", "apply R1 and return to lot-2.1 task 1",
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    source = journal_lines()[-1]["data"].get("construction_source")
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "rb") as journal:
+        raw_lines = journal.read().splitlines()
+    run_proof = next(
+        f"{index}:{hashlib.sha256(raw).hexdigest()}"
+        for index, raw in enumerate(raw_lines)
+        if json.loads(raw).get("kind") == "run.started"
+    )
+    check(
+        isinstance(source, dict)
+        and source.get("lot") == "lot-2.1"
+        and source.get("run") == run_proof
+        and source.get("origin"),
+        "the later sub-lot opening did not bind the feature run and exact lot origin",
+    )
+
+
+@test
 def construction_only_amendment_source_fails_closed_before_opening():
     for label in ("dirty-spec", "duplicate-spec", "untracked-spec"):
         reset()

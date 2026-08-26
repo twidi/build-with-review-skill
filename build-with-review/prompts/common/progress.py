@@ -1579,10 +1579,11 @@ def construction_run_and_plan(entries, before, lot, subject):
     ) if candidate.get("kind") == "run.started"]
     run = starts[0][1] if len(starts) == 1 else {}
     run_data = note_data(run)
-    root_lot = lot.split(".", 1)[0]
     if len(starts) != 1 or run.get("event") != "note" \
             or run.get("mode") != "construction" or run.get("job") != "controller" \
-            or run.get("lot") != root_lot or not isinstance(run.get("text"), str) \
+            or not isinstance(run.get("lot"), str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*", run["lot"]) \
+            or not isinstance(run.get("text"), str) \
             or not run["text"] or set(run_data) != {"cap"} \
             or not isinstance(run_data.get("cap"), int) or isinstance(run_data.get("cap"), bool) \
             or run_data["cap"] < 1:
