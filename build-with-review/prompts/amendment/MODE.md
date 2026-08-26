@@ -799,10 +799,14 @@ task, the plan being written; the run resumes where it stood.
    After `AMENDMENT ATTEMPT SETTLED`, continue with consolidation round 1. Commit the
    Amendment normally. After `amendment.committed`, run C2 on the exact unchanged prior task
    generation. Do not edit the controller-owned task contract before or during that bracket.
-   One canonical incomplete C2 terminal authorizes the correction. Only after that terminal,
-   correct the controller-owned task contract in the workspace plan. Publish that exact first
-   successor with the official `plan-commit.sh`, establish its fresh baseline, and only then
-   launch the next attempt. A clean C2 terminal does not authorize this required successor.
+   One canonical usable C2 terminal authenticates that unchanged generation and authorizes the
+   correction required by the frozen Amendment opening. The result can be clean or incomplete;
+   `unusable: lost` does not authorize the correction. Only after that terminal, correct the
+   controller-owned task contract in the workspace plan. Publish that exact first successor with
+   the official `plan-commit.sh`, establish its fresh baseline, and only then launch the next
+   attempt. A clean C2 terminal does not cancel the frozen replacement requirement, but it
+   never authorizes a later re-cut. Every re-cut after the first successor still requires one
+   exact canonical incomplete result for that successor generation.
    This deferred route never requires or invents a replacement task account in the earlier
    `attempt.failed` event.
 

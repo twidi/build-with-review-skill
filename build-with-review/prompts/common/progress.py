@@ -5028,6 +5028,45 @@ def normalized_committed_plan_state(lot, task, commit, subject):
     return state
 
 
+def deferred_amendment_c2_result_proof(
+        entries, after, before, lot, subject, *, require_incomplete,
+):
+    terminals = [(index, entry) for index, entry in enumerate(
+        entries[after + 1:before], after + 1,
+    ) if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "completeness" and entry.get("lot") == lot
+        and isinstance(note_data(entry), dict)
+        and note_data(entry).get("deferred_amendment_plan") is not None]
+    usable = []
+    for candidate_index, candidate in terminals:
+        candidate_data = note_data(candidate)
+        candidate_frozen = candidate_data["deferred_amendment_plan"]
+        starts = [(start_index, start) for start_index, start in open_subagent_brackets(
+            entries[:candidate_index]
+        ) if start.get("kind") == "completeness" and start.get("lot") == lot
+            and subagent_terminal_matches(start, candidate)]
+        if len(starts) != 1:
+            fail(f"{subject}'s deferred C2 result has no one exact physical opening")
+        expected_frozen = deferred_amendment_c2_account(
+            entries, starts[0][0], lot, subject,
+            recorded=note_data(starts[0][1]).get("deferred_amendment_plan"),
+        )
+        normalized, outcome = deferred_amendment_c2_result_account(
+            candidate_data, expected_frozen, subject, recorded=True,
+        )
+        if candidate_data != normalized:
+            fail(f"{subject}'s deferred C2 result changes its canonical account")
+        if outcome != "lost":
+            usable.append((candidate_index, candidate, outcome))
+    if len(usable) != 1:
+        fail(f"{subject} has no one exact usable deferred C2 result")
+    index, _terminal, outcome = usable[0]
+    if require_incomplete and outcome != "incomplete":
+        fail(f"{subject}'s C2 result does not authorize another plan generation")
+    open_subagent_brackets(entries[:index + 1])
+    return journal_line_proof(index)
+
+
 def incomplete_completeness_proof(entries, after, before, lot, subject):
     terminals = [(index, entry) for index, entry in enumerate(
         entries[after + 1:before], after + 1,
@@ -5038,41 +5077,10 @@ def incomplete_completeness_proof(entries, after, before, lot, subject):
         fail(f"{subject} has no C2 result authorizing a later plan successor")
     index, terminal = terminals[-1]
     data = note_data(terminal)
-    frozen = data.get("deferred_amendment_plan") if isinstance(data, dict) else None
-    if frozen is not None:
-        usable = []
-        for candidate_index, candidate in terminals:
-            candidate_data = note_data(candidate)
-            candidate_frozen = candidate_data.get("deferred_amendment_plan") \
-                if isinstance(candidate_data, dict) else None
-            if candidate_frozen != frozen:
-                continue
-            starts = [(start_index, start) for start_index, start in open_subagent_brackets(
-                entries[:candidate_index]
-            ) if start.get("kind") == "completeness" and start.get("lot") == lot
-                and subagent_terminal_matches(start, candidate)]
-            if len(starts) != 1:
-                fail(f"{subject}'s deferred C2 result has no one exact physical opening")
-            expected_frozen = deferred_amendment_c2_account(
-                entries, starts[0][0], lot, subject, recorded=note_data(starts[0][1]).get(
-                    "deferred_amendment_plan"
-                ),
-            )
-            normalized, outcome = deferred_amendment_c2_result_account(
-                candidate_data, expected_frozen, subject, recorded=True,
-            )
-            if candidate_data != normalized:
-                fail(f"{subject}'s deferred C2 result changes its canonical account")
-            if outcome != "lost":
-                usable.append((candidate_index, candidate, outcome))
-        if len(usable) != 1:
-            fail(f"{subject} has no one exact usable deferred C2 result")
-        index, terminal, outcome = usable[0]
-        data = note_data(terminal)
-        if outcome == "clean":
-            fail(f"{subject}'s C2 result does not authorize another plan generation")
-        open_subagent_brackets(entries[:index + 1])
-        return journal_line_proof(index)
+    if data.get("deferred_amendment_plan") is not None:
+        return deferred_amendment_c2_result_proof(
+            entries, after, before, lot, subject, require_incomplete=True,
+        )
     required = {"decisions", "tasks", "deps", "constraints", "parent"}
     if set(data) not in (required, required | {"deferred_amendment_plan"}):
         fail(f"{subject}'s C2 successor proof is incomplete")
@@ -5278,8 +5286,9 @@ def amendment_plan_publication_account(
     c2_proof = None
     if not prior:
         if deferred:
-            c2_proof = incomplete_completeness_proof(
+            c2_proof = deferred_amendment_c2_result_proof(
                 entries, amendment_commit_index, before, lot, subject,
+                require_incomplete=False,
             )
             c2_index, c2_terminal = journal_entry_from_proof(entries, c2_proof, subject)
             c2_account = note_data(c2_terminal).get("deferred_amendment_plan")

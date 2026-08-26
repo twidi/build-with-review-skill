@@ -2659,6 +2659,8 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
           and "Do not read its marker" in mode_contract
           and "After `amendment.committed`, run C2 on the exact unchanged prior task"
           in mode_contract
+          and "One canonical usable C2 terminal" in mode_contract
+          and "A clean C2 terminal does not cancel" in mode_contract
           and "Only after that terminal" in mode_contract,
           "A4 does not document the public deferred settlement continuation")
     disagreement = "Preserve this deferred implementation alternative."
@@ -3156,27 +3158,9 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
     replacement_c2 = run_progress("subagent-started", "completeness")
     check(replacement_c2.returncode == 0, replacement_c2.stdout + replacement_c2.stderr)
 
-    before_clean_terminal = journal_lines()
-    clean_c2 = run_progress(
-        "subagent-ended", "completeness",
-        "--data", '{"decisions":"1/1","tasks":"3/3","deps":"0/0",'
-                  '"constraints":"ok","parent":"n/a"}',
-    )
-    check(clean_c2.returncode == 0, clean_c2.stdout + clean_c2.stderr)
-    clean_publication = subprocess.run(
-        [os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh"),
-         "lot-1", "A clean C2 cannot authorize the required replacement"],
-        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
-    )
-    check(clean_publication.returncode != 0,
-          "a clean deferred C2 terminal authorized the required first successor")
-    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
-        for entry in before_clean_terminal:
-            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
-
     c2_end_command = [
         sys.executable, SCRIPT, "subagent-ended", "completeness", "--data",
-        '{"decisions":"1/1","tasks":"2/3","deps":"0/0",'
+        '{"decisions":"1/1","tasks":"3/3","deps":"0/0",'
         '"constraints":"ok","parent":"n/a"}',
     ]
     with open(journal_lock_path, "a+b") as journal_lock:
@@ -3199,14 +3183,41 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
                         and entry.get("data", {}).get("deferred_amendment_plan")]
     check(len(usable_terminals) == 1,
           "concurrent deferred C2 terminals appended duplicate usable results")
+    unchanged_publication = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh"),
+         "lot-1", "A clean C2 cannot cancel the required contract replacement"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(unchanged_publication.returncode != 0,
+          "a clean deferred C2 terminal canceled the frozen replacement requirement")
     consumed_c2 = run_progress("subagent-started", "completeness")
     check(consumed_c2.returncode != 0,
           "a usable deferred C2 result did not consume its frozen plan generation")
+    replacement_plan = old_plan.replace(
+        "Achieves: Complete task 3.",
+        "Achieves: Complete task 3 under the committed Amendment 1 contract.",
+    )
     with open(plan_path, "w", encoding="utf-8") as target:
-        target.write(old_plan.replace(
-            "Achieves: Complete task 3.",
-            "Achieves: Complete task 3 under the committed Amendment 1 contract.",
+        target.write(replacement_plan.replace(
+            "Implement the accepted task contract.",
+            "Change implementer-owned Design after the clean C2 terminal.",
         ))
+    changed_design_successor = run_progress(
+        "construction-plan-publication-check", "lot-1", "3",
+    )
+    check(changed_design_successor.returncode != 0,
+          "the clean-C2 successor changed implementer-owned Design bytes")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(replacement_plan.replace(
+            disagreement, "Change Disagreement after the clean C2 terminal.",
+        ))
+    changed_disagreement_successor = run_progress(
+        "construction-plan-publication-check", "lot-1", "3",
+    )
+    check(changed_disagreement_successor.returncode != 0,
+          "the clean-C2 successor changed Disagreement bytes")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(replacement_plan)
     successor_preflight = run_progress(
         "construction-plan-publication-check", "lot-1", "3",
     )
@@ -3218,13 +3229,13 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
         cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
     )
     check(published.returncode == 0, published.stdout + published.stderr)
-    publication = journal_lines()[-1]
-    account = publication.get("data", {}).get("amendment_supersession", {})
-    check(publication.get("kind") == "plan.written" and account.get("amendment_commit")
+    root_publication = journal_lines()[-1]
+    account = root_publication.get("data", {}).get("amendment_supersession", {})
+    check(root_publication.get("kind") == "plan.written" and account.get("amendment_commit")
           == load_common_module("progress").journal_line_proof(
               journal_lines().index(amendment_commit)
           ) and account.get("c2") is not None and account.get("c2_opening") is not None,
-          publication)
+          root_publication)
     check(account["previous_task"]["contract_sha256"]
           != account["replacement_task"]["contract_sha256"]
           and account["previous_task"]["plan_ownership_sha256"]
@@ -3236,6 +3247,62 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
         == account["previous_task"]["disagreement_sha256"],
         "the deferred first successor did not preserve non-null Disagreement authority",
     )
+    load_common_module("progress").validate_plan_written_entry(
+        journal_lines(), len(journal_lines()) - 1, root_publication,
+    )
+
+    before_clean_recut = journal_lines()
+    clean_recut_opening = run_progress("subagent-started", "completeness")
+    check(clean_recut_opening.returncode == 0,
+          clean_recut_opening.stdout + clean_recut_opening.stderr)
+    clean_recut = run_progress(
+        "subagent-ended", "completeness",
+        "--data", '{"decisions":"1/1","tasks":"3/3","deps":"0/0",'
+                  '"constraints":"ok","parent":"n/a"}',
+    )
+    check(clean_recut.returncode == 0, clean_recut.stdout + clean_recut.stderr)
+    first_successor_plan = open(plan_path, encoding="utf-8").read()
+    recut_plan = first_successor_plan.replace(
+        "Achieves: Complete task 3 under the committed Amendment 1 contract.",
+        "Achieves: Complete task 3 under the corrected Amendment 1 contract.",
+    )
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(recut_plan)
+    clean_recut_preflight = run_progress(
+        "construction-plan-publication-check", "lot-1", "3",
+    )
+    check(clean_recut_preflight.returncode != 0,
+          "a clean C2 terminal authorized a later deferred plan re-cut")
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in before_clean_recut:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(first_successor_plan)
+    incomplete_recut_opening = run_progress("subagent-started", "completeness")
+    check(incomplete_recut_opening.returncode == 0,
+          incomplete_recut_opening.stdout + incomplete_recut_opening.stderr)
+    incomplete_recut = run_progress(
+        "subagent-ended", "completeness",
+        "--data", '{"decisions":"1/1","tasks":"2/3","deps":"0/0",'
+                  '"constraints":"ok","parent":"n/a"}',
+    )
+    check(incomplete_recut.returncode == 0,
+          incomplete_recut.stdout + incomplete_recut.stderr)
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(recut_plan)
+    recut = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh"),
+         "lot-1", "Publish the incomplete-C2 deferred re-cut"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(recut.returncode == 0, recut.stdout + recut.stderr)
+    publication = journal_lines()[-1]
+    check(publication.get("kind") == "plan.written"
+          and publication.get("data", {}).get("amendment_supersession", {}).get(
+              "previous_publication"
+          ) == load_common_module("progress").journal_line_proof(
+              journal_lines().index(root_publication)
+          ), publication)
     load_common_module("progress").validate_plan_written_entry(
         journal_lines(), len(journal_lines()) - 1, publication,
     )
@@ -3250,7 +3317,7 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
     write_project(".superpowers/bwr/gate.md", "true\n")
     seed_baseline_gate(
         f"plan/lot-1/{published_commit}", published_commit,
-        amendment_commit["data"]["sha"],
+        root_publication["data"]["commit"],
     )
     for number in range(3):
         subprocess.run([
