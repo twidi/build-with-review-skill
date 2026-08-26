@@ -2442,6 +2442,36 @@ def amendment_superseded_design_finding_closes_without_a_false_checker_terminal(
     check(closer.returncode == 0, closer.stdout + closer.stderr)
     failure = next(entry for entry in journal_lines() if entry.get("kind") == "attempt.failed")
     check(failure["data"] == account, "the closer changed its admitted supersession account")
+    durable_new = journal_lines()
+    legacy = json.loads(json.dumps(durable_new))
+    legacy_failure = next(entry for entry in legacy if entry.get("kind") == "attempt.failed")
+    legacy_supersession = legacy_failure["data"]["amendment_supersession"]
+    legacy_source = legacy_supersession.pop("failure_source")
+    legacy_supersession.update({
+        key: legacy_source[key] for key in (
+            "checker", "verdict", "round", "result", "result_sha256", "finding_ids",
+        )
+    })
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in legacy:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    legacy_history = run_progress("construction-verdict-check", "history")
+    check(legacy_history.returncode == 0,
+          legacy_history.stdout + legacy_history.stderr)
+    changed_legacy = json.loads(json.dumps(legacy))
+    next(entry for entry in changed_legacy if entry.get("kind") == "attempt.failed")[
+        "data"
+    ]["amendment_supersession"]["checker"] = "code"
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in changed_legacy:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_legacy_history = run_progress("construction-verdict-check", "history")
+    check(changed_legacy_history.returncode != 0,
+          "historical replay accepted a changed legacy supersession")
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in durable_new:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
     check(not any(entry.get("kind") in {"design.review.blocked", "design.review.resolved"}
                   for entry in journal_lines()),
           "the amendment route fabricated a Design checker terminal")
@@ -2488,6 +2518,15 @@ def amendment_superseded_design_finding_closes_without_a_false_checker_terminal(
     load_common_module("progress").validate_plan_written_entry(
         journal_lines(), len(journal_lines()) - 1, publication,
     )
+    active_after_root_publication = load_common_module(
+        "progress"
+    ).active_amendment_plan_supersession(
+        journal_lines(), len(journal_lines()), "lot-1",
+        "the consumed immediate Amendment supersession",
+    )
+    check(active_after_root_publication is not None
+          and active_after_root_publication[1] == failure,
+          "the root publication lost the supersession needed by its later re-cuts")
 
     marker = os.path.join(WORKSPACE, "plan-commit-in-progress")
     marker_tree = subprocess.check_output(
@@ -2920,6 +2959,50 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
     progress.validate_amendment_attempt_settled_entry(
         lines, lines.index(terminals[0]), terminals[0],
     )
+    settlement_owner = terminals[0]["data"]["owner"]
+    with_old_failure = json.loads(json.dumps(lines))
+    old_failure = json.loads(json.dumps(failures[0]))
+    old_supersession = old_failure["data"]["amendment_supersession"]
+    for key in (
+        "phase", "fixer", "future_replacement_required",
+        "consolidated_spec_sha256", "settlement_owner_sha256",
+    ):
+        old_supersession.pop(key, None)
+    old_source = old_supersession.pop("failure_source")
+    old_supersession.update({
+        key: old_source[key] for key in (
+            "checker", "verdict", "round", "result", "result_sha256", "finding_ids",
+        )
+    })
+    with_old_failure.append(old_failure)
+    selected_failures = progress.amendment_attempt_settlement_failures(
+        with_old_failure, len(with_old_failure), settlement_owner,
+        "the current settlement beside one old same-tuple failure",
+    )
+    check(len(selected_failures) == 1
+          and selected_failures[0][1]["data"]["amendment_supersession"].get(
+              "settlement_owner_sha256"
+          ) == terminals[0]["data"]["owner_sha256"],
+          "the settlement selected an old same-tuple attempt failure")
+    old_chain_failure = json.loads(json.dumps(old_failure))
+    current_chain_failure = json.loads(json.dumps(failures[0]))
+    old_chain = [old_chain_failure]
+    old_chain.append({
+        "event": "note", "kind": "plan.written", "mode": "construction",
+        "lot": "lot-1", "job": "controller", "data": {
+            "schema": 2,
+            "amendment_supersession": {
+                "failure": progress.journal_line_proof(0),
+            },
+        },
+    })
+    old_chain.append(current_chain_failure)
+    selected_chain = progress.active_amendment_plan_supersession(
+        old_chain, len(old_chain), "lot-1",
+        "the current deferred chain after one consumed legacy generation",
+    )
+    check(selected_chain is not None and selected_chain[0] == 2,
+          "the consumed legacy generation competed with the current deferred chain")
 
     changed_source = json.loads(json.dumps(lines))
     changed_failure = next(

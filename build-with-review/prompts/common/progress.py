@@ -4813,6 +4813,22 @@ def amendment_deferred_failure_source(
     return source
 
 
+def amendment_supersession_failure_fields(failure_source, recorded):
+    legacy = isinstance(recorded, dict) and "failure_source" not in recorded
+    if not legacy:
+        return {"failure_source": failure_source}
+    if failure_source.get("type") != "unresolved" or set(failure_source) != {
+        "schema", "type", "checker", "verdict", "round", "result",
+        "result_sha256", "finding_ids", "logical",
+    }:
+        fail("a legacy AMENDMENT supersession cannot adopt a controller blocker")
+    return {
+        key: failure_source[key] for key in (
+            "checker", "verdict", "round", "result", "result_sha256", "finding_ids",
+        )
+    }
+
+
 def amendment_attempt_supersession_account(
         entries, before, lot, task, attempt, classification, subject, *, recorded=None,
 ):
@@ -4830,6 +4846,7 @@ def amendment_attempt_supersession_account(
     failure_source = amendment_deferred_failure_source(
         entries, opening_index, lot, task, attempt, subject, current_before=before,
     )
+    failure_fields = amendment_supersession_failure_fields(failure_source, recorded)
     if any(entry.get("kind") == "amendment.committed"
            for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s AMENDMENT already committed before the attempt reset")
@@ -4894,7 +4911,7 @@ def amendment_attempt_supersession_account(
             "sweep_proof": journal_line_proof(sweep_index),
             "fixer": journal_line_proof(fixer_index),
             "amendment_sha256": sweep_data["amendment_sha256"],
-            "failure_source": failure_source,
+            **failure_fields,
             "previous_task": previous,
             "future_replacement_required": True,
             "consolidated_spec_sha256": consolidated_spec_sha256,
@@ -4932,7 +4949,7 @@ def amendment_attempt_supersession_account(
         "sweep": sweep_data["sweep"],
         "sweep_proof": journal_line_proof(sweep_index),
         "amendment_sha256": sweep_data["amendment_sha256"],
-        "failure_source": failure_source,
+        **failure_fields,
         "previous_task": previous,
         "replacement_task": replacement,
         "replacement_task_sha256": sha256_bytes(json.dumps(
@@ -4964,6 +4981,22 @@ def active_amendment_plan_supersession(entries, before, lot, subject):
         )
         if not later_terminal:
             candidates.append((index, entry, supersession))
+    if len(candidates) > 1:
+        retained = []
+        for position, candidate in enumerate(candidates):
+            index = candidate[0]
+            later_index = candidates[position + 1][0] if position + 1 < len(candidates) else before
+            failure_proof = journal_line_proof(index)
+            consumed_before_later_generation = any(
+                entry.get("kind") == "plan.written" and entry.get("lot") == lot
+                and note_data(entry).get("schema") == 2
+                and (note_data(entry).get("amendment_supersession") or {}).get("failure")
+                == failure_proof
+                for entry in entries[index + 1:later_index]
+            )
+            if not consumed_before_later_generation:
+                retained.append(candidate)
+        candidates = retained
     if not candidates:
         return None
     if len(candidates) != 1:
@@ -6518,17 +6551,48 @@ def validate_amendment_attempt_settle_owner(entries, before, owner, subject):
     return owner
 
 
+def amendment_attempt_settlement_failures(entries, before, owner, subject):
+    owner_sha256 = canonical_digest(owner)
+    expected = {
+        "phase": AMENDMENT_DEFERRED_PHASE,
+        "settlement_owner_sha256": owner_sha256,
+        "opening": owner["opening"],
+        "sweep_proof": owner["sweep"],
+        "fixer": owner["fixer"],
+        "failure_source": owner["failure_source"],
+    }
+    matches = []
+    for index, entry in enumerate(entries[:before]):
+        data = note_data(entry)
+        if entry.get("kind") != "attempt.failed" or entry.get("lot") != owner["lot"] \
+                or entry.get("task") != owner["task"] \
+                or data.get("attempt") != owner["attempt"]:
+            continue
+        supersession = data.get("amendment_supersession")
+        if not isinstance(supersession, dict) \
+                or supersession.get("phase") != AMENDMENT_DEFERRED_PHASE:
+            continue
+        current_affinity = supersession.get("settlement_owner_sha256") == owner_sha256 \
+            or supersession.get("opening") == owner["opening"] \
+            or supersession.get("fixer") == owner["fixer"]
+        exact = all(supersession.get(key) == value for key, value in expected.items())
+        if current_affinity and not exact:
+            fail(f"{subject}'s current deferred failure changes its settlement owner")
+        if exact:
+            validate_attempt_failed_entry(entries, index, entry)
+            matches.append((index, entry))
+    if len(matches) > 1:
+        fail(f"{subject} has duplicate current deferred attempt failures")
+    return matches
+
+
 def amendment_attempt_settle_terminal_account(entries, before, owner, subject):
     validate_amendment_attempt_settle_owner(entries, before, owner, subject)
     owner_sha256 = canonical_digest(owner)
-    failures = [(index, entry) for index, entry in enumerate(entries[:before])
-                if entry.get("kind") == "attempt.failed"
-                and entry.get("lot") == owner["lot"] and entry.get("task") == owner["task"]
-                and note_data(entry).get("attempt") == owner["attempt"]]
+    failures = amendment_attempt_settlement_failures(entries, before, owner, subject)
     if len(failures) != 1:
         fail(f"{subject} has no one exact deferred attempt failure")
     failure_index, failure = failures[0]
-    validate_attempt_failed_entry(entries, failure_index, failure)
     supersession = note_data(failure).get("amendment_supersession") or {}
     if supersession.get("phase") != AMENDMENT_DEFERRED_PHASE \
             or supersession.get("settlement_owner_sha256") != owner_sha256 \

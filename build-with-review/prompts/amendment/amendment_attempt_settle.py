@@ -296,19 +296,11 @@ def existing_terminal(entries, owner_sha):
 
 
 def existing_failure(entries, owner):
-    matches = [(index, entry) for index, entry in enumerate(entries)
-               if entry.get("kind") == "attempt.failed"
-               and entry.get("lot") == owner["lot"] and entry.get("task") == owner["task"]
-               and progress.note_data(entry).get("attempt") == owner["attempt"]]
-    if len(matches) > 1:
-        die("the Amendment attempt settlement has duplicate attempt failures")
+    matches = progress.amendment_attempt_settlement_failures(
+        entries, len(entries), owner, "the Amendment attempt settlement",
+    )
     if not matches:
         return False
-    index, entry = matches[0]
-    progress.validate_attempt_failed_entry(entries, index, entry)
-    supersession = progress.note_data(entry).get("amendment_supersession") or {}
-    if supersession.get("settlement_owner_sha256") != progress.canonical_digest(owner):
-        die("the durable attempt failure belongs to another settlement owner")
     return True
 
 
