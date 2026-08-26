@@ -9,6 +9,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 WORKSPACE=$(cd "$HERE/../.." && pwd -P)
 REPO=$(cd "$WORKSPACE/../../.." && pwd -P)
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
+source "$WORKSPACE/prompts/common/attempt-closer.sh"
 
 [ $# -ge 2 ] || die "usage:
   document-copy.sh source <workspace-relative-source>
@@ -225,6 +226,11 @@ case "$COMMAND" in
         if [ -e "$COPY_MARKER" ] || [ -L "$COPY_MARKER" ]; then
             require_matching_copy_marker
         else
+            controller_physical_admission_acquire "$WORKSPACE" \
+                || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
+            if ! attempt_success_refuse_pending "$WORKSPACE"; then
+                die "$CONTROLLER_OPERATION_ERROR. The document copy published no marker."
+            fi
             [ -z "$TEMP_EXISTS" ] \
                 || die "an unowned document-copy temporary already exists:
   $TEMP_PATH
@@ -236,6 +242,7 @@ Nothing was written. Take this collision to the human."
 Nothing was written. Take this collision to the human."
             fi
             publish_copy_marker
+            controller_physical_admission_release
         fi
 
         # The deterministic same-directory temporary belongs only to this

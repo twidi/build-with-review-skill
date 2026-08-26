@@ -70,15 +70,19 @@ class Fixture:
         self.base = self.git("rev-parse", "HEAD").stdout.strip()
 
     def write_context(self):
+        session_id = f"gate-test-session-{self.current_attempt}"
         self.fake.write_text(
             f"""#!/usr/bin/env python3
-import json, sys
-payload = {{"session_id":"gate-test-session","session":{{"id":"gate-test-session","annotations":{{"bwr":{{"schema":1,"job":"implementer","mode":"construction","feature":"demo","lot":"lot-1","task":1,"attempt":{self.current_attempt},"status":"working"}}}}}}}}
+import json, os, sys
+payload = {{"session_id":{session_id!r},"session":{{"id":{session_id!r},"annotations":{{"bwr":{{"schema":1,"job":"implementer","mode":"construction","feature":"demo","lot":"lot-1","task":1,"attempt":{self.current_attempt},"status":"working"}}}}}}}}
 if sys.argv[1] == "whoami":
     print(json.dumps(payload))
 elif sys.argv[1] == "session":
     print(json.dumps(payload["session"]))
 elif sys.argv[1] == "update-session":
+    if os.environ.get("BWR_TEST_UPDATE_LOG"):
+        with open(os.environ["BWR_TEST_UPDATE_LOG"], "a", encoding="utf-8") as target:
+            target.write(json.dumps(sys.argv[1:]) + "\\n")
     print(json.dumps({{"status":"updated"}}))
 else:
     raise SystemExit(64)
@@ -488,6 +492,9 @@ else:
             f"lot-1 1 1\nplan {manifest} {len(task_headings)} ownership {state['plan_ownership_sha256']} "
             f"contract {state['contract_sha256']} retry -\n",
             encoding="utf-8",
+        )
+        self.progress_call(
+            "session-started", f"gate-test-session-{self.current_attempt}", ok=True,
         )
 
     def prepare_task_candidate(self):
@@ -1667,6 +1674,500 @@ def task_acceptance_consumes_exact_gate_tree_and_rejects_done_repair():
         fixture.git("commit", "--amend", "-q", "--no-edit")
         amended = fixture.git("rev-parse", "HEAD").stdout.strip()
         fixture.run("bash", fixture.gate_check, "require-task", op, "lot-1", "1", "1", amended, ok=False)
+    finally:
+        fixture.close()
+
+
+@test
+def task_success_recovers_one_legacy_ref_without_attempt_identity():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        journal = fixture.workspace / "progress.jsonl"
+        entries = fixture.journal()
+        start = next(entry for entry in entries if entry.get("event") == "session-started")
+        start["data"].pop("session")
+        start["data"].pop("authority_sha256")
+        start["data"]["schema"] = 1
+        journal.write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in entries),
+            encoding="utf-8",
+        )
+        stable_ref = "refs/bwr/2026-08-19-demo/lot-1/task-1"
+        fixture.git("update-ref", stable_ref, sha)
+        (fixture.workspace / "attempt-in-flight").unlink()
+        before_head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        before_tree = fixture.git("rev-parse", "HEAD^{tree}").stdout.strip()
+
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        refused = fixture.run("bash", succeeded, "lot-1", "1", sha, "0" * 64, ok=False)
+        check(refused.returncode != 0
+              and not (fixture.workspace / "attempt-success-in-progress.json").exists()
+              and fixture.git("rev-parse", stable_ref).stdout.strip() == sha,
+              f"a foreign gate changed the legacy recovery prefix: {refused.stdout} {refused.stderr}")
+        fixture.set_attempt_context(2)
+        wrong_provider = fixture.run(
+            "bash", succeeded, "lot-1", "1", sha, op, ok=False,
+        )
+        check("live legacy implementer session" in (wrong_provider.stdout + wrong_provider.stderr)
+              and not (fixture.workspace / "attempt-success-in-progress.json").exists(),
+              wrong_provider.stdout + wrong_provider.stderr)
+        fixture.set_attempt_context(1)
+        recovered = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
+        terminals = [
+            entry for entry in fixture.journal()
+            if entry.get("kind") == "attempt.succeeded"
+            and entry.get("lot") == "lot-1" and entry.get("task") == 1
+        ]
+        check(len(terminals) == 1, terminals)
+        recovery = terminals[0]["data"].get("success_recovery")
+        check(isinstance(recovery, dict)
+              and recovery.get("session") == "gate-test-session-1"
+              and recovery.get("session_authority", {}).get("session")
+              == "gate-test-session-1"
+              and recovery.get("commit") == sha
+              and recovery.get("gate") == op,
+              terminals[0])
+        check(not (fixture.workspace / "attempt-success-in-progress.json").exists(),
+              "the recovered success retained its owner marker")
+        check(fixture.git("rev-parse", stable_ref).stdout.strip() == sha
+              and fixture.git("rev-parse", "HEAD").stdout.strip() == before_head
+              and fixture.git("rev-parse", "HEAD^{tree}").stdout.strip() == before_tree
+              and not fixture.git("status", "--porcelain").stdout,
+              "the legacy recovery changed repository authority")
+
+        again = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
+        check("already recorded" in again.stdout
+              and len([
+                  entry for entry in fixture.journal()
+                  if entry.get("kind") == "attempt.succeeded"
+                  and entry.get("lot") == "lot-1" and entry.get("task") == 1
+              ]) == 1,
+              recovered.stdout + recovered.stderr + again.stdout + again.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def task_success_resumes_every_helper_owned_public_phase():
+    for phase in ("owned", "ref-written", "ref-published", "terminal-written",
+                  "terminal-recorded"):
+        fixture = Fixture()
+        try:
+            fixture.prepare_task_candidate()
+            op = fixture.open_task_gate()
+            fixture.close_gate(op)
+            sha = fixture.commit_task()
+            succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+            fixture.env["BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER"] = phase
+            interrupted = fixture.run(
+                "bash", succeeded, "lot-1", "1", sha, op, ok=False,
+            )
+            check(interrupted.returncode == 75, f"{phase}: {interrupted.stderr}")
+            check((fixture.workspace / "attempt-success-in-progress.json").is_file(),
+                  f"{phase} did not retain the durable success owner")
+            if phase == "owned":
+                update_log = fixture.temp / "session-updates.jsonl"
+                fixture.env["BWR_TEST_UPDATE_LOG"] = str(update_log)
+                journal = fixture.workspace / "progress.jsonl"
+                complete_journal = journal.read_bytes()
+                incomplete_journal = complete_journal + b'{"interrupted"'
+                journal.write_bytes(incomplete_journal)
+                fixture.progress_call(
+                    "session-retired", "gate-test-session-1", "done",
+                    "--archive", "--hide", ok=False,
+                )
+                check(not update_log.exists()
+                      and journal.read_bytes() == incomplete_journal,
+                      "a competing retirement mutated external state or the journal")
+                journal.write_bytes(complete_journal)
+                fixture.env.pop("BWR_TEST_UPDATE_LOG")
+            fixture.env.pop("BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER")
+            resumed = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
+            terminals = [
+                entry for entry in fixture.journal()
+                if entry.get("kind") == "attempt.succeeded"
+                and entry.get("lot") == "lot-1" and entry.get("task") == 1
+            ]
+            check(len(terminals) == 1
+                  and not (fixture.workspace / "attempt-success-in-progress.json").exists()
+                  and not (fixture.workspace / "attempt-in-flight").exists()
+                  and fixture.git(
+                      "rev-parse", "refs/bwr/2026-08-19-demo/lot-1/task-1"
+                  ).stdout.strip() == sha,
+                  f"{phase}: {resumed.stdout} {resumed.stderr} {terminals}")
+        finally:
+            fixture.close()
+
+
+@test
+def task_success_serializes_two_exact_public_reruns():
+    fixture = Fixture()
+    first = second = None
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        barrier = fixture.temp / "attempt-success-barrier"
+        barrier.mkdir()
+        first_env = dict(fixture.env)
+        first_env["BWR_TEST_ATTEMPT_SUCCESS_OWNER_BARRIER"] = str(barrier)
+        command = ["bash", str(succeeded), "lot-1", "1", sha, op]
+        first = subprocess.Popen(
+            command, cwd=fixture.repo, env=first_env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        ready = barrier / "owner.ready"
+        for _ in range(1000):
+            if ready.exists() or first.poll() is not None:
+                break
+            time.sleep(0.01)
+        check(ready.exists(), "the first success call did not retain its owner lock")
+        second = subprocess.Popen(
+            command, cwd=fixture.repo, env=fixture.env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        time.sleep(0.1)
+        check(second.poll() is None, "the second success call bypassed the retained owner")
+        (barrier / "owner.release").write_text("release\n", encoding="utf-8")
+        first_stdout, first_stderr = first.communicate(timeout=30)
+        second_stdout, second_stderr = second.communicate(timeout=30)
+        terminals = [
+            entry for entry in fixture.journal()
+            if entry.get("kind") == "attempt.succeeded"
+            and entry.get("lot") == "lot-1" and entry.get("task") == 1
+        ]
+        check(first.returncode == 0 and second.returncode == 0 and len(terminals) == 1
+              and "already recorded" in second_stdout,
+              f"first={first_stdout} {first_stderr}; second={second_stdout} {second_stderr}")
+    finally:
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+        fixture.close()
+
+
+@test
+def task_success_reprojects_every_retained_owner_field_before_ref_publication():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        fixture.env["BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER"] = "owned"
+        stopped = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
+        check(stopped.returncode == 75, stopped.stdout + stopped.stderr)
+        fixture.env.pop("BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER")
+        marker_path = fixture.workspace / "attempt-success-in-progress.json"
+        original = marker_path.read_bytes()
+        stable_ref = "refs/bwr/2026-08-19-demo/lot-1/task-1"
+
+        def changed_marker(label):
+            marker = json.loads(original)
+            owner = marker["owner"]
+            if label == "stable_ref":
+                owner["stable_ref"] = "refs/bwr/foreign/task-1"
+            elif label == "started":
+                owner["started"] = "0:" + "0" * 64
+            elif label == "session":
+                owner["session"] = "foreign-session"
+            elif label == "start_account":
+                owner["start_account"]["attempt_base_tree"] = "0" * 40
+            elif label == "gate_account":
+                owner["gate_account"]["opening"] = "0:" + "0" * 64
+            elif label == "retry":
+                owner["retry"] = "0:" + "0" * 64
+            elif label == "phase":
+                marker["phase"] = "ref-published"
+            marker["owner_sha256"] = hashlib.sha256(json.dumps(
+                owner, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode()).hexdigest()
+            return (json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+        for label in (
+            "stable_ref", "started", "session", "start_account",
+            "gate_account", "retry", "phase",
+        ):
+            marker_path.write_bytes(changed_marker(label))
+            refused = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
+            check(refused.returncode != 0
+                  and fixture.git("rev-parse", "--verify", "--quiet", stable_ref,
+                                  ok=False).returncode == 1,
+                  f"{label}: {refused.stdout} {refused.stderr}")
+            marker_path.write_bytes(original)
+
+        completed = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
+        check("task-1" in completed.stdout, completed.stdout + completed.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def task_success_refuses_same_byte_marker_substitution_before_each_phase_gesture():
+    for boundary in ("ref-written", "terminal-written", "before-cleanup"):
+        fixture = Fixture()
+        try:
+            fixture.prepare_task_candidate()
+            op = fixture.open_task_gate()
+            fixture.close_gate(op)
+            sha = fixture.commit_task()
+            succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+            fixture.env["BWR_TEST_ATTEMPT_SUCCESS_SUBSTITUTE_AFTER"] = boundary
+            refused = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
+            terminals = [
+                entry for entry in fixture.journal()
+                if entry.get("kind") == "attempt.succeeded"
+            ]
+            check("marker generation" in refused.stderr
+                  and (fixture.workspace / "attempt-success-in-progress.json").is_file(),
+                  f"{boundary}: {refused.stdout} {refused.stderr}")
+            if boundary == "ref-written":
+                check(not terminals, f"{boundary} appended a terminal")
+            if boundary == "before-cleanup":
+                check((fixture.workspace / "attempt-in-flight").is_file(),
+                      "cleanup consumed attempt-in-flight after marker substitution")
+        finally:
+            fixture.close()
+
+
+@test
+def task_success_and_gate_open_share_one_physical_admission():
+    fixture = Fixture()
+    success = gate = None
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        barrier = fixture.temp / "success-gate-race"
+        barrier.mkdir()
+        success_env = dict(fixture.env)
+        success_env["BWR_TEST_ATTEMPT_SUCCESS_PHYSICAL_BARRIER"] = str(barrier)
+        success_env["BWR_TEST_ATTEMPT_SUCCESS_PHYSICAL_BOUNDARY"] = (
+            "success-before-marker,success-marker-published"
+        )
+        success = subprocess.Popen(
+            ["bash", str(succeeded), "lot-1", "1", sha, op], cwd=fixture.repo,
+            env=success_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        ready = barrier / "success-before-marker.ready"
+        for _ in range(1000):
+            if ready.exists() or success.poll() is not None:
+                break
+            time.sleep(0.01)
+        check(ready.exists(), "success did not retain physical admission")
+        gate = subprocess.Popen(
+            ["bash", str(fixture.gate_check), "open", "baseline", "race/success-first",
+             "-", "0", "0", "HEAD"], cwd=fixture.repo, env=fixture.env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        time.sleep(0.2)
+        (barrier / "success-before-marker.release").write_text("release\n", encoding="utf-8")
+        published = barrier / "success-marker-published.ready"
+        for _ in range(1000):
+            if published.exists() or success.poll() is not None:
+                break
+            time.sleep(0.01)
+        check(published.exists(), "success did not publish its owner while gate waited")
+        (barrier / "success-marker-published.release").write_text("release\n", encoding="utf-8")
+        success_out, success_err = success.communicate(timeout=30)
+        gate_out, gate_err = gate.communicate(timeout=30)
+        check(success.returncode == 0 and gate.returncode != 0
+              and not (fixture.workspace / "gate-check-in-progress").exists(),
+              f"success={success_out} {success_err}; gate={gate_out} {gate_err}")
+
+        journal = fixture.workspace / "progress.jsonl"
+        complete = journal.read_bytes()
+        incomplete = complete + b'{"incomplete"'
+        journal.write_bytes(incomplete)
+        refused = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", "race/incomplete-tail",
+            "-", "0", "0", "HEAD", ok=False,
+        )
+        check(refused.returncode != 0 and journal.read_bytes() == incomplete
+              and not (fixture.workspace / "gate-check-in-progress").exists(),
+              refused.stdout + refused.stderr)
+    finally:
+        for process in (success, gate):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+        fixture.close()
+
+    fixture = Fixture()
+    success = gate = None
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        barrier = fixture.temp / "gate-success-race"
+        barrier.mkdir()
+        gate_env = dict(fixture.env)
+        gate_env["BWR_TEST_CONTROLLER_PHYSICAL_BARRIER"] = "gate-before-marker"
+        gate_env["BWR_TEST_CONTROLLER_PHYSICAL_BARRIER_DIR"] = str(barrier)
+        gate = subprocess.Popen(
+            ["bash", str(fixture.gate_check), "open", "baseline", "race/gate-first",
+             "-", "0", "0", "HEAD"], cwd=fixture.repo, env=gate_env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        ready = barrier / "gate-before-marker.ready"
+        for _ in range(1000):
+            if ready.exists() or gate.poll() is not None:
+                break
+            time.sleep(0.01)
+        check(ready.exists(), "gate did not retain physical admission")
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        success = subprocess.Popen(
+            ["bash", str(succeeded), "lot-1", "1", sha, op], cwd=fixture.repo,
+            env=fixture.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        time.sleep(0.2)
+        check(success.poll() is None, "success bypassed gate physical admission")
+        (barrier / "gate-before-marker.release").write_text("release\n", encoding="utf-8")
+        gate_out, gate_err = gate.communicate(timeout=30)
+        success_out, success_err = success.communicate(timeout=30)
+        stable_ref = "refs/bwr/2026-08-19-demo/lot-1/task-1"
+        check(gate.returncode == 0 and success.returncode != 0
+              and (fixture.workspace / "gate-check-in-progress").is_file()
+              and not (fixture.workspace / "attempt-success-in-progress.json").exists()
+              and fixture.git("rev-parse", "--verify", "--quiet", stable_ref,
+                              ok=False).returncode == 1,
+              f"gate={gate_out} {gate_err}; success={success_out} {success_err}")
+    finally:
+        for process in (success, gate):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+        fixture.close()
+
+
+@test
+def task_success_rejects_an_invented_document_copy_physical_descriptor():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        fixture.env["BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER"] = "owned"
+        stopped = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
+        check(stopped.returncode == 75, stopped.stdout + stopped.stderr)
+        fixture.env.pop("BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER")
+
+        marker = fixture.workspace / "attempt-success-in-progress.json"
+        journal = fixture.workspace / "progress.jsonl"
+        stable_ref = "refs/bwr/2026-08-19-demo/lot-1/task-1"
+        destination_before = fixture.plan_copy.read_bytes()
+        marker_before = marker.read_bytes()
+        marker_identity = (marker.stat().st_dev, marker.stat().st_ino)
+        journal_before = journal.read_bytes()
+        head_before = fixture.git("rev-parse", "HEAD").stdout.strip()
+        tree_before = fixture.git("rev-parse", "HEAD^{tree}").stdout.strip()
+        index_before = fixture.git("write-tree").stdout.strip()
+        status_before = fixture.git("status", "--porcelain=v1").stdout
+
+        fixture.plan.write_text(
+            fixture.plan.read_text(encoding="utf-8")
+            .replace("Change the application value.", "Invented descriptor crossed the owner."),
+            encoding="utf-8",
+        )
+        document_copy = fixture.workspace / "prompts" / "common" / "document-copy.sh"
+        foreign_lock = fixture.temp / "foreign-physical-admission.lock"
+        canonical_lock = fixture.workspace / "controller-physical-admission.lock"
+        attempts = (
+            (
+                "closed",
+                'export CONTROLLER_PHYSICAL_ADMISSION_FD=999; '
+                'exec "$1" copy "$2" "$3" replace',
+                [str(document_copy)],
+            ),
+            (
+                "foreign",
+                'exec 9>>"$1"; export CONTROLLER_PHYSICAL_ADMISSION_FD=9; '
+                'exec "$2" copy "$3" "$4" replace',
+                [str(foreign_lock), str(document_copy)],
+            ),
+            (
+                "canonical-unlocked",
+                'exec 9>>"$1"; export CONTROLLER_PHYSICAL_ADMISSION_FD=9; '
+                'exec "$2" copy "$3" "$4" replace',
+                [str(canonical_lock), str(document_copy)],
+            ),
+        )
+        for label, script, arguments in attempts:
+            command = [
+                "bash", "-c", script, f"document-copy-{label}", *arguments,
+                "plans/lot-1-plan.md",
+                str(fixture.plan_copy.relative_to(fixture.repo)),
+            ]
+            refused = subprocess.run(
+                command, cwd=fixture.repo, env=fixture.env,
+                capture_output=True, text=True, timeout=60,
+            )
+
+            check(refused.returncode != 0
+                  and marker.read_bytes() == marker_before
+                  and (marker.stat().st_dev, marker.stat().st_ino) == marker_identity
+                  and journal.read_bytes() == journal_before
+                  and fixture.git("rev-parse", "--verify", "--quiet", stable_ref,
+                                  ok=False).returncode == 1
+                  and fixture.git("rev-parse", "HEAD").stdout.strip() == head_before
+                  and fixture.git("rev-parse", "HEAD^{tree}").stdout.strip() == tree_before
+                  and fixture.git("write-tree").stdout.strip() == index_before
+                  and fixture.git("status", "--porcelain=v1").stdout == status_before
+                  and fixture.plan_copy.read_bytes() == destination_before
+                  and not (fixture.workspace / "document-copy-in-progress").exists(),
+                  f"{label}: {refused.stdout}{refused.stderr}")
+    finally:
+        fixture.close()
+
+
+@test
+def task_success_historical_replay_binds_schema_two_start_session():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
+        journal = fixture.workspace / "progress.jsonl"
+        rows = fixture.journal()
+        start_index = next(index for index, entry in enumerate(rows)
+                           if entry.get("event") == "session-started")
+        terminal = next(entry for entry in rows if entry.get("kind") == "attempt.succeeded")
+        rows[start_index]["session"] = "rewritten-session"
+        recovery = terminal["data"]["success_recovery"]
+        recovery["session"] = "rewritten-session"
+        recovery["started"] = (
+            f"{start_index}:" + hashlib.sha256(json.dumps(
+                rows[start_index], sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode()).hexdigest()
+        )
+        owner = dict(recovery)
+        owner.pop("owner_sha256")
+        recovery["owner_sha256"] = hashlib.sha256(json.dumps(
+            owner, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode()).hexdigest()
+        journal.write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in rows),
+            encoding="utf-8",
+        )
+        replay = fixture.progress_call("construction-verdict-check", "history", ok=False)
+        check("frozen attempt authority" in (replay.stdout + replay.stderr),
+              replay.stdout + replay.stderr)
     finally:
         fixture.close()
 

@@ -82,6 +82,8 @@ if [ -n "$RESUME" ]; then
     BASE_SHA=$(grep '^base ' "$STATE" | cut -d' ' -f2)
     mapfile -t REPLAY < <(grep '^replay ' "$STATE" | cut -d' ' -f2)
 else
+    controller_physical_admission_acquire "$WORKSPACE" \
+        || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
     if ! controller_operation_refuse_pending "$WORKSPACE" amendment-attempt-settle gate-check; then
         die "$CONTROLLER_OPERATION_ERROR. This fresh rewind cannot pass the frozen gate candidate. Nothing was moved."
     fi
@@ -133,6 +135,7 @@ reset it yourself. Ask the human what becomes of it, then run this call again."
         for sha in ${REPLAY[@]+"${REPLAY[@]}"}; do printf 'replay %s\n' "$sha"; done
     } > "$STATE.tmp"
     mv "$STATE.tmp" "$STATE"
+    controller_physical_admission_release
 fi
 
 SUBJECT_ID=$(printf '%s' "$SUBJECT" | git hash-object --stdin)

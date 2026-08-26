@@ -14,6 +14,12 @@ PROGRESS="$WORKSPACE/prompts/common/progress.py"
 GATE_REPORT="$WORKSPACE/prompts/construction/gate_report.py"
 GATE_EXECUTION="$WORKSPACE/prompts/construction/gate_execution.py"
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
+source "$WORKSPACE/prompts/common/attempt-closer.sh"
+
+if [ -e "$WORKSPACE/attempt-success-in-progress.json" ] \
+   || [ -L "$WORKSPACE/attempt-success-in-progress.json" ]; then
+    die "an attempt success owns the workspace. Rerun the exact same attempt-succeeded.sh call before any gate operation."
+fi
 
 cd "$EXPECTED_REPO"
 REPO=$(git rev-parse --show-toplevel 2>/dev/null) \
@@ -285,6 +291,33 @@ open_check() {
 Finish or abandon that exact check before opening another."
         validate_frozen_state
     else
+        controller_physical_admission_acquire "$WORKSPACE" \
+            || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
+        if ! controller_operation_refuse_pending "$WORKSPACE"; then
+            die "$CONTROLLER_OPERATION_ERROR. The gate opening published no marker."
+        fi
+        exec {GATE_JOURNAL_FD}>> "$JOURNAL.lock" \
+            || die "the gate opening cannot open the journal lock"
+        flock -x "$GATE_JOURNAL_FD" \
+            || die "the gate opening cannot retain the journal lock"
+        if ! python3 - "$JOURNAL" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = pathlib.Path(sys.argv[1]).read_bytes()
+if payload and not payload.endswith(b"\n"):
+    raise SystemExit("the journal has an incomplete final fragment")
+for number, line in enumerate(payload.splitlines(), 1):
+    try:
+        json.loads(line)
+    except ValueError as exc:
+        raise SystemExit(f"journal line {number} is not valid JSON: {exc}")
+PY
+        then
+            die "the journal is not one complete JSONL prefix. The gate opening published no marker."
+        fi
+        controller_physical_test_barrier gate-before-marker
         op=$(printf '%s\0' "$scope" "$owner" "$head" "$base" "$tree" "$GATE_SHA" "$code" \
             "$(date +%s%N)" "$$" "$RANDOM" | sha256sum | cut -d' ' -f1)
         marker_draft=$(mktemp "$WORKSPACE/.gate-check-in-progress.XXXXXX")
@@ -305,6 +338,10 @@ Finish or abandon that exact check before opening another."
             || { rm -f "$marker_draft"; die "the logical gate could not freeze its exact policy and schedule"; }
         rm -f "$marker_draft"
         read_marker
+        controller_physical_test_barrier gate-marker-published
+        flock -u "$GATE_JOURNAL_FD"
+        exec {GATE_JOURNAL_FD}>&-
+        controller_physical_admission_release
     fi
     "$PROGRESS" subagent-started gate-runner --data "$(event_data)"
     printf 'OP %s\nGATE %s\nTREE %s\nHEAD %s\nBASE %s\nEXECUTION %s\n' \

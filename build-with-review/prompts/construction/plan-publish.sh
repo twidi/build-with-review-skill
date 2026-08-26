@@ -66,6 +66,8 @@ publishing. Nothing was copied."
 TARGET_REL="docs/plans/$(basename "$WORKSPACE")-$LOT-plan.md"
 TARGET="$REPO/$TARGET_REL"
 
+controller_physical_admission_acquire "$WORKSPACE" \
+    || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
 if ! controller_operation_refuse_pending "$WORKSPACE" amendment-attempt-settle gate-check; then
     die "$CONTROLLER_OPERATION_ERROR. Plan publication must happen before the final gate opens. Nothing was copied."
 fi
@@ -75,4 +77,5 @@ fi
 # then atomically replaces the target without following any alias.
 "$DOCUMENT_COPY" copy "$SOURCE_REL" "$TARGET_REL" existing
 "$DOCUMENT_COPY" finish "$SOURCE_REL" "$TARGET_REL" existing
+controller_physical_admission_release
 printf '%s\n' "$TARGET"

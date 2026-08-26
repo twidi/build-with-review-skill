@@ -41,6 +41,9 @@ cd "$REPO"
 if ! bare_stop_refuse_unfinished "$WORKSPACE"; then
     die "$BARE_STOP_ERROR. This attempt cannot start. Nothing was marked and no session exists."
 fi
+if ! controller_operation_refuse_pending "$WORKSPACE"; then
+    die "$CONTROLLER_OPERATION_ERROR. This attempt cannot start. Nothing was marked and no session exists."
+fi
 "$PROGRESS" construction-verdict-check history >/dev/null \
     || die "construction has a consumed checker or diagnostic verdict without its exact durable proof.
 Recover that logical spend and physical result before starting another attempt. Nothing was marked and no session exists."

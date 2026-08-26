@@ -9,6 +9,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$HERE/../.." && pwd)
 REPO=$(cd "$WORKSPACE/../../.." && pwd)
 CONSTRUCTION_REVIEW="$WORKSPACE/prompts/construction/construction_review.py"
+SUCCESS_HELPER="$WORKSPACE/prompts/construction/attempt_success.py"
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 [ -e "$REPO/.git" ] || die "$REPO is not a git repository"
 source "$WORKSPACE/prompts/common/attempt-closer.sh"
@@ -22,6 +23,15 @@ LOT=$1 N=$2 REPORTED=$3 GATE_OP=$4
 
 cd "$REPO"
 RUN="refs/bwr/$(basename "$WORKSPACE")"   # this run's own ref namespace — see vocabulary.md
+
+# The helper-owned success marker precedes every durable success gesture. The
+# same public call resumes it before any generic owner guard can reject its own
+# marker.
+if [ -e "$WORKSPACE/attempt-success-in-progress.json" ] \
+   || [ -L "$WORKSPACE/attempt-success-in-progress.json" ]; then
+    python3 "$SUCCESS_HELPER" "$LOT" "$N" "$REPORTED" "$GATE_OP"
+    exit $?
+fi
 
 # A controller operation can be staged, committed or waiting on its durable
 # tail while this attempt remains live. Neither the fresh success path nor the
@@ -47,69 +57,14 @@ attempt-succeeded.sh cannot replace it. Nothing was recorded."
     fi
 fi
 
-# An existing task ref is settled FIRST — before the clean-tree check, before
-# the identity is required. This closer has no journal note and no pending
-# marker: the stable ref is its only completion proof, and its one crash
-# window — killed after the identity's removal, before the output reached the
-# caller — leaves exactly ref present, identity absent. A retry that demanded
-# the identity first could never reach this answer.
+# An existing task ref is settled first. The helper distinguishes an already
+# complete terminal from the one closed legacy crash window where the stable
+# ref exists but both the terminal and attempt identity are absent.
 if EXISTING=$(git rev-parse --verify --quiet "$RUN/$LOT/task-$N"); then
     SHA=$(git rev-parse --verify --quiet "$REPORTED^{commit}") || SHA=
     if [ -n "$SHA" ] && [ "$EXISTING" = "$SHA" ]; then
-        # The recording completed; only its tail may be owed — the success
-        # note first (the permanent record that this K was used, which the
-        # start guard reads forever after), then the identity's removal. A
-        # stale identity naming this very attempt carries the K the note
-        # needs; any other identity is another attempt's, and stays. An
-        # absent identity means the removal — the last gesture — ran, so
-        # nothing can be owed past it.
-        if [ -f "$INFLIGHT" ]; then
-            F_LOT=; F_N=; F_K=; F_RETRY=; F_RETRY_PROOF=
-            {
-                read -r F_LOT F_N F_K
-                read -r _ _ _ _ _ _ _ F_RETRY F_RETRY_PROOF _
-            } < "$INFLIGHT" || true
-            if [ "$F_LOT $F_N" = "$LOT $N" ]; then
-                JOURNAL="$WORKSPACE/progress.jsonl"
-                if ! { [ -f "$JOURNAL" ] \
-                   && awk -v k='"kind":"attempt.succeeded"' -v l="\"lot\":\"$LOT\"" \
-                          -v t="\"task\":$N," -v a="\"attempt\":$F_K," \
-                          'index($0,k) && index($0,l) && index($0,t) && index($0,a) {found=1; exit} END {exit !found}' "$JOURNAL"; }; then
-                    bash "$WORKSPACE/prompts/construction/gate-check.sh" require-task \
-                        "$GATE_OP" "$LOT" "$N" "$F_K" "$EXISTING" >/dev/null \
-                        || die "the stable ref exists, but the supplied final gate does not prove this attempt's exact commit. The success tail remains open."
-                    SUCCESS_DATA="{\"attempt\":$F_K,\"lot\":\"$LOT\",\"sha\":\"$EXISTING\",\"gate\":\"$GATE_OP\""
-                    [ "$F_RETRY $F_RETRY_PROOF" = "retry -" ] \
-                        || SUCCESS_DATA="$SUCCESS_DATA,\"retry\":\"$F_RETRY_PROOF\""
-                    SUCCESS_DATA="$SUCCESS_DATA}"
-                    NOTE=("$WORKSPACE/prompts/common/progress.py" note attempt.succeeded \
-                        --task "$N" --data "$SUCCESS_DATA")
-                    if ! "${NOTE[@]}"; then
-                        {
-                            printf '**script WARNING** · the task IS recorded, but the journal line naming this\n'
-                            printf 'attempt number is missing — the start guard reads it to never reuse K.\n'
-                            printf 'Retry the line alone, then remove the identity file:\n\n'
-                            printf '    %s\n' "$(printf '%q ' "${NOTE[@]}")"
-                            printf '    rm -f %q\n' "$INFLIGHT"
-                        } >&2
-                        printf 'task-%s %s (already recorded)\n' "$N" "$EXISTING"
-                        exit 1
-                    fi
-                fi
-                rm -f "$INFLIGHT"
-            fi
-        fi
-        if [ ! -f "$INFLIGHT" ]; then
-            [ -f "$WORKSPACE/progress.jsonl" ] && awk \
-                -v k='"kind":"attempt.succeeded"' -v l="\"lot\":\"$LOT\"" \
-                -v t="\"task\":$N," -v s="\"sha\":\"$EXISTING\"" \
-                -v g="\"gate\":\"$GATE_OP\"" \
-                'index($0,k) && index($0,l) && index($0,t) && index($0,s) && index($0,g) {found=1; exit} END {exit !found}' \
-                "$WORKSPACE/progress.jsonl" \
-                || die "the task ref is complete, but this retry does not name its recorded final gate operation"
-        fi
-        printf 'task-%s %s (already recorded)\n' "$N" "$EXISTING"
-        exit 0
+        python3 "$SUCCESS_HELPER" "$LOT" "$N" "$SHA" "$GATE_OP"
+        exit $?
     fi
     die "$RUN/$LOT/task-$N already exists, and a validated task ref never moves.
 It stands at $EXISTING — not the commit this call reports. Either the task number is
@@ -259,35 +214,7 @@ bash "$WORKSPACE/prompts/construction/gate-check.sh" require-task \
 No stable ref or success terminal was written. Return the attempt to its code-checker and
 final-gate boundary; a content-changing repair needs a new logical gate operation."
 
-# The ref's absence was proved at the top, before anything else — a validated
-# task ref never moves, and a rebuild has no ref to collide with: the rewind
-# took it out of the way.
-git update-ref "$RUN/$LOT/task-$N" HEAD
-SHA_REC=$(git rev-parse HEAD)
-
-# The success note is the permanent, K-bearing record that this attempt number
-# was used. The try ref and the failure report carry a FAILED attempt's K; a
-# success leaves only the stable task ref, which carries no K and which a
-# later rewind moves aside — without this line, the rebuild after a rewind
-# could allocate the same K and inherit this attempt's bounded spends (its
-# nudge, its dirty-Done repair). The identity falls last, after the note it
-# feeds: removed first, a kill in between would leave a used K that no guard
-# can ever see again.
-SUCCESS_DATA="{\"attempt\":$F_K,\"lot\":\"$LOT\",\"sha\":\"$SHA_REC\",\"gate\":\"$GATE_OP\""
-[ "$F_RETRY_PROOF" = - ] || SUCCESS_DATA="$SUCCESS_DATA,\"retry\":\"$F_RETRY_PROOF\""
-SUCCESS_DATA="$SUCCESS_DATA}"
-NOTE=("$WORKSPACE/prompts/common/progress.py" note attempt.succeeded \
-    --task "$N" --data "$SUCCESS_DATA")
-if ! "${NOTE[@]}"; then
-    {
-        printf '**script WARNING** · the task IS recorded at its ref, but the journal line\n'
-        printf 'naming this attempt number is missing — the start guard reads it to never\n'
-        printf 'reuse K. Retry the line alone, then remove the identity file:\n\n'
-        printf '    %s\n' "$(printf '%q ' "${NOTE[@]}")"
-        printf '    rm -f %q\n' "$INFLIGHT"
-    } >&2
-    printf 'task-%s %s\nNOTE FAILED — see the warning\n' "$N" "$SHA_REC"
-    exit 1
-fi
-rm -f "$INFLIGHT"   # the attempt is closed; its identity has served — and falls last
-printf 'task-%s %s\n' "$N" "$SHA_REC"
+# The helper publishes the durable owner before the stable ref. It then appends
+# the helper-owned success terminal and removes only the exact attempt identity.
+# A retry of this same public call resumes any interrupted phase.
+python3 "$SUCCESS_HELPER" "$LOT" "$N" "$SHA" "$GATE_OP"

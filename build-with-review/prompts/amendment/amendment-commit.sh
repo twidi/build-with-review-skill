@@ -107,7 +107,11 @@ fi
 # interrupted call's tail belongs to the state recorded when it opened, and
 # moving a since-closed attempt's mark is benign — nothing reads a mark
 # without the identity file beside it.
+FRESH_PHYSICAL_OWNER=
 if [ ! -f "$PENDING" ]; then
+    controller_physical_admission_acquire "$WORKSPACE" \
+        || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
+    FRESH_PHYSICAL_OWNER=1
     if ! controller_operation_refuse_pending "$WORKSPACE" amendment-attempt-settle gate-check; then
         die "$CONTROLLER_OPERATION_ERROR. This fresh amendment commit cannot pass the frozen gate candidate. Nothing was copied, staged or committed."
     fi
@@ -204,6 +208,8 @@ nobody's to decide but the human's. Nothing was committed; the new content sits 
             "$P_SWEEP" "$P_SWEEP_SHA" "$P_CONSOLIDATION" "$P_AMENDMENT_SHA" \
             "$P_SPEC_SHA" > "$PENDING.tmp"
         mv "$PENDING.tmp" "$PENDING"
+        controller_physical_admission_release
+        FRESH_PHYSICAL_OWNER=
     fi
     git -c core.hooksPath=/dev/null commit -q -m "$SUBJECT" -- "$AMENDMENT" "$SPEC"
     "$DOCUMENT_COPY" finish "$SOURCE_REL" "$AMENDMENT" replace

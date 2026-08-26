@@ -149,6 +149,7 @@ AMENDMENT_SWEEP_PREFLIGHT = os.path.join(WORKSPACE, "amendment-sweep-preflight.j
 AMENDMENT_ATTEMPT_SETTLE_MARKER = os.path.join(
     WORKSPACE, "amendment-attempt-settle-in-progress.json",
 )
+ATTEMPT_SUCCESS_MARKER = os.path.join(WORKSPACE, "attempt-success-in-progress.json")
 BARE_STOP_MARKER = os.path.join(WORKSPACE, "bare-stop-in-progress")
 DASHBOARD_DIR = os.path.join(WORKSPACE, "dashboard")
 DASHBOARD_COPY = os.path.join(DASHBOARD_DIR, "data", "progress.jsonl")
@@ -3059,7 +3060,7 @@ def git_commit_and_tree(name, subject):
     return sha, tree.stdout.strip()
 
 
-def construction_session_start_account(context, subject):
+def construction_session_start_account(context, session, subject):
     identity = active_attempt_identity(context, subject)
     base_ref = (
         f"refs/bwr/{Path(WORKSPACE).name}/{identity['lot']}/attempt-base"
@@ -3068,13 +3069,16 @@ def construction_session_start_account(context, subject):
     identity_sha256 = sha256_bytes(json.dumps(
         identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8"))
-    return {
-        "schema": 1,
+    account = {
+        "schema": 2,
+        "session": session,
         "attempt_identity": identity,
         "attempt_identity_sha256": identity_sha256,
         "attempt_base": base,
         "attempt_base_tree": tree,
     }
+    account["authority_sha256"] = canonical_digest(account)
+    return account
 
 
 def validate_construction_session_start(entry, subject, *, entries=None, index=None):
@@ -3091,12 +3095,17 @@ def validate_construction_session_start(entry, subject, *, entries=None, index=N
     data = entry.get("data")
     if data is None:
         return context  # historical schema-1 line, before launch accounts existed
-    required = {
+    legacy_required = {
         "schema", "attempt_identity", "attempt_identity_sha256",
         "attempt_base", "attempt_base_tree",
     }
+    current_required = legacy_required | {"session", "authority_sha256"}
     identity = data.get("attempt_identity") if isinstance(data, dict) else None
-    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 1 \
+    if not isinstance(data, dict) or (
+        data.get("schema") == 1 and set(data) != legacy_required
+        or data.get("schema") == 2 and set(data) != current_required
+        or data.get("schema") not in {1, 2}
+    ) \
             or not isinstance(identity, dict):
         fail(f"{subject} has malformed frozen attempt authority")
     identity_required = {
@@ -3116,9 +3125,15 @@ def validate_construction_session_start(entry, subject, *, entries=None, index=N
         identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8"))
     commit, tree = git_commit_and_tree(data.get("attempt_base"), subject)
+    current_authority = dict(data)
+    current_digest = current_authority.pop("authority_sha256", None)
     if data.get("attempt_identity_sha256") != digest \
             or commit != data.get("attempt_base") \
-            or tree != data.get("attempt_base_tree"):
+            or tree != data.get("attempt_base_tree") \
+            or data.get("schema") == 2 and (
+                data.get("session") != entry["session"]
+                or current_digest != canonical_digest(current_authority)
+            ):
         fail(f"{subject} changed its frozen attempt authority")
     if entries is not None and index is not None \
             and identity.get("retry") != outstanding_retry_proof(entries[:index], context["lot"]):
@@ -6416,6 +6431,312 @@ def normalize_attempt_failed(entries, data, context):
     )
 
 
+def validate_attempt_success_marker(marker, subject):
+    owner = marker.get("owner") if isinstance(marker, dict) else None
+    if not isinstance(owner, dict) or set(marker) != {
+        "schema", "operation", "phase", "owner", "owner_sha256",
+    } or marker.get("schema") != 1 or marker.get("operation") != "attempt-success" \
+            or marker.get("phase") not in {
+                "owned", "ref-writing", "ref-published", "terminal-writing",
+                "terminal-recorded",
+            } or marker.get("owner_sha256") != canonical_digest(owner):
+        fail(f"{subject} has a malformed success owner")
+    return marker
+
+
+def attempt_success_marker(subject, *, required=False):
+    if not os.path.lexists(ATTEMPT_SUCCESS_MARKER):
+        if required:
+            fail(f"{subject} has no retained success owner")
+        return None
+    path = exact_real_file(
+        WORKSPACE, os.path.basename(ATTEMPT_SUCCESS_MARKER), subject,
+    )
+    try:
+        with open(path, encoding="utf-8") as source:
+            marker = json.load(source)
+    except (OSError, UnicodeError, ValueError) as exc:
+        fail(f"{subject} has a malformed success owner", exc)
+    return validate_attempt_success_marker(marker, subject)
+
+
+def historical_final_code_proof(entries, proof, lot, task, attempt_number, tree, subject):
+    proof_index, _ = journal_entry_from_proof(entries, proof, subject)
+    prefix = entries[:proof_index + 1]
+    validate_construction_verdict_history(prefix)
+    verdicts = code_verdicts(prefix, len(prefix), lot, task, attempt_number)
+    if not verdicts:
+        fail(f"{subject} has no proved code-checker verdict")
+    verdict_index, verdict = verdicts[-1]
+    verdict_data = note_data(verdict)
+    manifest = verdict_data.get("manifest", "")
+    disagreement = "-"
+    expected_proof = journal_line_proof(verdict_index)
+    if verdict_data.get("outcome") != "clean":
+        if verdict_data.get("round") != CONSTRUCTION_CHECKER_ROUNDS["code"]:
+            fail(f"{subject} consumes unfinished code findings")
+        resolutions = [(index, entry) for index, entry in code_resolutions(
+            prefix, len(prefix), lot, task, attempt_number,
+        ) if note_data(entry).get("round") == verdict_data.get("round")]
+        if len(resolutions) != 1:
+            fail(f"{subject} has no exact final code resolution")
+        resolution_index, resolution = resolutions[0]
+        resolution_data = note_data(resolution)
+        if resolution_data.get("verdict") != journal_line_proof(verdict_index) \
+                or resolution_data.get("accepted") != 0:
+            fail(f"{subject} has no accepted final code resolution")
+        expected_proof = journal_line_proof(resolution_index)
+        manifest = resolution_data.get("manifest", "")
+        disagreement = resolution_data.get("disagreement_sha256") or "-"
+    if proof != expected_proof:
+        fail(f"{subject} names another final code proof")
+    final = subprocess.run(
+        [sys.executable, CONSTRUCTION_REVIEW, "historical-final-tree",
+         manifest, tree, disagreement],
+        capture_output=True, text=True,
+    )
+    if final.returncode != 0:
+        fail(f"{subject} does not bind its reviewed candidate", final.stderr or final.stdout)
+    return proof
+
+
+def attempt_success_gate_account(entries, before, lot, task, attempt_number, commit, operation,
+                                 subject):
+    active = None
+    completed = []
+    identity_keys = {
+        "op", "scope", "owner", "lot", "task", "attempt", "head", "base",
+        "tree", "gate", "code",
+    }
+    for index, entry in enumerate(entries[:before]):
+        if entry.get("kind") != "gate-runner" or note_data(entry).get("op") != operation:
+            continue
+        data = note_data(entry)
+        keys = identity_keys | ({"execution"} if "execution" in data else set())
+        if entry.get("event") == "subagent-started":
+            if active is not None or set(data) != keys:
+                fail(f"{subject}'s final gate has overlapping or malformed openings")
+            active = (index, data, keys)
+            continue
+        if entry.get("event") != "subagent-ended" or active is None:
+            fail(f"{subject}'s final gate has a terminal without its opening")
+        opening_index, opening_data, opening_keys = active
+        if keys != opening_keys or any(data.get(key) != opening_data.get(key)
+                                       for key in opening_keys):
+            fail(f"{subject}'s final gate terminal changes its opening identity")
+        active = None
+        if "unusable" not in data:
+            completed.append((opening_index, index, data))
+    if active is not None or len(completed) != 1:
+        fail(f"{subject} has no one complete physical final gate")
+    opening_index, terminal_index, data = completed[0]
+    expected_keys = identity_keys | {
+        "green", "surface", "report", "report_sha256", "commands",
+    } | ({"execution"} if "execution" in data else set())
+    if set(data) != expected_keys or data.get("scope") != "task" \
+            or (data.get("lot"), data.get("task"), data.get("attempt")) != (
+                lot, task, attempt_number,
+            ) or data.get("op") != operation or data.get("green") is not True \
+            or data.get("surface") != "unchanged":
+        fail(f"{subject}'s final gate changes its accepted task identity", data)
+    _commit, tree = git_commit_and_tree(commit, subject)
+    if data.get("tree") != tree:
+        fail(f"{subject}'s final gate checked another task tree")
+    historical_final_code_proof(
+        entries, data.get("code"), lot, task, attempt_number, tree,
+        f"{subject}'s final gate",
+    )
+    report = exact_real_file(WORKSPACE, data.get("report"), f"{subject}'s final gate report")
+    with open(report, "rb") as source:
+        report_bytes = source.read()
+    if sha256_bytes(report_bytes) != data.get("report_sha256"):
+        fail(f"{subject}'s final gate report changed")
+    audit = subprocess.run(
+        [sys.executable, GATE_REPORT, operation, data.get("gate"), tree,
+         data.get("execution", "-")], capture_output=True, text=True,
+    )
+    try:
+        audited = json.loads(audit.stdout) if audit.returncode == 0 else None
+    except ValueError:
+        audited = None
+    if not isinstance(audited, dict) or any(data.get(key) != value
+                                            for key, value in audited.items()):
+        fail(f"{subject}'s final gate has no canonical physical report",
+             audit.stderr or audit.stdout)
+    return {
+        "opening": journal_line_proof(opening_index),
+        "terminal": journal_line_proof(terminal_index),
+        "terminal_data": data,
+    }
+
+
+def attempt_success_commit_account(lot, task, commit, start_account, subject, *, live):
+    start_identity = start_account["attempt_identity"]
+    base = start_account["attempt_base"]
+    resolved, tree = git_commit_and_tree(commit, subject)
+    ancestry = subprocess.run(
+        ["git", "-C", REPO, "merge-base", "--is-ancestor", base, resolved],
+        capture_output=True, text=True,
+    )
+    count = subprocess.run(
+        ["git", "-C", REPO, "rev-list", "--count", f"{base}..{resolved}"],
+        capture_output=True, text=True,
+    )
+    if ancestry.returncode != 0 or count.returncode != 0 or count.stdout.strip() != "1":
+        fail(f"{subject}'s task is not one exact commit above its attempt base")
+    plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
+    committed = subprocess.run(
+        ["git", "-C", REPO, "show", f"{resolved}:{plan_relative}"], capture_output=True,
+    )
+    changed = subprocess.run(
+        ["git", "-C", REPO, "diff-tree", "--no-commit-id", "--name-only", "-r",
+         resolved, "--", plan_relative], capture_output=True, text=True,
+    )
+    if committed.returncode != 0 or changed.returncode != 0 or not changed.stdout.strip():
+        fail(f"{subject}'s task commit has no refreshed plan copy")
+    headings = plan_task_manifest(committed.stdout, f"{subject}'s committed plan")
+    manifest = subprocess.run(
+        ["git", "-C", REPO, "hash-object", "--stdin"],
+        input=("\n".join(headings) + "\n").encode(), capture_output=True,
+    )
+    if manifest.returncode != 0 or len(headings) != start_identity["plan_tasks"] \
+            or manifest.stdout.decode().strip() != start_identity["plan_manifest"]:
+        fail(f"{subject}'s committed task manifest changed from its frozen start")
+    committed_state = subprocess.run(
+        [sys.executable, CONSTRUCTION_REVIEW, "committed-plan-state", lot, str(task), resolved],
+        capture_output=True, text=True,
+    )
+    try:
+        committed_account = json.loads(committed_state.stdout)
+    except ValueError:
+        committed_account = None
+    if committed_state.returncode != 0 or not isinstance(committed_account, dict) \
+            or committed_account.get("contract_sha256") != start_identity["contract_sha256"] \
+            or committed_account.get("plan_ownership_sha256") \
+            != start_identity["plan_ownership_sha256"]:
+        fail(f"{subject}'s committed plan changes its frozen controller authority",
+             committed_state.stderr or committed_state.stdout)
+    if live:
+        head, head_tree = git_commit_and_tree("HEAD", subject)
+        status = subprocess.run(
+            ["git", "-C", REPO, "status", "--porcelain"], capture_output=True, text=True,
+        )
+        workspace_plan = exact_real_file(
+            WORKSPACE, f"plans/{lot}-plan.md", f"{subject}'s workspace plan",
+        )
+        with open(workspace_plan, "rb") as source:
+            workspace_bytes = source.read()
+        current_account = read_construction_plan_state(lot, task, subject)
+        if head != resolved or head_tree != tree or status.returncode != 0 or status.stdout \
+                or workspace_bytes != committed.stdout \
+                or current_account.get("contract_sha256") != start_identity["contract_sha256"] \
+                or current_account.get("plan_ownership_sha256") \
+                != start_identity["plan_ownership_sha256"]:
+            fail(f"{subject} no longer owns the exact clean accepted task candidate")
+    return {"base": base, "commit": resolved, "tree": tree, "plan": plan_relative}
+
+
+def attempt_success_legacy_session_account(start, subject, *, live, recorded):
+    """Freeze the provider identity missing from historical schema-1 starts.
+
+    Live admission authenticates the provider session once. Historical replay
+    can then authenticate only this durable snapshot and the exact start proof;
+    the provider is not a historical event store.
+    """
+    expected_context = {
+        key: start.get(key) for key in CONTEXT_FIELDS if start.get(key) is not None
+    }
+    if live:
+        target = run(["session", start["session"]])
+        target_id = target.get("id") or target.get("session_id")
+        current_context = context_of(target)
+        if target_id != start["session"] or current_context != expected_context:
+            fail(f"{subject} has no exact live legacy implementer session")
+        return {"session": start["session"], "context": current_context}
+    if not isinstance(recorded, dict) or set(recorded) != {"session", "context"} \
+            or recorded.get("session") != start["session"] \
+            or recorded.get("context") != expected_context:
+        fail(f"{subject} changes its frozen legacy implementer session")
+    return recorded
+
+
+def attempt_success_recovery_account(entries, before, lot, task, attempt_number, commit,
+                                     operation, subject, *, live=False, recorded=None):
+    if not isinstance(lot, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
+    ) or not construction_positive_integer(task) or not construction_positive_integer(
+        attempt_number,
+    ) or not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(operation)):
+        fail(f"{subject} has malformed task success identity")
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "session-started"
+              and entry.get("mode") == "construction"
+              and entry.get("job") == "implementer"
+              and entry.get("lot") == lot and entry.get("task") == task
+              and entry.get("attempt") == attempt_number]
+    if len(starts) != 1:
+        fail(f"{subject} has no one exact physical implementer start")
+    start_index, start = starts[0]
+    validate_construction_session_start(
+        start, subject, entries=entries, index=start_index,
+    )
+    start_account = start.get("data")
+    if not isinstance(start_account, dict):
+        fail(f"{subject} has no complete frozen implementer start account")
+    recorded_session = recorded.get("session_authority") \
+        if isinstance(recorded, dict) else None
+    session_authority = None
+    if start_account.get("schema") == 1:
+        session_authority = attempt_success_legacy_session_account(
+            start, subject, live=live, recorded=recorded_session,
+        )
+    if any(construction_attempt_terminal(entry, lot, task, attempt_number)
+           for entry in entries[:before]):
+        fail(f"{subject} cannot replace an attempt terminal")
+    if any(entry.get("event") == "session-retired" and entry.get("session") == start["session"]
+           for entry in entries[:before]):
+        fail(f"{subject} cannot recover a retired implementer")
+    retry = start_account["attempt_identity"].get("retry")
+    if retry is not None:
+        accepted_retry_from_proof(entries, retry, f"{subject}'s retry authority")
+    commit_account = attempt_success_commit_account(
+        lot, task, commit, start_account, subject, live=live,
+    )
+    gate_account = attempt_success_gate_account(
+        entries, before, lot, task, attempt_number, commit, operation, subject,
+    )
+    stable_ref = f"refs/bwr/{Path(WORKSPACE).name}/{lot}/task-{task}"
+    expected = {
+        "schema": 1,
+        "session": start["session"],
+        "session_authority": session_authority,
+        "started": journal_line_proof(start_index),
+        "start_account": start_account,
+        "stable_ref": stable_ref,
+        "commit": commit_account["commit"],
+        "commit_account": commit_account,
+        "gate": operation,
+        "gate_account": gate_account,
+        "retry": retry,
+    }
+    if recorded is not None and recorded != expected:
+        fail(f"{subject} changes its exact success recovery account", expected)
+    return expected
+
+
+def attempt_success_terminal_account(entries, before, owner, subject, *, live=False):
+    if not isinstance(owner, dict):
+        fail(f"{subject} has no complete retained success owner")
+    expected = attempt_success_recovery_account(
+        entries, before, owner.get("start_account", {}).get("attempt_identity", {}).get("lot"),
+        owner.get("start_account", {}).get("attempt_identity", {}).get("task"),
+        owner.get("start_account", {}).get("attempt_identity", {}).get("attempt"),
+        owner.get("commit"), owner.get("gate"), subject, live=live, recorded=owner,
+    )
+    return {**expected, "owner_sha256": canonical_digest(expected)}
+
+
 def normalize_attempt_succeeded(entries, data, context):
     if not isinstance(data, dict):
         fail("attempt.succeeded requires structured success data")
@@ -6653,6 +6974,28 @@ def validate_amendment_attempt_settled_entry(entries, index, entry):
 
 def validate_attempt_succeeded_entry(entries, index, entry):
     data = note_data(entry)
+    recovery = data.get("success_recovery")
+    if recovery is not None:
+        if not isinstance(recovery, dict) or "owner_sha256" not in recovery:
+            fail("a recovered attempt.succeeded has no complete helper-owned account")
+        owner = {key: value for key, value in recovery.items() if key != "owner_sha256"}
+        expected_recovery = attempt_success_terminal_account(
+            entries, index, owner, "the durable recovered attempt success",
+        )
+        identity = owner.get("start_account", {}).get("attempt_identity", {})
+        expected = {
+            "attempt": identity.get("attempt"),
+            "lot": identity.get("lot"),
+            "sha": owner.get("commit"),
+            "gate": owner.get("gate"),
+            "success_recovery": expected_recovery,
+        }
+        if owner.get("retry") is not None:
+            expected["retry"] = owner["retry"]
+        if recovery != expected_recovery or data != expected \
+                or entry.get("lot") != identity.get("lot") \
+                or entry.get("task") != identity.get("task"):
+            fail("a durable recovered attempt success changes its exact owner", expected)
     retry = data.get("retry")
     if retry is None:
         return
@@ -7782,8 +8125,8 @@ def git_object_name(name, subject):
 def validate_built_task_success(entries, index, entry, built, task, task_sha, subject):
     data = note_data(entry)
     required = {"attempt", "lot", "sha", "gate"}
-    allowed = required | {"retry"}
-    if set(data) not in (required, allowed) \
+    allowed = required | {"retry", "success_recovery"}
+    if not required.issubset(data) or not set(data).issubset(allowed) \
             or data.get("lot") != built or data.get("sha") != task_sha \
             or not construction_positive_integer(data.get("attempt")) \
             or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))):
@@ -9816,17 +10159,21 @@ def write_line(entry):
     write_validated_line(lambda _entries: entry)
 
 
-def write_validated_line(builder):
+def write_validated_line(builder, *, attempt_success=False):
     """Validate one semantic event against the exact locked append prefix."""
     recovery = None
     with open(JOURNAL_LOCK, "a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if attempt_success_marker("the pending attempt success") is not None \
+                and not attempt_success:
+            fail("the pending attempt success owns every workflow mutation")
         fd = os.open(JOURNAL, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o666)
         try:
             append_start, recovery = _repair_incomplete_tail(fd)
             entries = journal_entries()
             entry = builder(entries)
             validate_pending_amendment_attempt_settlement_append(entries, entry)
+            validate_pending_attempt_success_append(entries, entry)
             validate_pending_pass_opening_append(
                 entries, entry, "the journal append",
             )
@@ -9847,6 +10194,23 @@ def write_validated_line(builder):
             os.close(fd)
     if recovery:
         print(f"**progress WARNING** · {recovery}")
+
+
+def validate_pending_attempt_success_append(entries, entry):
+    marker = attempt_success_marker("the pending attempt success")
+    if marker is None:
+        return
+    recovery = note_data(entry).get("success_recovery")
+    if entry.get("event") == "note" and entry.get("kind") == "attempt.succeeded" \
+            and isinstance(recovery, dict) \
+            and recovery.get("owner_sha256") == marker["owner_sha256"]:
+        return
+    fail("the pending attempt success owns every workflow mutation", {
+        "event": entry.get("event"), "kind": entry.get("kind"),
+        "session": entry.get("session"), "status": entry.get("status"),
+        "lot": entry.get("lot"), "task": entry.get("task"),
+        "attempt": entry.get("attempt"),
+    })
 
 
 def validate_pending_amendment_attempt_settlement_append(entries, entry):
@@ -9945,7 +10309,7 @@ def cmd_session_started(args):
             "the construction implementer start",
         )
         data = construction_session_start_account(
-            context, "the construction implementer start",
+            context, args.session_id, "the construction implementer start",
         )
         validate_construction_session_start(
             {
@@ -10024,6 +10388,7 @@ def cmd_session_status(args):
         validate_pending_pass_opening_append(
             entries, candidate, "the session status change",
         )
+        validate_pending_attempt_success_append(entries, candidate)
         # The act and its record share the journal transaction. A refused
         # pending owner therefore changes no external session state.
         run([
@@ -10066,6 +10431,7 @@ def cmd_session_retired(args):
             **target_context,
         )
         validate_pending_amendment_attempt_settlement_append(entries, provisional)
+        validate_pending_attempt_success_append(entries, provisional)
         validate_pending_pass_opening_append(
             entries, provisional, "the session retirement",
         )
@@ -11187,7 +11553,13 @@ def main():
         "subagents-open", "construction-failure-check",
         "amendment-attempt-settle-owner-check",
     }
-    if args.command not in read_only:
+    # A retained success owner admits only its helper-owned terminal. Do not
+    # repair shared bytes before that locked admission can refuse another
+    # command.
+    pending_attempt_success = os.path.lexists(ATTEMPT_SUCCESS_MARKER)
+    if pending_attempt_success and args.command not in read_only:
+        fail("the pending attempt success owns every workflow mutation")
+    if args.command not in read_only and not pending_attempt_success:
         repair_journal_tail()
     args.func(args)
     if args.command not in read_only:

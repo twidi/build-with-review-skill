@@ -1741,7 +1741,12 @@ def construction_session_started_requires_the_exact_attempt_identity():
     check(started.returncode == 0, started.stdout + started.stderr)
     line = journal_lines()[-1]
     check(line["event"] == "session-started" and line["session"] == TARGET, line)
-    check(line["data"]["schema"] == 1, line)
+    check(line["data"]["schema"] == 2 and line["data"]["session"] == TARGET, line)
+    authority = dict(line["data"])
+    authority_sha256 = authority.pop("authority_sha256")
+    check(authority_sha256 == hashlib.sha256(json.dumps(
+        authority, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest(), line)
     check(line["data"]["attempt_identity"]["attempt"] == 1, line)
     base = subprocess.check_output([
         "git", "-C", REPO, "rev-parse", "refs/bwr/test-run/lot-1/attempt-base",

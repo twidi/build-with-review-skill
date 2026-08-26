@@ -188,6 +188,11 @@ REPAIR_OP=
 # before publishing this recovery's marker; a retry with a marker keeps owning
 # the recovery state it already opened.
 if [ ! -f "$PENDING" ]; then
+    controller_physical_admission_acquire "$WORKSPACE" \
+        || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
+    if ! controller_operation_refuse_pending "$WORKSPACE"; then
+        die "$CONTROLLER_OPERATION_ERROR. This fresh breach recovery published no marker."
+    fi
     if ! bare_stop_refuse_unfinished "$WORKSPACE"; then
         die "$BARE_STOP_ERROR. This fresh breach recovery cannot pass it. Nothing was
 restored, committed, staged or marked."
@@ -236,6 +241,7 @@ else
         printf '%s\n' "$AUTHORIZED_SHA" "$MARK_LOT" "$REPAIR_OP" "$SUBJECT_ID"
     } > "$PENDING.tmp"
     mv "$PENDING.tmp" "$PENDING"
+    controller_physical_admission_release
 fi
 
 # Authenticate the current attempt. A live attempt that existed at the bad

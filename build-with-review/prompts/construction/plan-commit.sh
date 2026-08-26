@@ -92,6 +92,12 @@ not \`$LOT\` — the tail belongs to the call that opened it. Rerun with \`$P_ID
 Nothing was done, and nothing was staged."
     fi
 fi
+FRESH_PHYSICAL_OWNER=
+if [ ! -f "$PENDING" ]; then
+    controller_physical_admission_acquire "$WORKSPACE" \
+        || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
+    FRESH_PHYSICAL_OWNER=1
+fi
 if [ ! -f "$PENDING" ] && ! bare_stop_refuse_unfinished "$WORKSPACE"; then
     die "$BARE_STOP_ERROR. This fresh plan commit cannot pass it. Nothing was copied,
 staged, committed or marked."
@@ -121,6 +127,8 @@ nobody's to decide but the human's. Nothing was committed; the new content sits 
         OP_NONCE="$(date +%s%N).$$"
         printf '%s\n%s\n%s\n' "$LOT" "$TREE" "$OP_NONCE" > "$PENDING.tmp"
         mv "$PENDING.tmp" "$PENDING"
+        controller_physical_admission_release
+        FRESH_PHYSICAL_OWNER=
     fi
     # Workflow-owned document commits do not run project hooks. A successful
     # hook can replace the exact staged bytes after the controller accepted
