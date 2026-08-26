@@ -143,13 +143,14 @@ def prepare_new(amendment, lot, task, attempt):
     _, fixer_index = progress.amendment_deferred_prefix(
         entries, len(entries), opening_index, sweep_index, "the inverted A4 settlement",
     )
-    unresolved = progress.unresolved_checker_for_amendment(
-        entries, len(entries), lot, task, attempt, "the inverted A4 settlement",
+    failure_source = progress.amendment_deferred_failure_source(
+        entries, opening_index, lot, task, attempt, "the inverted A4 settlement",
+        current_before=len(entries),
     )
     current_task = progress.read_construction_plan_state(
         lot, task, "the inverted A4 settlement",
     )
-    if any(current_task.get(key) != unresolved["logical"].get(key) for key in (
+    if any(current_task.get(key) != failure_source["logical"].get(key) for key in (
         "plan_ownership_sha256", "contract_sha256", "design_sha256",
         "plan_projection_sha256", "disagreement_sha256",
     )):
@@ -196,6 +197,7 @@ def prepare_new(amendment, lot, task, attempt):
         "recovery": recovery_relative,
         "session": start["session"],
         "started": progress.journal_line_proof(start_index),
+        "failure_source": failure_source,
     }
     progress.validate_amendment_attempt_settle_owner(
         entries, len(entries), owner, "the inverted A4 settlement",

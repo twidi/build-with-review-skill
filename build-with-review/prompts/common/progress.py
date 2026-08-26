@@ -4728,33 +4728,89 @@ def unresolved_checker_candidates(entries, before, lot, task, attempt, subject):
     return candidates
 
 
-def unresolved_checker_for_amendment(entries, before, lot, task, attempt, subject):
-    candidates = unresolved_checker_candidates(
+def amendment_deferred_failure_source(
+        entries, before, lot, task, attempt, subject, *, current_before=None,
+):
+    current_before = before if current_before is None else current_before
+    if current_before < before or current_before > len(entries):
+        fail(f"{subject} has a malformed deferred checker source prefix")
+    late_blockers = [
+        (index, entry) for index, entry in (
+            design_blockers(entries, current_before, lot, task, attempt)
+            + code_blockers(entries, current_before, lot, task, attempt)
+        ) if index >= before
+    ]
+    if late_blockers:
+        fail(f"{subject}'s controller-owned blocker follows its Amendment opening")
+    candidates = []
+    for checker, verdict_index, verdict, findings in unresolved_checker_candidates(
         entries, before, lot, task, attempt, subject,
-    )
+    ):
+        verdict_data = note_data(verdict)
+        logical = construction_frozen_logical(
+            entries, verdict_index,
+            {"check": checker, "lot": lot, "task": task, "attempt": attempt,
+             "round": verdict_data.get("round")},
+            subject,
+        )
+        candidates.append({
+            "schema": 1,
+            "type": "unresolved",
+            "checker": checker,
+            "verdict": journal_line_proof(verdict_index),
+            "round": verdict_data["round"],
+            "result": verdict_data["report"],
+            "result_sha256": verdict_data["report_sha256"],
+            "finding_ids": [item["id"] for item in findings],
+            "logical": logical,
+        })
+
+    for checker, state in (
+        ("design", design_failure_handoff(entries, before, lot, task, attempt, subject)),
+        ("code", code_contract_failure_handoff(entries, before, lot, task, attempt, subject)),
+    ):
+        if state is None or not state.get("blocked"):
+            continue
+        obligation = state["obligation"]
+        verdict_index, verdict = journal_entry_from_proof(
+            entries, obligation["verdict"], subject,
+        )
+        blocker_index, blocker = journal_entry_from_proof(
+            entries, obligation["blocked"], subject,
+        )
+        if blocker_index <= verdict_index or blocker_index >= before:
+            fail(f"{subject}'s controller-owned blocker is outside its exact source prefix")
+        blocker_data = note_data(blocker)
+        logical = construction_frozen_logical(
+            entries, blocker_index,
+            {"check": checker, "lot": lot, "task": task, "attempt": attempt,
+             "round": blocker_data.get("round")},
+            subject,
+        )
+        candidates.append({
+            "schema": 1,
+            "type": "controller-blocker",
+            "checker": checker,
+            "verdict": obligation["verdict"],
+            "blocker": obligation["blocked"],
+            "round": blocker_data["round"],
+            "result": obligation["result"],
+            "result_sha256": obligation["result_sha256"],
+            "finding_ids": [item["id"] for item in obligation["checker_result"]["findings"]],
+            "required": state["required"],
+            "contract_blocked": state["contract_blocked"],
+            "logical": logical,
+        })
+
     if len(candidates) != 1:
-        fail(f"{subject} requires one exact unresolved checker batch", f"found {len(candidates)}")
-    checker, verdict_index, verdict, findings = candidates[0]
+        fail(f"{subject} requires one exact deferred checker source", f"found {len(candidates)}")
+    source = candidates[0]
+    verdict_index, _verdict = journal_entry_from_proof(entries, source["verdict"], subject)
     if any(candidate.get("event") == "note" and candidate.get("kind") == "verdict.consumed"
            and note_data(candidate).get("check") in {"design", "code"}
            for candidate in entries[verdict_index + 1:before]):
-        fail(f"{subject}'s unresolved checker batch is not the current construction verdict")
-    verdict_data = note_data(verdict)
-    logical = construction_frozen_logical(
-        entries, verdict_index,
-        {"check": checker, "lot": lot, "task": task, "attempt": attempt,
-         "round": verdict_data.get("round")},
-        subject,
-    )
-    return {
-        "checker": checker,
-        "verdict": journal_line_proof(verdict_index),
-        "round": verdict_data["round"],
-        "result": verdict_data["report"],
-        "result_sha256": verdict_data["report_sha256"],
-        "finding_ids": [item["id"] for item in findings],
-        "logical": logical,
-    }
+        fail(f"{subject}'s deferred checker source is not the current construction verdict")
+    return source
 
 
 def amendment_attempt_supersession_account(
@@ -4762,9 +4818,6 @@ def amendment_attempt_supersession_account(
 ):
     if classification != "C3.9b":
         fail(f"{subject}'s unresolved Design or code finding requires C3.9b")
-    unresolved = unresolved_checker_for_amendment(
-        entries, before, lot, task, attempt, subject,
-    )
     openings = amendment_openings(entries, before)
     if not openings:
         fail(f"{subject} has no current AMENDMENT authority")
@@ -4774,6 +4827,9 @@ def amendment_attempt_supersession_account(
     if opening_data.get("origin") != "construction" \
             or (opening_data.get("construction_source") or {}).get("lot") != lot:
         fail(f"{subject}'s AMENDMENT does not own this Construction lot")
+    failure_source = amendment_deferred_failure_source(
+        entries, opening_index, lot, task, attempt, subject, current_before=before,
+    )
     if any(entry.get("kind") == "amendment.committed"
            for entry in entries[opening_index + 1:before]):
         fail(f"{subject}'s AMENDMENT already committed before the attempt reset")
@@ -4787,7 +4843,7 @@ def amendment_attempt_supersession_account(
     if not reach_sweep_is_clean(audit):
         fail(f"{subject}'s AMENDMENT has no clean Reach close")
 
-    logical = unresolved["logical"]
+    logical = failure_source["logical"]
     previous_hashes = {
         key: logical.get(key) for key in (
             "plan_ownership_sha256", "contract_sha256", "design_sha256",
@@ -4812,7 +4868,8 @@ def amendment_attempt_supersession_account(
             owner = marker["owner"]
             if owner.get("opening") != journal_line_proof(opening_index) \
                     or owner.get("sweep") != journal_line_proof(sweep_index) \
-                    or owner.get("fixer") != journal_line_proof(fixer_index):
+                    or owner.get("fixer") != journal_line_proof(fixer_index) \
+                    or owner.get("failure_source") != failure_source:
                 fail(f"{subject}'s settlement marker names another Amendment prefix")
             settlement_owner_sha256 = marker["owner_sha256"]
             consolidated_spec_sha256 = owner.get("consolidated_spec_sha256")
@@ -4837,12 +4894,7 @@ def amendment_attempt_supersession_account(
             "sweep_proof": journal_line_proof(sweep_index),
             "fixer": journal_line_proof(fixer_index),
             "amendment_sha256": sweep_data["amendment_sha256"],
-            "checker": unresolved["checker"],
-            "verdict": unresolved["verdict"],
-            "round": unresolved["round"],
-            "result": unresolved["result"],
-            "result_sha256": unresolved["result_sha256"],
-            "finding_ids": unresolved["finding_ids"],
+            "failure_source": failure_source,
             "previous_task": previous,
             "future_replacement_required": True,
             "consolidated_spec_sha256": consolidated_spec_sha256,
@@ -4880,12 +4932,7 @@ def amendment_attempt_supersession_account(
         "sweep": sweep_data["sweep"],
         "sweep_proof": journal_line_proof(sweep_index),
         "amendment_sha256": sweep_data["amendment_sha256"],
-        "checker": unresolved["checker"],
-        "verdict": unresolved["verdict"],
-        "round": unresolved["round"],
-        "result": unresolved["result"],
-        "result_sha256": unresolved["result_sha256"],
-        "finding_ids": unresolved["finding_ids"],
+        "failure_source": failure_source,
         "previous_task": previous,
         "replacement_task": replacement,
         "replacement_task_sha256": sha256_bytes(json.dumps(
@@ -6285,7 +6332,19 @@ def attempt_failure_account(
         entries, before, identity["lot"], identity["task"], identity["attempt"],
         classification, subject, allow_unresolved=True,
     )
-    if report == {"unresolved": True}:
+    blocked = isinstance(report, dict) and any(
+        isinstance(report.get(key), dict) and "blocked" in report[key]
+        for key in ("design_review", "code_review")
+    )
+    openings = amendment_openings(entries, before)
+    active_construction_amendment = bool(openings) and (
+        note_data(openings[-1][1]).get("origin") == "construction"
+        and (note_data(openings[-1][1]).get("construction_source") or {}).get("lot")
+        == identity["lot"]
+        and not any(entry.get("kind") == "amendment.committed"
+                    for entry in entries[openings[-1][0] + 1:before])
+    )
+    if report == {"unresolved": True} or blocked and active_construction_amendment:
         supersession = amendment_attempt_supersession_account(
             entries, before, identity["lot"], identity["task"], identity["attempt"],
             classification, subject,
@@ -6381,6 +6440,7 @@ AMENDMENT_SETTLE_OWNER_KEYS = {
     "schema", "amendment", "opening", "sweep", "fixer", "lot", "task", "attempt",
     "attempt_identity", "attempt_base", "attempt_base_tree", "spec_path",
     "base_spec_sha256", "consolidated_spec_sha256", "recovery", "session", "started",
+    "failure_source",
 }
 
 
@@ -6412,6 +6472,12 @@ def validate_amendment_attempt_settle_owner(entries, before, owner, subject):
             or fixer.get("kind") != "fixer.returned":
         fail(f"{subject} does not bind its ordered Amendment prefix")
     validate_amendment_opening_entry(entries, opening_index, opening)
+    expected_source = amendment_deferred_failure_source(
+        entries, opening_index, owner["lot"], owner["task"], owner["attempt"], subject,
+        current_before=before,
+    )
+    if owner.get("failure_source") != expected_source:
+        fail(f"{subject} changes its exact deferred checker source")
     _, _, _, audit = validate_sweep_entry(entries, sweep_index, sweep)
     if not reach_sweep_is_clean(audit):
         fail(f"{subject} does not bind one clean final Reach close")

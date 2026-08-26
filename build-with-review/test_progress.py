@@ -2424,8 +2424,9 @@ def amendment_superseded_design_finding_closes_without_a_false_checker_terminal(
     check(
         isinstance(supersession, dict)
         and supersession.get("amendment") == 1
-        and supersession.get("checker") == "design"
-        and supersession.get("finding_ids") == [1],
+        and supersession.get("failure_source", {}).get("type") == "unresolved"
+        and supersession["failure_source"].get("checker") == "design"
+        and supersession["failure_source"].get("finding_ids") == [1],
         f"the failure admission omitted its exact amendment supersession: {account}",
     )
     check(
@@ -2652,6 +2653,7 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
         "impact": "IMPORTANT",
         "previous": [],
     }])
+    block_design_contract(1)
     open_clean_construction_amendment_for_attempt()
     spec_path = os.path.join(REPO, spec_relative)
     base_spec = open(spec_path, "rb").read()
@@ -2902,6 +2904,13 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
     check(failures[0]["data"]["classification"] == "C3.9b"
           and failures[0]["data"]["amendment_supersession"]["phase"]
           == "deferred-post-amendment", failures[0])
+    failure_source = failures[0]["data"]["amendment_supersession"]["failure_source"]
+    check(failure_source["type"] == "controller-blocker"
+          and failure_source["checker"] == "design"
+          and re.fullmatch(r"[0-9]+:[0-9a-f]{64}", failure_source["verdict"])
+          and re.fullmatch(r"[0-9]+:[0-9a-f]{64}", failure_source["blocker"])
+          and failure_source["required"] == [1]
+          and failure_source["contract_blocked"] == [1], failure_source)
     check(retirements[0]["status"] == "superseded"
           and retirements[0]["archived"] is True and retirements[0]["hidden"] is True,
           retirements[0])
@@ -2911,6 +2920,24 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
     progress.validate_amendment_attempt_settled_entry(
         lines, lines.index(terminals[0]), terminals[0],
     )
+
+    changed_source = json.loads(json.dumps(lines))
+    changed_failure = next(
+        entry for entry in changed_source if entry.get("kind") == "attempt.failed"
+    )
+    changed_failure["data"]["amendment_supersession"]["failure_source"][
+        "blocker"
+    ] = changed_failure["data"]["amendment_supersession"]["failure_source"]["verdict"]
+    changed_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(changed_path, "w", encoding="utf-8") as target:
+        for entry in changed_source:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed = run_progress("construction-verdict-check", "history")
+    check(changed.returncode != 0,
+          "historical replay accepted a changed deferred blocker proof")
+    with open(changed_path, "w", encoding="utf-8") as target:
+        for entry in lines:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     repeated = subprocess.run(
         [helper, "1", "lot-1", "3", "2"], cwd=REPO,
@@ -3235,6 +3262,65 @@ def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
 
 
 @test
+def amendment_deferred_failure_source_accepts_one_exact_code_blocker():
+    seed_committed_construction_attempt_with_spec()
+    append_real_code_verdict(attempt=2, findings=1)
+    record_code_contract_blocker(findings=1)
+    open_clean_construction_amendment_for_attempt()
+    entries = journal_lines()
+    progress = load_common_module("progress")
+    opening_index = progress.amendment_openings(entries)[-1][0]
+    source = progress.amendment_deferred_failure_source(
+        entries, opening_index, "lot-1", 3, 2,
+        "the exact code-blocker Amendment source", current_before=len(entries),
+    )
+    check(source["type"] == "controller-blocker"
+          and source["checker"] == "code"
+          and source["required"] == [1]
+          and source["contract_blocked"] == [1], source)
+
+    blocker_index = int(source["blocker"].split(":", 1)[0])
+    duplicate = json.loads(json.dumps(entries))
+    duplicate.insert(opening_index, json.loads(json.dumps(duplicate[blocker_index])))
+    try:
+        progress.amendment_deferred_failure_source(
+            duplicate, opening_index + 1, "lot-1", 3, 2,
+            "the duplicate code-blocker Amendment source",
+            current_before=len(duplicate),
+        )
+    except SystemExit:
+        pass
+    else:
+        check(False, "a duplicate code blocker became deferred failure authority")
+
+    changed = json.loads(json.dumps(entries))
+    changed[blocker_index]["data"]["required"] = []
+    try:
+        progress.amendment_deferred_failure_source(
+            changed, opening_index, "lot-1", 3, 2,
+            "the changed code-blocker Amendment source", current_before=len(changed),
+        )
+    except SystemExit:
+        pass
+    else:
+        check(False, "changed code-blocker data became deferred failure authority")
+
+    late = json.loads(json.dumps(entries))
+    blocker = late.pop(blocker_index)
+    late_opening = opening_index - 1
+    late.insert(late_opening + 1, blocker)
+    try:
+        progress.amendment_deferred_failure_source(
+            late, late_opening, "lot-1", 3, 2,
+            "the late code-blocker Amendment source", current_before=len(late),
+        )
+    except SystemExit:
+        pass
+    else:
+        check(False, "a post-opening code blocker became deferred failure authority")
+
+
+@test
 def amendment_inverted_a4_competing_stop_owner_blocks_settlement():
     spec_relative = seed_committed_construction_attempt_with_spec()
     base_commit = subprocess.check_output(
@@ -3432,8 +3518,9 @@ def amendment_superseded_code_finding_uses_the_same_exact_account():
     account = json.loads(admitted.stdout)
     supersession = account.get("amendment_supersession")
     check(
-        supersession.get("checker") == "code"
-        and supersession.get("finding_ids") == [1]
+        supersession.get("failure_source", {}).get("type") == "unresolved"
+        and supersession["failure_source"].get("checker") == "code"
+        and supersession["failure_source"].get("finding_ids") == [1]
         and "code_review" not in account,
         f"the code finding did not use the exact AMENDMENT supersession account: {account}",
     )
