@@ -1606,11 +1606,17 @@ def construction_lot_origin_and_spec(entries, before, lot, subject):
     )
     source_commit = note_data(pass_opening).get("commit")
     source_plan = f"docs/plans/{os.path.basename(WORKSPACE)}-{built}-plan.md"
+    inherited_spec = None
+    if "." in built:
+        _, inherited_spec = construction_lot_origin_and_spec(
+            entries, pass_index, built, subject,
+        )
     source, used_fallback = committed_plan_spec_account(
         source_commit, source_plan, subject,
+        fallback_spec=inherited_spec["spec"] if inherited_spec is not None else None,
     )
-    if used_fallback:
-        fail(f"{subject}'s source pass plan has no direct Spec authority")
+    if used_fallback and source["spec_sha256"] != inherited_spec["spec_sha256"]:
+        fail(f"{subject}'s inherited and source-pass specifications differ")
     return origin, {
         "schema": 1,
         "route": "sublot-pass",

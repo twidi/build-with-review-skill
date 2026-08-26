@@ -9160,11 +9160,35 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
         "source_scope": "task", "source_owner": owner, "source_lot": "lot-1.1",
         "source_task": 1, "source_attempt": 1,
     }, by=CALLER, mode="product-review", lot="lot-1.1", job="controller")
-    seed_review_receipts("lot-1.1")
+    seed_review_receipts("lot-1.1", confirmed=1)
+    allocation = run_progress(
+        "note", "sublot.allocated", "--text", "lot-1.2",
+        "--data", json.dumps(allocation_data("lot-1.1"), separators=(",", ":")),
+    )
+    check(allocation.returncode == 0, allocation.stdout + allocation.stderr)
+    write_confirmed(
+        "lot-1.1", [], lot="lot-1.2",
+        plan_text="Covers: reports/product-review/lot-1/lot-1.1-confirmed.md\n",
+    )
+    closed = run_progress("note", "pass.closed", "--data", '{"confirmed":1}')
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+    sublot = run_progress("note", "sublot.opened", "--text", "lot-1.2")
+    check(sublot.returncode == 0, sublot.stdout + sublot.stderr)
+
+    commit, gate, owner = seed_task_gate(
+        built="lot-1.2",
+        plan_spec_lines=("Covers: reports/product-review/lot-1/lot-1.1-confirmed.md",),
+    )
+    append_note("pass.opened", {
+        "built": "lot-1.2", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": owner, "source_lot": "lot-1.2",
+        "source_task": 1, "source_attempt": 1,
+    }, by=CALLER, mode="product-review", lot="lot-1.2", job="controller")
+    seed_review_receipts("lot-1.2")
     opened = run_progress(
         "note", "amendment.opened",
-        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1.1"}',
-        "--text", "apply the Product Review correction and return to lot-1.1",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1.2"}',
+        "--text", "apply the Product Review correction and return to lot-1.2",
     )
     check(opened.returncode == 0, opened.stdout + opened.stderr)
     entries = journal_lines()
@@ -9179,7 +9203,7 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
     )
     voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
     check(voided.returncode == 0, voided.stdout + voided.stderr)
-    order = "apply the Product Review correction and return to lot-1.1"
+    order = "apply the Product Review correction and return to lot-1.2"
     write_report("amendments/1.md", amendment_document(1, order))
     os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "1"), exist_ok=True)
     written = run_progress(
