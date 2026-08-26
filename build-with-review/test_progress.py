@@ -155,10 +155,13 @@ def reset():
     for marker in (
         "amendment-commit-in-progress", "document-copy-in-progress", "attempt-in-flight",
         "amendment-sweep-preflight.json", "bare-stop-in-progress",
+        "amendment-attempt-settle-in-progress.json", "amendment-attempt-settle.lock",
+        "controller-physical-admission.lock",
     ):
         path = os.path.join(WORKSPACE, marker)
         if os.path.lexists(path):
             os.remove(path)
+    shutil.rmtree(os.path.join(WORKSPACE, "recovery"), ignore_errors=True)
     shutil.rmtree(os.path.join(REPO, "docs"), ignore_errors=True)
     shutil.rmtree(os.path.join(REPO, ".git"), ignore_errors=True)
     subprocess.run(["git", "init", "-q", REPO], check=True)
@@ -695,7 +698,9 @@ def seed_active_attempt(lot="lot-1", task=3, attempt=2):
         )
 
 
-def seed_committed_construction_attempt_with_spec(lot="lot-1", task=3, attempt=2):
+def seed_committed_construction_attempt_with_spec(
+        lot="lot-1", task=3, attempt=2, *, disagreement=None,
+):
     spec_relative = "docs/plans/construction-attempt-design.md"
     committed_plan = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
     plan = ["# Plan", "", f"Spec: {spec_relative}", ""]
@@ -708,6 +713,8 @@ def seed_committed_construction_attempt_with_spec(lot="lot-1", task=3, attempt=2
             "### Design",
             "Implement the accepted task contract.",
         ])
+        if number == task and disagreement is not None:
+            plan.extend(["", "### Disagreement", disagreement])
         plan.append("")
     plan_text = "\n".join(plan)
     write_report(f"plans/{lot}-plan.md", plan_text)
@@ -2367,7 +2374,8 @@ def design_parity_requires_one_correction_account_before_the_next_round():
 
 @test
 def amendment_superseded_design_finding_closes_without_a_false_checker_terminal():
-    seed_committed_construction_attempt_with_spec()
+    disagreement = "Preserve this accepted implementation alternative."
+    seed_committed_construction_attempt_with_spec(disagreement=disagreement)
     opening = open_design_round(1)
     finish_design_round(1, opening, findings=[{
         "id": 1,
@@ -2397,6 +2405,14 @@ def amendment_superseded_design_finding_closes_without_a_false_checker_terminal(
     )
     with open(plan_path, "w", encoding="utf-8") as target:
         target.write(plan_text.replace(
+            disagreement, "A changed implementation alternative is forbidden.",
+        ))
+    refused_after(
+        run_progress("construction-failure-check", "lot-1", "3", "2", "C3.9b"),
+        len(journal_lines()), "an AMENDMENT route that changed Disagreement",
+    )
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(plan_text.replace(
             "Achieves: Complete task 3.",
             "Achieves: Complete task 3 under the accepted R1 product behavior.",
         ))
@@ -2411,6 +2427,12 @@ def amendment_superseded_design_finding_closes_without_a_false_checker_terminal(
         and supersession.get("checker") == "design"
         and supersession.get("finding_ids") == [1],
         f"the failure admission omitted its exact amendment supersession: {account}",
+    )
+    check(
+        supersession["previous_task"]["disagreement_sha256"] is not None
+        and supersession["replacement_task"]["disagreement_sha256"]
+        == supersession["previous_task"]["disagreement_sha256"],
+        "the immediate route did not preserve non-null Disagreement authority",
     )
 
     closer = run_progress(
@@ -2588,6 +2610,805 @@ def amendment_superseded_design_finding_closes_without_a_false_checker_terminal(
     changed = run_progress("construction-verdict-check", "history")
     check(changed.returncode != 0,
           "historical validation accepted a changed replacement task contract")
+
+
+@test
+def amendment_inverted_a4_settlement_preserves_the_consolidated_spec():
+    mode_contract = open(os.path.join(AMENDMENT_PROMPTS, "MODE.md"), encoding="utf-8").read()
+    check("amendment-attempt-settle.sh" in mode_contract
+          and "Do not read its marker" in mode_contract
+          and "After `amendment.committed`, run C2 on the exact unchanged prior task"
+          in mode_contract
+          and "Only after that terminal" in mode_contract,
+          "A4 does not document the public deferred settlement continuation")
+    disagreement = "Preserve this deferred implementation alternative."
+    spec_relative = seed_committed_construction_attempt_with_spec(disagreement=disagreement)
+    base_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    append_note(
+        "attempt.succeeded", {"attempt": 1, "lot": "lot-1",
+                              "sha": base_commit, "gate": "1" * 64},
+        mode="construction", lot="lot-1", task=3, job="controller",
+    )
+    config = default_config()
+    config["sessions"][TARGET] = {
+        "id": TARGET,
+        "annotations": {"bwr": {
+            "schema": 1, "job": "implementer", "mode": "construction",
+            "feature": "demo-feature", "lot": "lot-1", "task": 3,
+            "attempt": 2, "status": "blocked",
+        }},
+    }
+    set_config(config)
+    started = run_progress("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1,
+        "where": "frozen task contract",
+        "what": "The task needs one product decision before implementation.",
+        "why": "The current Design cannot choose that product behavior.",
+        "impact": "IMPORTANT",
+        "previous": [],
+    }])
+    open_clean_construction_amendment_for_attempt()
+    spec_path = os.path.join(REPO, spec_relative)
+    base_spec = open(spec_path, "rb").read()
+    consolidated = base_spec + b"\nConsolidated Amendment 1 behavior.\n"
+    with open(spec_path, "wb") as target:
+        target.write(consolidated)
+    append_note(
+        "fixer.returned", {"applied": 0, "declined": 0},
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    set_config(config)
+    set_caller_bwr(mode="amendment", lot="lot-1", job="controller",
+                   task=None, attempt=None, mandate=None, round=None)
+    target_state = json.loads(subprocess.check_output(
+        [sys.executable, os.path.join(FAKE_DIR, "fake_twicc.py"), "session", TARGET],
+        text=True, env=ENV,
+    ))
+    check(target_state["annotations"]["bwr"].get("lot") == "lot-1", target_state)
+
+    raw = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "lot-1", "3", "2", "C3.9b"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(raw.returncode != 0,
+          "the raw closer unexpectedly crossed the inverted A4 owner")
+    check(open(spec_path, "rb").read() == consolidated,
+          "the refused raw closer changed the consolidated Spec")
+
+    helper = os.path.join(
+        WORKSPACE, "prompts", "amendment", "amendment-attempt-settle.sh",
+    )
+    plan_path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
+    frozen_plan = open(plan_path, encoding="utf-8").read()
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(frozen_plan.replace(
+            "Achieves: Complete task 3.", "Achieves: An early replacement is forbidden.",
+        ))
+    early_plan = subprocess.run(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(early_plan.returncode != 0
+          and not os.path.exists(os.path.join(
+              WORKSPACE, "amendment-attempt-settle-in-progress.json",
+          )), "an early task-contract edit published the settlement owner")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(frozen_plan)
+    foreign_path = os.path.join(REPO, "foreign-dirty.txt")
+    with open(foreign_path, "w", encoding="utf-8") as target:
+        target.write("foreign\n")
+    dirty = subprocess.run(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(dirty.returncode != 0
+          and not os.path.exists(os.path.join(
+              WORKSPACE, "amendment-attempt-settle-in-progress.json",
+          )), "an extra dirty path published the settlement owner")
+    os.remove(foreign_path)
+    subprocess.run(["git", "-C", REPO, "add", spec_relative], check=True)
+    staged = subprocess.run(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(staged.returncode != 0,
+          "staged consolidated Spec bytes published the settlement owner")
+    subprocess.run(["git", "-C", REPO, "restore", "--staged", spec_relative], check=True)
+
+    barrier_dir = tempfile.mkdtemp(dir=BASE)
+    admission_env = dict(ENV)
+    admission_env.update({
+        "BWR_TEST_AMENDMENT_SETTLE_BARRIER": "final-admission",
+        "BWR_TEST_AMENDMENT_SETTLE_BARRIER_DIR": barrier_dir,
+        "BWR_TEST_AMENDMENT_SETTLE_STOP_AFTER": "owned",
+    })
+    stop_barrier_dir = tempfile.mkdtemp(dir=BASE)
+    stop_env = dict(ENV)
+    stop_env.update({
+        "BWR_TEST_CONTROLLER_PHYSICAL_BARRIER": "stop-before-owner",
+        "BWR_TEST_CONTROLLER_PHYSICAL_BARRIER_DIR": stop_barrier_dir,
+    })
+    competing_stop = subprocess.Popen(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"),
+         "pause", "lot-1", "3", "2"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=stop_env,
+    )
+    stop_ready = os.path.join(stop_barrier_dir, "stop-before-owner.ready")
+    deadline = time.monotonic() + 30
+    while not os.path.exists(stop_ready) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check(os.path.exists(stop_ready), "the competing stop did not reach its final pre-owner boundary")
+    admission = subprocess.Popen(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=admission_env,
+    )
+    ready = os.path.join(barrier_dir, "final-admission.ready")
+    deadline = time.monotonic() + 30
+    while not os.path.exists(ready) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check(os.path.exists(ready), "the settlement did not reach its locked final admission")
+    competing_note = subprocess.Popen(
+        [sys.executable, SCRIPT, "note", "not-converging", "--text", "foreign mutation"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV,
+    )
+    competing_failure = subprocess.Popen(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "lot-1", "3", "2", "C3.9b"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV,
+    )
+    time.sleep(0.05)
+    check(competing_note.poll() is None,
+          "the competing journal mutation crossed the retained final-admission lock")
+    check(competing_failure.poll() is None,
+          "the raw failure closer crossed the retained physical admission lock")
+    with open(os.path.join(barrier_dir, "final-admission.release"), "w", encoding="utf-8"):
+        pass
+    admission_stdout, admission_stderr = admission.communicate(timeout=120)
+    note_stdout, note_stderr = competing_note.communicate(timeout=120)
+    failure_stdout, failure_stderr = competing_failure.communicate(timeout=120)
+    with open(os.path.join(stop_barrier_dir, "stop-before-owner.release"), "w", encoding="utf-8"):
+        pass
+    stop_stdout, stop_stderr = competing_stop.communicate(timeout=120)
+    check(admission.returncode == 75 and "AFTER owned" in admission_stdout,
+          admission_stdout + admission_stderr)
+    check(competing_note.returncode != 0
+          and not any(entry.get("kind") == "not-converging" for entry in journal_lines()),
+          note_stdout + note_stderr)
+    check(competing_failure.returncode != 0,
+          failure_stdout + failure_stderr)
+    check(competing_stop.returncode != 0,
+          stop_stdout + stop_stderr)
+    check(not os.path.exists(os.path.join(WORKSPACE, "bare-stop-in-progress")),
+          "the losing stop published a bare-stop owner")
+    inflight_lines = open(os.path.join(WORKSPACE, "attempt-in-flight"), encoding="utf-8").read().splitlines()
+    check(len(inflight_lines) == 2,
+          "a losing stop or raw failure bound the attempt closer")
+    check(subprocess.run(
+        ["git", "-C", REPO, "show-ref", "--verify", "--quiet",
+         "refs/bwr/test-run/lot-1/task-3-try-2"],
+    ).returncode != 0, "a losing closer published the try ref")
+    check(subprocess.run(
+        ["git", "-C", REPO, "diff", "--cached", "--quiet"],
+    ).returncode == 0, "a losing closer staged repository bytes")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip() == base_commit and open(spec_path, "rb").read() == consolidated,
+          "a losing stop or closer reset the tree or changed the consolidated Spec")
+
+    for phase in ("base-bytes-written", "base-restored"):
+        interrupted_env = dict(ENV)
+        interrupted_env["BWR_TEST_AMENDMENT_SETTLE_STOP_AFTER"] = phase
+        interrupted = subprocess.run(
+            [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+            capture_output=True, text=True, env=interrupted_env, timeout=120,
+        )
+        check(interrupted.returncode == 75 and f"AFTER {phase}" in interrupted.stdout,
+              interrupted.stdout + interrupted.stderr)
+    marker_data = json.load(open(
+        os.path.join(WORKSPACE, "amendment-attempt-settle-in-progress.json"),
+        encoding="utf-8",
+    ))
+    recovery_path = os.path.join(WORKSPACE, marker_data["owner"]["recovery"])
+    recovery_bytes = open(recovery_path, "rb").read()
+    blocked_raw = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "lot-1", "3", "2", "C3.9b"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(blocked_raw.returncode != 0,
+          "a raw closer crossed the retained settlement owner")
+    with open(recovery_path, "wb") as target:
+        target.write(b"changed recovery\n")
+    changed_recovery = subprocess.run(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(changed_recovery.returncode != 0,
+          "changed content-addressed recovery resumed the settlement")
+    with open(recovery_path, "wb") as target:
+        target.write(recovery_bytes)
+    wrong_attempt = subprocess.run(
+        [helper, "1", "lot-1", "3", "3"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(wrong_attempt.returncode != 0,
+          "another attempt consumed the retained settlement owner")
+
+    owner_env = dict(ENV)
+    owner_env.update({
+        "BWR_TEST_AMENDMENT_SETTLE_BARRIER": "owner-held",
+        "BWR_TEST_AMENDMENT_SETTLE_BARRIER_DIR": barrier_dir,
+        "BWR_TEST_AMENDMENT_SETTLE_STOP_AFTER": "failure-recorded",
+    })
+    first = subprocess.Popen(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=owner_env,
+    )
+    owner_ready = os.path.join(barrier_dir, "owner-held.ready")
+    deadline = time.monotonic() + 30
+    while not os.path.exists(owner_ready) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check(os.path.exists(owner_ready), "the first settlement did not retain its owner lock")
+    second_env = dict(ENV)
+    second_env["BWR_TEST_AMENDMENT_SETTLE_STOP_AFTER"] = "failure-recorded"
+    second = subprocess.Popen(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=second_env,
+    )
+    time.sleep(0.05)
+    check(second.poll() is None, "the second settlement crossed the first owner lock")
+    with open(os.path.join(barrier_dir, "owner-held.release"), "w", encoding="utf-8"):
+        pass
+    concurrent = [process.communicate(timeout=120) + (process.returncode,)
+                  for process in (first, second)]
+    check([result[2] for result in concurrent] == [75, 75], concurrent)
+    check(len([entry for entry in journal_lines() if entry.get("kind") == "attempt.failed"]) == 1,
+          "concurrent settlement calls duplicated the official attempt failure")
+
+    for phase in (
+        "consolidated-bytes-written", "spec-restored", "diagnostic-closed",
+        "implementer-retired", "terminal-recorded",
+    ):
+        interrupted_env = dict(ENV)
+        interrupted_env["BWR_TEST_AMENDMENT_SETTLE_STOP_AFTER"] = phase
+        interrupted = subprocess.run(
+            [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+            capture_output=True, text=True, env=interrupted_env, timeout=120,
+        )
+        check(interrupted.returncode == 75 and f"AFTER {phase}" in interrupted.stdout,
+              interrupted.stdout + interrupted.stderr)
+    settled = subprocess.run(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(settled.returncode == 0, settled.stdout + settled.stderr)
+    check(open(spec_path, "rb").read() == consolidated,
+          "the settlement did not restore the consolidated Spec byte-exact")
+    check(not os.path.exists(os.path.join(WORKSPACE, "attempt-in-flight")),
+          "the official failure closer did not consume attempt-in-flight")
+    lines = journal_lines()
+    failures = [entry for entry in lines if entry.get("kind") == "attempt.failed"]
+    terminals = [entry for entry in lines if entry.get("kind") == "amendment.attempt.settled"]
+    retirements = [entry for entry in lines if entry.get("event") == "session-retired"
+                   and entry.get("session") == TARGET]
+    check(len(failures) == len(terminals) == len(retirements) == 1,
+          "the settlement did not publish one exact failure, retirement and terminal")
+    check(failures[0]["data"]["classification"] == "C3.9b"
+          and failures[0]["data"]["amendment_supersession"]["phase"]
+          == "deferred-post-amendment", failures[0])
+    check(retirements[0]["status"] == "superseded"
+          and retirements[0]["archived"] is True and retirements[0]["hidden"] is True,
+          retirements[0])
+    marker = os.path.join(WORKSPACE, "amendment-attempt-settle-in-progress.json")
+    check(not os.path.exists(marker), "the completed settlement retained its marker")
+    progress = load_common_module("progress")
+    progress.validate_amendment_attempt_settled_entry(
+        lines, lines.index(terminals[0]), terminals[0],
+    )
+
+    repeated = subprocess.run(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(repeated.returncode == 0, repeated.stdout + repeated.stderr)
+    check(len(journal_lines()) == len(lines),
+          "an exact post-cleanup retry duplicated durable settlement history")
+
+    check(run_progress("subagent-started", "consolidation", "--round", "1").returncode == 0,
+          "the settlement did not release the exact consolidation route")
+    check(run_progress(
+        "note", "bound.spent", "--round", "1", "--text", "consolidation round 1 of 3",
+    ).returncode == 0, "the consolidation spend did not land")
+    check(run_progress(
+        "subagent-ended", "consolidation", "--round", "1", "--data", '{"exact":true}',
+    ).returncode == 0, "the consolidation result did not land")
+    check(run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"consolidation","outcome":"exact"}',
+    ).returncode == 0, "the consolidation verdict did not land")
+    commit = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "amendment", "amendment-commit.sh"),
+         "1", spec_relative, "docs: land deferred amendment", "-"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(commit.returncode == 0, commit.stdout + commit.stderr)
+    amendment_commit = journal_lines()[-1]
+    check(amendment_commit.get("kind") == "amendment.committed", amendment_commit)
+
+    premature_attempt = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "lot-1", "3", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(premature_attempt.returncode != 0,
+          "attempt 3 started before the deferred successor and baseline")
+
+    old_plan = open(plan_path, encoding="utf-8").read()
+    set_caller_bwr(mode="construction", lot="lot-1", job="controller")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(old_plan.replace(
+            "Achieves: Complete task 3.",
+            "Achieves: An early deferred contract edit is forbidden.",
+        ))
+    early_contract_c2 = run_progress("subagent-started", "completeness")
+    check(early_contract_c2.returncode != 0,
+          "C2 accepted a deferred contract edit before the incomplete result")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(old_plan.replace(
+            "Implement the accepted task contract.",
+            "Change implementer-owned Design before deferred C2.",
+        ))
+    changed_design_c2 = run_progress("subagent-started", "completeness")
+    check(changed_design_c2.returncode != 0,
+          "C2 accepted changed implementer-owned Design bytes")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(old_plan.replace(
+            disagreement, "Change deferred Disagreement before C2.",
+        ))
+    changed_disagreement_c2 = run_progress("subagent-started", "completeness")
+    check(changed_disagreement_c2.returncode != 0,
+          "C2 accepted changed deferred Disagreement bytes")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(old_plan)
+    early = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh"),
+         "lot-1", "Reject the early deferred successor"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(early.returncode != 0,
+          "the deferred successor published without its post-Amendment C2")
+    c2_start_command = [sys.executable, SCRIPT, "subagent-started", "completeness"]
+    journal_lock_path = os.path.join(WORKSPACE, "progress.jsonl.lock")
+    with open(journal_lock_path, "a+b") as journal_lock:
+        fcntl.flock(journal_lock, fcntl.LOCK_EX)
+        concurrent_starts = [subprocess.Popen(
+            c2_start_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        ) for _ in range(2)]
+        time.sleep(0.05)
+        check(all(process.poll() is None for process in concurrent_starts),
+              "the concurrent deferred C2 starts did not reach the journal owner")
+        fcntl.flock(journal_lock, fcntl.LOCK_UN)
+    start_results = [process.communicate(timeout=120) + (process.returncode,)
+                     for process in concurrent_starts]
+    check(sorted(result[2] for result in start_results) == [0, 1], start_results)
+    check(len([entry for entry in journal_lines()
+               if entry.get("event") == "subagent-started"
+               and entry.get("kind") == "completeness"
+               and entry.get("data", {}).get("deferred_amendment_plan")]) == 1,
+          "concurrent deferred C2 starts appended duplicate openings")
+
+    malformed_c2 = run_progress(
+        "subagent-ended", "completeness",
+        "--data", '{"decisions":"1/1","tasks":"2/3","deps":"0/0",'
+                  '"constraints":"broken","parent":"n/a"}',
+    )
+    check(malformed_c2.returncode != 0,
+          "a malformed deferred C2 terminal closed its opening")
+    leading_zero_c2 = run_progress(
+        "subagent-ended", "completeness",
+        "--data", '{"decisions":"01/1","tasks":"2/3","deps":"0/0",'
+                  '"constraints":"ok","parent":"n/a"}',
+    )
+    check(leading_zero_c2.returncode != 0,
+          "a leading-zero deferred C2 terminal closed its opening")
+    accepted_deferred_plan = open(plan_path, encoding="utf-8").read()
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(accepted_deferred_plan.replace(
+            "Achieves: Complete task 3.", "Achieves: Changed during C2 opening.",
+        ))
+    changed_during_c2 = run_progress(
+        "subagent-ended", "completeness",
+        "--data", '{"decisions":"1/1","tasks":"2/3","deps":"0/0",'
+                  '"constraints":"ok","parent":"n/a"}',
+    )
+    check(changed_during_c2.returncode != 0,
+          "C2 closed after its frozen workspace plan changed")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(accepted_deferred_plan)
+    lost = run_progress(
+        "subagent-ended", "completeness", "--data", '{"unusable":"lost"}',
+    )
+    check(lost.returncode == 0, lost.stdout + lost.stderr)
+    lost_publication = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh"),
+         "lot-1", "A lost C2 cannot publish the deferred successor"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(lost_publication.returncode != 0,
+          "an exact lost C2 terminal authorized plan publication")
+    replacement_c2 = run_progress("subagent-started", "completeness")
+    check(replacement_c2.returncode == 0, replacement_c2.stdout + replacement_c2.stderr)
+
+    before_clean_terminal = journal_lines()
+    clean_c2 = run_progress(
+        "subagent-ended", "completeness",
+        "--data", '{"decisions":"1/1","tasks":"3/3","deps":"0/0",'
+                  '"constraints":"ok","parent":"n/a"}',
+    )
+    check(clean_c2.returncode == 0, clean_c2.stdout + clean_c2.stderr)
+    clean_publication = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh"),
+         "lot-1", "A clean C2 cannot authorize the required replacement"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(clean_publication.returncode != 0,
+          "a clean deferred C2 terminal authorized the required first successor")
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in before_clean_terminal:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    c2_end_command = [
+        sys.executable, SCRIPT, "subagent-ended", "completeness", "--data",
+        '{"decisions":"1/1","tasks":"2/3","deps":"0/0",'
+        '"constraints":"ok","parent":"n/a"}',
+    ]
+    with open(journal_lock_path, "a+b") as journal_lock:
+        fcntl.flock(journal_lock, fcntl.LOCK_EX)
+        concurrent_ends = [subprocess.Popen(
+            c2_end_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        ) for _ in range(2)]
+        time.sleep(0.05)
+        check(all(process.poll() is None for process in concurrent_ends),
+              "the concurrent deferred C2 terminals did not reach the journal owner")
+        fcntl.flock(journal_lock, fcntl.LOCK_UN)
+    end_results = [process.communicate(timeout=120) + (process.returncode,)
+                   for process in concurrent_ends]
+    check(sorted(result[2] for result in end_results) == [0, 1], end_results)
+    usable_terminals = [entry for entry in journal_lines()
+                        if entry.get("event") == "subagent-ended"
+                        and entry.get("kind") == "completeness"
+                        and "unusable" not in entry.get("data", {})
+                        and entry.get("data", {}).get("deferred_amendment_plan")]
+    check(len(usable_terminals) == 1,
+          "concurrent deferred C2 terminals appended duplicate usable results")
+    consumed_c2 = run_progress("subagent-started", "completeness")
+    check(consumed_c2.returncode != 0,
+          "a usable deferred C2 result did not consume its frozen plan generation")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(old_plan.replace(
+            "Achieves: Complete task 3.",
+            "Achieves: Complete task 3 under the committed Amendment 1 contract.",
+        ))
+    successor_preflight = run_progress(
+        "construction-plan-publication-check", "lot-1", "3",
+    )
+    check(successor_preflight.returncode == 0,
+          successor_preflight.stdout + successor_preflight.stderr)
+    published = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "plan-commit.sh"),
+         "lot-1", "Publish the deferred Amendment successor"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(published.returncode == 0, published.stdout + published.stderr)
+    publication = journal_lines()[-1]
+    account = publication.get("data", {}).get("amendment_supersession", {})
+    check(publication.get("kind") == "plan.written" and account.get("amendment_commit")
+          == load_common_module("progress").journal_line_proof(
+              journal_lines().index(amendment_commit)
+          ) and account.get("c2") is not None and account.get("c2_opening") is not None,
+          publication)
+    check(account["previous_task"]["contract_sha256"]
+          != account["replacement_task"]["contract_sha256"]
+          and account["previous_task"]["plan_ownership_sha256"]
+          != account["replacement_task"]["plan_ownership_sha256"],
+          "the first deferred successor did not freeze both task generations")
+    check(
+        account["previous_task"]["disagreement_sha256"] is not None
+        and account["replacement_task"]["disagreement_sha256"]
+        == account["previous_task"]["disagreement_sha256"],
+        "the deferred first successor did not preserve non-null Disagreement authority",
+    )
+    load_common_module("progress").validate_plan_written_entry(
+        journal_lines(), len(journal_lines()) - 1, publication,
+    )
+    no_baseline = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "lot-1", "3", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(no_baseline.returncode != 0,
+          "attempt 3 started before the deferred successor's fresh baseline")
+    published_commit = publication["data"]["commit"]
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    seed_baseline_gate(
+        f"plan/lot-1/{published_commit}", published_commit,
+        amendment_commit["data"]["sha"],
+    )
+    for number in range(3):
+        subprocess.run([
+            "git", "-C", REPO, "update-ref",
+            f"refs/bwr/test-run/lot-1/task-{number}", published_commit,
+        ], check=True)
+    replacement = subprocess.run(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+         "lot-1", "3", "3"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    os.remove(os.path.join(WORKSPACE, "attempt-in-flight"))
+
+    durable = journal_lines()
+    changed_c2_history = json.loads(json.dumps(durable))
+    deferred_c2_index = next(
+        index for index, entry in enumerate(changed_c2_history)
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "completeness"
+        and "unusable" not in entry.get("data", {})
+        and entry.get("data", {}).get("deferred_amendment_plan")
+    )
+    changed_c2_history[deferred_c2_index]["data"]["tasks"] = "02/3"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed_c2_history:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    malformed_history = run_progress("construction-verdict-check", "history")
+    check(malformed_history.returncode != 0,
+          "historical replay accepted a malformed deferred C2 result")
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in durable:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    progress_module = load_common_module("progress")
+    changed_previous = json.loads(json.dumps(durable))
+    deferred_publication_index = next(
+        index for index, entry in enumerate(changed_previous)
+        if entry.get("kind") == "plan.written"
+        and entry.get("data", {}).get("amendment_supersession", {}).get("c2")
+    )
+    publication_account = changed_previous[deferred_publication_index]["data"][
+        "amendment_supersession"
+    ]
+    c2_opening_index = int(publication_account["c2_opening"].split(":", 1)[0])
+    for index in (c2_opening_index, deferred_c2_index):
+        frozen = changed_previous[index]["data"]["deferred_amendment_plan"]
+        frozen["task_state"]["contract_sha256"] = "0" * 64
+        frozen["task_state_sha256"] = progress_module.canonical_digest(frozen["task_state"])
+    publication_account["previous_task"]["contract_sha256"] = "0" * 64
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed_previous:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_previous_history = run_progress("construction-verdict-check", "history")
+    check(changed_previous_history.returncode != 0,
+          "historical replay accepted a synchronized changed prior C2 generation")
+
+    changed_replacement = json.loads(json.dumps(durable))
+    replacement_account = changed_replacement[deferred_publication_index]["data"][
+        "amendment_supersession"
+    ]
+    replacement_account["replacement_task"]["contract_sha256"] = "f" * 64
+    replacement_digest = progress_module.canonical_digest(replacement_account["replacement_task"])
+    replacement_account["replacement_task_sha256"] = replacement_digest
+    replacement_account["task_state_sha256"] = replacement_digest
+    replacement_account["root_replacement_task_sha256"] = replacement_digest
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed_replacement:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_replacement_history = run_progress("construction-verdict-check", "history")
+    check(changed_replacement_history.returncode != 0,
+          "historical replay accepted a synchronized changed replacement generation")
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in durable:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+    changed = json.loads(json.dumps(durable))
+    terminal_index = next(index for index, entry in enumerate(changed)
+                          if entry.get("kind") == "amendment.attempt.settled")
+    changed[terminal_index]["data"]["owner"]["fixer"] = changed[terminal_index]["data"][
+        "owner"
+    ]["opening"]
+    changed[terminal_index]["data"]["owner_sha256"] = load_common_module(
+        "progress"
+    ).canonical_digest(changed[terminal_index]["data"]["owner"])
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for entry in changed:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode != 0,
+          "historical replay accepted a changed settlement owner")
+
+
+@test
+def amendment_inverted_a4_competing_stop_owner_blocks_settlement():
+    spec_relative = seed_committed_construction_attempt_with_spec()
+    base_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    append_note(
+        "attempt.succeeded", {"attempt": 1, "lot": "lot-1",
+                              "sha": base_commit, "gate": "1" * 64},
+        mode="construction", lot="lot-1", task=3, job="controller",
+    )
+    config = default_config()
+    config["sessions"][TARGET] = {
+        "id": TARGET,
+        "annotations": {"bwr": {
+            "schema": 1, "job": "implementer", "mode": "construction",
+            "feature": "demo-feature", "lot": "lot-1", "task": 3,
+            "attempt": 2, "status": "blocked",
+        }},
+    }
+    set_config(config)
+    started = run_progress("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1, "where": "frozen task contract",
+        "what": "The task needs one product decision before implementation.",
+        "why": "The current Design cannot choose that product behavior.",
+        "impact": "IMPORTANT", "previous": [],
+    }])
+    open_clean_construction_amendment_for_attempt()
+    spec_path = os.path.join(REPO, spec_relative)
+    with open(spec_path, "ab") as target:
+        target.write(b"\nConsolidated Amendment 1 behavior.\n")
+    append_note(
+        "fixer.returned", {"applied": 0, "declined": 0},
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    set_caller_bwr(mode="amendment", lot="lot-1", job="controller",
+                   task=None, attempt=None, mandate=None, round=None)
+
+    barrier_dir = tempfile.mkdtemp(dir=BASE)
+    stop_env = dict(ENV)
+    stop_env.update({
+        "BWR_TEST_CONTROLLER_PHYSICAL_BARRIER": "stop-after-owner-release",
+        "BWR_TEST_CONTROLLER_PHYSICAL_BARRIER_DIR": barrier_dir,
+    })
+    stop = subprocess.Popen(
+        [os.path.join(WORKSPACE, "prompts", "common", "stop.sh"),
+         "pause", "lot-1", "3", "2"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=stop_env,
+    )
+    ready = os.path.join(barrier_dir, "stop-after-owner-release.ready")
+    deadline = time.monotonic() + 30
+    while not os.path.exists(ready) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check(os.path.exists(ready), "the stop did not release its published physical owner")
+    helper = os.path.join(
+        WORKSPACE, "prompts", "amendment", "amendment-attempt-settle.sh",
+    )
+    settlement = subprocess.Popen(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV,
+    )
+    settlement_stdout, settlement_stderr = settlement.communicate(timeout=120)
+    check(settlement.returncode != 0, settlement_stdout + settlement_stderr)
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "amendment-attempt-settle-in-progress.json",
+    )), "the losing settlement published its marker")
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "recovery", "amendment-attempt-settle",
+    )), "the losing settlement published immutable recovery")
+    check(stop.poll() is None,
+          "the stop did not remain at its post-release pre-preserve boundary")
+    with open(os.path.join(barrier_dir, "stop-after-owner-release.release"), "w", encoding="utf-8"):
+        pass
+    stop_stdout, stop_stderr = stop.communicate(timeout=120)
+    check(stop.returncode == 0, stop_stdout + stop_stderr)
+    failures = [entry for entry in journal_lines() if entry.get("kind") == "attempt.failed"]
+    check(not failures, "the stop-first order also published an attempt failure")
+
+
+@test
+def amendment_inverted_a4_competing_failure_owner_blocks_settlement():
+    spec_relative = seed_committed_construction_attempt_with_spec()
+    base_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    append_note(
+        "attempt.succeeded", {"attempt": 1, "lot": "lot-1",
+                              "sha": base_commit, "gate": "1" * 64},
+        mode="construction", lot="lot-1", task=3, job="controller",
+    )
+    config = default_config()
+    config["sessions"][TARGET] = {
+        "id": TARGET,
+        "annotations": {"bwr": {
+            "schema": 1, "job": "implementer", "mode": "construction",
+            "feature": "demo-feature", "lot": "lot-1", "task": 3,
+            "attempt": 2, "status": "blocked",
+        }},
+    }
+    set_config(config)
+    started = run_progress("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1, "where": "frozen task contract",
+        "what": "The task needs one product decision before implementation.",
+        "why": "The current Design cannot choose that product behavior.",
+        "impact": "IMPORTANT", "previous": [],
+    }])
+    open_clean_construction_amendment_for_attempt()
+    spec_path = os.path.join(REPO, spec_relative)
+    with open(spec_path, "ab") as target:
+        target.write(b"\nConsolidated Amendment 1 behavior.\n")
+    append_note(
+        "fixer.returned", {"applied": 0, "declined": 0},
+        mode="amendment", lot="lot-1", job="controller",
+    )
+    plan_path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
+    plan_text = open(plan_path, encoding="utf-8").read()
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(plan_text.replace(
+            "Achieves: Complete task 3.",
+            "Achieves: The competing immediate closer owns this replacement.",
+        ))
+
+    barrier_dir = tempfile.mkdtemp(dir=BASE)
+    failure_env = dict(ENV)
+    failure_env.update({
+        "BWR_TEST_CONTROLLER_PHYSICAL_BARRIER": "failure-after-owner-release",
+        "BWR_TEST_CONTROLLER_PHYSICAL_BARRIER_DIR": barrier_dir,
+    })
+    failure = subprocess.Popen(
+        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh"),
+         "lot-1", "3", "2", "C3.9b"], cwd=REPO,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=failure_env,
+    )
+    ready = os.path.join(barrier_dir, "failure-after-owner-release.ready")
+    deadline = time.monotonic() + 30
+    while not os.path.exists(ready) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check(os.path.exists(ready), "the raw failure did not release its bound physical owner")
+    check(len(open(os.path.join(WORKSPACE, "attempt-in-flight"), encoding="utf-8").read().splitlines())
+          == 4, "the raw failure barrier precedes its exact closer binding")
+    helper = os.path.join(
+        WORKSPACE, "prompts", "amendment", "amendment-attempt-settle.sh",
+    )
+    settlement = subprocess.run(
+        [helper, "1", "lot-1", "3", "2"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(settlement.returncode != 0, settlement.stdout + settlement.stderr)
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "amendment-attempt-settle-in-progress.json",
+    )), "the failure-first loser published a settlement marker")
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "recovery", "amendment-attempt-settle",
+    )), "the failure-first loser published settlement recovery")
+    check(failure.poll() is None,
+          "the failure did not remain at its post-release pre-stage boundary")
+    check(subprocess.run(
+        ["git", "-C", REPO, "diff", "--cached", "--quiet"],
+    ).returncode == 0, "the failure barrier is after staging")
+    check(subprocess.run(
+        ["git", "-C", REPO, "show-ref", "--verify", "--quiet",
+         "refs/bwr/test-run/lot-1/task-3-try-2"],
+    ).returncode != 0, "the failure barrier is after the try ref")
+    check(not any(entry.get("kind") == "attempt.failed" for entry in journal_lines()),
+          "the failure barrier is after the journal terminal")
+    with open(os.path.join(barrier_dir, "failure-after-owner-release.release"), "w", encoding="utf-8"):
+        pass
+    failure_stdout, failure_stderr = failure.communicate(timeout=120)
+    check(failure.returncode == 0, failure_stdout + failure_stderr)
 
 
 @test
@@ -10198,6 +11019,10 @@ def main():
         destination = os.path.join(WORKSPACE, "prompts", "amendment", "amendment-commit.sh")
         shutil.copyfile(os.path.join(AMENDMENT_PROMPTS, "amendment-commit.sh"), destination)
         os.chmod(destination, 0o755)
+        for name in ("amendment-attempt-settle.sh", "amendment_attempt_settle.py"):
+            destination = os.path.join(WORKSPACE, "prompts", "amendment", name)
+            shutil.copyfile(os.path.join(AMENDMENT_PROMPTS, name), destination)
+            os.chmod(destination, 0o755)
         shutil.copyfile(
             os.path.join(AMENDMENT_PROMPTS, "reviewer-reach-completion.md"),
             os.path.join(WORKSPACE, "prompts", "amendment", "reviewer-reach-completion.md"),
@@ -10206,6 +11031,7 @@ def main():
         for name in (
             "gate-check.sh", "gate_file.py", "gate_execution.py", "gate_report.py",
             "construction_review.py", "plan-commit.sh", "attempt-started.sh",
+            "attempt-failed.sh", "diagnostic-open.sh", "diagnostic-close.sh",
         ):
             destination = os.path.join(WORKSPACE, "prompts", "construction", name)
             shutil.copyfile(os.path.join(HERE, "prompts", "construction", name), destination)

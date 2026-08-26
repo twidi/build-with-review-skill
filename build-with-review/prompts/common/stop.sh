@@ -80,7 +80,8 @@ if [ -z "$LOT" ]; then
     # The owner settles first; only then can this stop publish its own marker.
     if [ "$BARE_STOP_OWNER_STATE" = fresh ] && \
         ! controller_operation_refuse_pending "$WORKSPACE" \
-            plan-commit spec-commit amendment-commit spec-breach-recovery rewind gate-check; then
+            plan-commit spec-commit amendment-commit spec-breach-recovery \
+            amendment-attempt-settle rewind gate-check; then
         die "$CONTROLLER_OPERATION_ERROR. Settle that exact owner, then run this bare
 $MODE again. No bare-stop marker, ref, tree or journal state was changed."
     fi
@@ -98,7 +99,7 @@ fi
 
 # A document copy can precede any caller-specific operation marker. Every stop
 # therefore uses the shared read-only controller-operation guard for it.
-if ! controller_operation_refuse_pending "$WORKSPACE" document-copy; then
+if ! controller_operation_refuse_pending "$WORKSPACE" document-copy amendment-attempt-settle; then
     die "$CONTROLLER_OPERATION_ERROR. Then run this stop again. Nothing was moved or staged."
 fi
 
@@ -130,12 +131,30 @@ Only that closer or the exact tail it printed may remove the identity. Nothing w
 moved, staged or journaled."
 fi
 
-# A pending controller-owned commit is never the attempt's work. Triplet stop
-# shares the exact same marker guard as the success and failure closers.
-if [ -n "$LOT" ]; then
-    if ! controller_operation_refuse_pending "$WORKSPACE" \
-        spec-commit amendment-commit spec-breach-recovery gate-check; then
-        die "$CONTROLLER_OPERATION_ERROR. Then run this stop again. Nothing was moved or staged."
+# The final physical admission is one transaction with settlement admission.
+# A preflight guard alone is insufficient: another owner can publish after it.
+PHYSICAL_ADMISSION_OWNED=
+if [ -n "$LOT" ] || [ "$BARE_STOP_OWNER_STATE" = fresh ]; then
+    controller_physical_test_barrier stop-before-owner
+    controller_physical_admission_acquire "$WORKSPACE" \
+        || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR. Nothing was moved, staged or journaled."
+    PHYSICAL_ADMISSION_OWNED=1
+    if [ -n "$LOT" ]; then
+        if ! controller_operation_refuse_pending "$WORKSPACE" \
+            spec-commit amendment-commit spec-breach-recovery amendment-attempt-settle gate-check; then
+            die "$CONTROLLER_OPERATION_ERROR. Then run this stop again. Nothing was moved or staged."
+        fi
+    else
+        if ! bare_stop_owner_inspect "$BARE_MARKER" "$JOURNAL" "$MODE" \
+            prompts/common/stop.sh "$MODE" ${SPARES[@]+"${SPARES[@]}"}; then
+            die "$BARE_STOP_ERROR. Nothing was reset, cleaned or journaled."
+        fi
+        if [ "$BARE_STOP_OWNER_STATE" = fresh ] && \
+            ! controller_operation_refuse_pending "$WORKSPACE" \
+                plan-commit spec-commit amendment-commit spec-breach-recovery \
+                amendment-attempt-settle rewind gate-check; then
+            die "$CONTROLLER_OPERATION_ERROR. No bare-stop marker, ref, tree or journal state was changed."
+        fi
     fi
 fi
 
@@ -176,6 +195,14 @@ if [ -z "$LOT" ] && [ "$BARE_STOP_OWNER_STATE" = fresh ]; then
         die "$BARE_STOP_ERROR. Nothing was reset, cleaned or journaled."
     fi
     BARE_STOP_OWNER_STATE=retry
+    controller_physical_test_barrier stop-owner-published
+    controller_physical_admission_release
+    PHYSICAL_ADMISSION_OWNED=
+    controller_physical_test_barrier stop-after-owner-release
+fi
+if [ -z "$LOT" ] && [ -n "$PHYSICAL_ADMISSION_OWNED" ]; then
+    controller_physical_admission_release
+    PHYSICAL_ADMISSION_OWNED=
 fi
 
 PRESERVED="nothing in flight"
@@ -230,6 +257,10 @@ This $MODE call cannot replace its closer. Nothing was moved, and nothing was st
         die "$ATTEMPT_CLOSER_ERROR. Rerun only the frozen call. Nothing was moved, and
 nothing was staged."
     fi
+    controller_physical_test_barrier stop-owner-published
+    controller_physical_admission_release
+    PHYSICAL_ADMISSION_OWNED=
+    controller_physical_test_barrier stop-after-owner-release
     TRYBASE="$RUN/$LOT/task-$N-try-$K"
     if git rev-parse --verify --quiet "$TRYBASE" >/dev/null \
        && [ -z "$(git status --porcelain -uall)" ] \

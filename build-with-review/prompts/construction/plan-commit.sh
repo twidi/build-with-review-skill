@@ -96,7 +96,7 @@ if [ ! -f "$PENDING" ] && ! bare_stop_refuse_unfinished "$WORKSPACE"; then
     die "$BARE_STOP_ERROR. This fresh plan commit cannot pass it. Nothing was copied,
 staged, committed or marked."
 fi
-if [ ! -f "$PENDING" ] && ! controller_operation_refuse_pending "$WORKSPACE" gate-check; then
+if [ ! -f "$PENDING" ] && ! controller_operation_refuse_pending "$WORKSPACE" amendment-attempt-settle gate-check; then
     die "$CONTROLLER_OPERATION_ERROR. This fresh plan commit cannot pass the frozen gate candidate. Nothing was copied, staged or committed."
 fi
 if [ ! -f "$PENDING" ]; then

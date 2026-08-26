@@ -12,6 +12,39 @@
 # The hash is the mechanical identity. The call line is the durable recovery
 # instruction a takeover can read after compaction. No eval ever consumes it.
 
+controller_physical_test_barrier() {
+    local name=$1 directory ready release count=0
+    [ "${BWR_TEST_CONTROLLER_PHYSICAL_BARRIER:-}" = "$name" ] || return 0
+    directory=${BWR_TEST_CONTROLLER_PHYSICAL_BARRIER_DIR:?missing test barrier directory}
+    ready="$directory/$name.ready"
+    release="$directory/$name.release"
+    printf 'ready\n' > "$ready"
+    while [ ! -e "$release" ]; do
+        count=$((count + 1))
+        [ "$count" -lt 3000 ] || return 75
+        sleep 0.01
+    done
+}
+
+controller_physical_admission_acquire() {
+    local workspace=$1
+    CONTROLLER_PHYSICAL_ADMISSION_ERROR=
+    if [ -n "${CONTROLLER_PHYSICAL_ADMISSION_FD:-}" ]; then
+        CONTROLLER_PHYSICAL_ADMISSION_ERROR="the controller physical admission is already retained"
+        return 2
+    fi
+    exec {CONTROLLER_PHYSICAL_ADMISSION_FD}>> "$workspace/controller-physical-admission.lock" \
+        || { CONTROLLER_PHYSICAL_ADMISSION_ERROR="cannot open the controller physical admission lock"; return 2; }
+    flock -x "$CONTROLLER_PHYSICAL_ADMISSION_FD" \
+        || { CONTROLLER_PHYSICAL_ADMISSION_ERROR="cannot retain the controller physical admission lock"; return 2; }
+}
+
+controller_physical_admission_release() {
+    [ -n "${CONTROLLER_PHYSICAL_ADMISSION_FD:-}" ] || return 0
+    flock -u "$CONTROLLER_PHYSICAL_ADMISSION_FD"
+    exec {CONTROLLER_PHYSICAL_ADMISSION_FD}>&-
+}
+
 attempt_closer_read() {
     local inflight=$1 tag extra
     ATTEMPT_CLOSER_KIND=
@@ -110,7 +143,8 @@ controller_operation_refuse_pending() {
     shift
     CONTROLLER_OPERATION_ERROR=
     if [ $# -eq 0 ]; then
-        set -- document-copy spec-commit amendment-commit spec-breach-recovery gate-check
+        set -- document-copy spec-commit amendment-commit spec-breach-recovery \
+            amendment-attempt-settle gate-check
     fi
     for name in "$@"; do
         case "$name" in
@@ -133,6 +167,10 @@ controller_operation_refuse_pending() {
             spec-breach-recovery)
                 marker="$workspace/spec-breach-recovery-in-progress"
                 route="Rerun the exact same spec-breach-recover.sh call with the same breach number and subject. It alone validates and removes this marker; never remove it by hand"
+                ;;
+            amendment-attempt-settle)
+                marker="$workspace/amendment-attempt-settle-in-progress.json"
+                route="Rerun amendment-attempt-settle.sh with the exact amendment, lot, task and attempt. It alone preserves the consolidated Spec while the official failure closer resets the attempt"
                 ;;
             rewind)
                 marker="$workspace/rewind-in-progress"

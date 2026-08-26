@@ -77,7 +77,7 @@ NOTE_KINDS = {
     "bound.spent",
     "rewind.done", "fixer.dispatched", "verdict.consumed", "design.review.resolved",
     "design.review.blocked",
-    "code.review.resolved", "code.review.blocked",
+    "code.review.resolved", "code.review.blocked", "amendment.attempt.settled",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -146,6 +146,9 @@ WORKSPACE = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 JOURNAL = os.path.join(WORKSPACE, "progress.jsonl")
 JOURNAL_LOCK = f"{JOURNAL}.lock"
 AMENDMENT_SWEEP_PREFLIGHT = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
+AMENDMENT_ATTEMPT_SETTLE_MARKER = os.path.join(
+    WORKSPACE, "amendment-attempt-settle-in-progress.json",
+)
 BARE_STOP_MARKER = os.path.join(WORKSPACE, "bare-stop-in-progress")
 DASHBOARD_DIR = os.path.join(WORKSPACE, "dashboard")
 DASHBOARD_COPY = os.path.join(DASHBOARD_DIR, "data", "progress.jsonl")
@@ -4651,6 +4654,57 @@ AMENDMENT_SUPERSESSION_TASK_KEYS = {
     "contract_sha256", "design_sha256", "disagreement_sha256",
 }
 
+AMENDMENT_DEFERRED_PHASE = "deferred-post-amendment"
+
+
+def canonical_digest(value):
+    return sha256_bytes(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+
+
+def amendment_attempt_settle_marker(subject, *, required=False):
+    if not os.path.lexists(AMENDMENT_ATTEMPT_SETTLE_MARKER):
+        if required:
+            fail(f"{subject} has no retained settlement marker")
+        return None
+    path = exact_real_file(
+        WORKSPACE, os.path.basename(AMENDMENT_ATTEMPT_SETTLE_MARKER), subject,
+    )
+    try:
+        with open(path, encoding="utf-8") as source:
+            marker = json.load(source)
+    except (OSError, UnicodeError, ValueError) as exc:
+        fail(f"{subject} has a malformed settlement marker", exc)
+    owner = marker.get("owner") if isinstance(marker, dict) else None
+    if not isinstance(owner, dict) or set(marker) != {
+        "schema", "operation", "phase", "owner", "owner_sha256",
+    } or marker.get("schema") != 1 or marker.get("operation") != "amendment-attempt-settle" \
+            or marker.get("phase") not in {
+                "owned", "base-restored", "failure-recorded", "spec-restored",
+                "diagnostic-closed", "implementer-retired", "terminal-recorded",
+            } or marker.get("owner_sha256") != canonical_digest(owner):
+        fail(f"{subject} has a malformed settlement owner")
+    return marker
+
+
+def amendment_deferred_prefix(entries, before, opening_index, sweep_index, subject):
+    state = current_amendment_review(entries, before, subject)
+    if state["opening_index"] != opening_index or state["last_return_index"] <= sweep_index:
+        fail(f"{subject} has no exact post-sweep A4 fixer return")
+    fixer_index = state["last_return_index"]
+    forbidden = [entry for entry in entries[opening_index + 1:before]
+                 if entry.get("kind") == "amendment.committed"
+                 or entry.get("kind") == "verdict.consumed"
+                 and note_data(entry).get("check") == "consolidation"
+                 or entry.get("event") in {"subagent-started", "subagent-ended"}
+                 and entry.get("kind") == "consolidation"
+                 or entry.get("kind") == "bound.spent"
+                 and str(entry.get("text", "")).startswith("consolidation round")]
+    if forbidden:
+        fail(f"{subject} is not the exact inverted pre-consolidation prefix")
+    return state, fixer_index
+
 
 def unresolved_checker_candidates(entries, before, lot, task, attempt, subject):
     candidates = []
@@ -4734,12 +4788,71 @@ def amendment_attempt_supersession_account(
         fail(f"{subject}'s AMENDMENT has no clean Reach close")
 
     logical = unresolved["logical"]
-    previous = {
+    previous_hashes = {
         key: logical.get(key) for key in (
             "plan_ownership_sha256", "contract_sha256", "design_sha256",
             "plan_projection_sha256", "disagreement_sha256",
         )
     }
+    deferred = isinstance(recorded, dict) \
+        and recorded.get("phase") == AMENDMENT_DEFERRED_PHASE
+    marker = amendment_attempt_settle_marker(subject) if recorded is None else None
+    if marker is not None:
+        owner = marker["owner"]
+        deferred = owner.get("lot") == lot and owner.get("task") == task \
+            and owner.get("attempt") == attempt
+    if deferred:
+        _state, fixer_index = amendment_deferred_prefix(
+            entries, before, opening_index, sweep_index, subject,
+        )
+        if recorded is None:
+            previous = read_construction_plan_state(lot, task, subject)
+            if any(previous.get(key) != value for key, value in previous_hashes.items()):
+                fail(f"{subject}'s deferred route requires the unchanged frozen task")
+            owner = marker["owner"]
+            if owner.get("opening") != journal_line_proof(opening_index) \
+                    or owner.get("sweep") != journal_line_proof(sweep_index) \
+                    or owner.get("fixer") != journal_line_proof(fixer_index):
+                fail(f"{subject}'s settlement marker names another Amendment prefix")
+            settlement_owner_sha256 = marker["owner_sha256"]
+            consolidated_spec_sha256 = owner.get("consolidated_spec_sha256")
+        else:
+            previous = recorded.get("previous_task")
+            if not isinstance(previous, dict) or set(previous) != AMENDMENT_SUPERSESSION_TASK_KEYS \
+                    or previous.get("plan") != f"plans/{lot}-plan.md" \
+                    or any(previous.get(key) != value for key, value in previous_hashes.items()):
+                fail(f"{subject}'s durable deferred route changed its frozen prior task")
+            settlement_owner_sha256 = recorded.get("settlement_owner_sha256")
+            consolidated_spec_sha256 = recorded.get("consolidated_spec_sha256")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(settlement_owner_sha256)) \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(consolidated_spec_sha256)):
+            fail(f"{subject}'s deferred settlement has malformed immutable authority")
+        expected = {
+            "schema": 1,
+            "phase": AMENDMENT_DEFERRED_PHASE,
+            "amendment": opening_data["amendment"],
+            "opening": journal_line_proof(opening_index),
+            "opening_sha256": opening_data["opening_sha256"],
+            "sweep": sweep_data["sweep"],
+            "sweep_proof": journal_line_proof(sweep_index),
+            "fixer": journal_line_proof(fixer_index),
+            "amendment_sha256": sweep_data["amendment_sha256"],
+            "checker": unresolved["checker"],
+            "verdict": unresolved["verdict"],
+            "round": unresolved["round"],
+            "result": unresolved["result"],
+            "result_sha256": unresolved["result_sha256"],
+            "finding_ids": unresolved["finding_ids"],
+            "previous_task": previous,
+            "future_replacement_required": True,
+            "consolidated_spec_sha256": consolidated_spec_sha256,
+            "settlement_owner_sha256": settlement_owner_sha256,
+        }
+        if recorded is not None and recorded != expected:
+            fail(f"{subject} changes its exact deferred AMENDMENT supersession", expected)
+        return expected
+
+    previous = previous_hashes
     if recorded is None:
         replacement = read_construction_plan_state(lot, task, subject)
     else:
@@ -4845,8 +4958,43 @@ def incomplete_completeness_proof(entries, after, before, lot, subject):
         fail(f"{subject} has no C2 result authorizing a later plan successor")
     index, terminal = terminals[-1]
     data = note_data(terminal)
+    frozen = data.get("deferred_amendment_plan") if isinstance(data, dict) else None
+    if frozen is not None:
+        usable = []
+        for candidate_index, candidate in terminals:
+            candidate_data = note_data(candidate)
+            candidate_frozen = candidate_data.get("deferred_amendment_plan") \
+                if isinstance(candidate_data, dict) else None
+            if candidate_frozen != frozen:
+                continue
+            starts = [(start_index, start) for start_index, start in open_subagent_brackets(
+                entries[:candidate_index]
+            ) if start.get("kind") == "completeness" and start.get("lot") == lot
+                and subagent_terminal_matches(start, candidate)]
+            if len(starts) != 1:
+                fail(f"{subject}'s deferred C2 result has no one exact physical opening")
+            expected_frozen = deferred_amendment_c2_account(
+                entries, starts[0][0], lot, subject, recorded=note_data(starts[0][1]).get(
+                    "deferred_amendment_plan"
+                ),
+            )
+            normalized, outcome = deferred_amendment_c2_result_account(
+                candidate_data, expected_frozen, subject, recorded=True,
+            )
+            if candidate_data != normalized:
+                fail(f"{subject}'s deferred C2 result changes its canonical account")
+            if outcome != "lost":
+                usable.append((candidate_index, candidate, outcome))
+        if len(usable) != 1:
+            fail(f"{subject} has no one exact usable deferred C2 result")
+        index, terminal, outcome = usable[0]
+        data = note_data(terminal)
+        if outcome == "clean":
+            fail(f"{subject}'s C2 result does not authorize another plan generation")
+        open_subagent_brackets(entries[:index + 1])
+        return journal_line_proof(index)
     required = {"decisions", "tasks", "deps", "constraints", "parent"}
-    if set(data) != required:
+    if set(data) not in (required, required | {"deferred_amendment_plan"}):
         fail(f"{subject}'s C2 successor proof is incomplete")
     complete_fraction = re.compile(r"([0-9]+)/\1")
     clean = all(complete_fraction.fullmatch(str(data[key])) for key in (
@@ -4861,8 +5009,128 @@ def incomplete_completeness_proof(entries, after, before, lot, subject):
               and subagent_terminal_matches(candidate, terminal)]
     if len(starts) != 1:
         fail(f"{subject}'s C2 successor has no one exact physical checker opening")
+    opening_account = note_data(starts[0]).get("deferred_amendment_plan")
+    if opening_account is not None:
+        start_index = entries.index(starts[0])
+        expected_account = deferred_amendment_c2_account(
+            entries, start_index, lot, subject, recorded=opening_account,
+        )
+        if data.get("deferred_amendment_plan") != expected_account:
+            fail(f"{subject}'s C2 terminal changes its frozen deferred plan authority")
     open_subagent_brackets(entries[:index + 1])
     return journal_line_proof(index)
+
+
+def deferred_amendment_c2_result_account(data, frozen, subject, *, recorded=False):
+    if not isinstance(data, dict) or not isinstance(frozen, dict):
+        fail(f"{subject} has malformed deferred C2 authority")
+    supplied = dict(data)
+    recorded_frozen = supplied.pop("deferred_amendment_plan", None)
+    if recorded and recorded_frozen != frozen:
+        fail(f"{subject} changes its frozen deferred plan generation")
+    if supplied == {"unusable": "lost"}:
+        return {"unusable": "lost", "deferred_amendment_plan": frozen}, "lost"
+    required = {"decisions", "tasks", "deps", "constraints", "parent"}
+    if set(supplied) != required:
+        fail(f"{subject} has malformed deferred C2 result data")
+    fraction = re.compile(r"(0|[1-9][0-9]*)/(0|[1-9][0-9]*)")
+    complete = True
+    for key in ("decisions", "tasks", "deps"):
+        match = fraction.fullmatch(str(supplied[key]))
+        if match is None or int(match.group(1)) > int(match.group(2)):
+            fail(f"{subject} has a malformed canonical {key} fraction")
+        complete = complete and match.group(1) == match.group(2)
+    broken = re.compile(r"[1-9][0-9]* broken")
+    if supplied["constraints"] != "ok" and not broken.fullmatch(str(supplied["constraints"])):
+        fail(f"{subject} has a malformed constraints result")
+    if supplied["parent"] not in {"ok", "n/a"} \
+            and not broken.fullmatch(str(supplied["parent"])):
+        fail(f"{subject} has a malformed parent result")
+    complete = complete and supplied["constraints"] == "ok" \
+        and supplied["parent"] in {"ok", "n/a"}
+    normalized = {**supplied, "deferred_amendment_plan": frozen}
+    return normalized, "clean" if complete else "incomplete"
+
+
+def deferred_amendment_c2_generation_consumed(entries, before, lot, frozen, subject):
+    usable = []
+    for index, terminal in enumerate(entries[:before]):
+        data = note_data(terminal)
+        if terminal.get("event") != "subagent-ended" \
+                or terminal.get("kind") != "completeness" or terminal.get("lot") != lot \
+                or not isinstance(data, dict) \
+                or data.get("deferred_amendment_plan") != frozen:
+            continue
+        starts = [(start_index, start) for start_index, start in open_subagent_brackets(
+            entries[:index]
+        ) if start.get("kind") == "completeness" and start.get("lot") == lot
+            and subagent_terminal_matches(start, terminal)]
+        if len(starts) != 1:
+            fail(f"{subject} has no one exact deferred C2 opening")
+        expected = deferred_amendment_c2_account(
+            entries, starts[0][0], lot, subject,
+            recorded=note_data(starts[0][1]).get("deferred_amendment_plan"),
+        )
+        normalized, outcome = deferred_amendment_c2_result_account(
+            data, expected, subject, recorded=True,
+        )
+        if data != normalized:
+            fail(f"{subject} changes its canonical deferred C2 terminal")
+        if outcome != "lost":
+            usable.append(journal_line_proof(index))
+    if len(usable) > 1:
+        fail(f"{subject} has duplicate usable deferred C2 terminals")
+    return bool(usable)
+
+
+def deferred_amendment_c2_account(entries, before, lot, subject, *, recorded=None):
+    active = active_amendment_plan_supersession(entries, before, lot, subject)
+    if active is None or active[2].get("phase") != AMENDMENT_DEFERRED_PHASE:
+        return None
+    failure_index, failure, supersession = active
+    failure_proof = journal_line_proof(failure_index)
+    settlements = [(index, entry) for index, entry in enumerate(
+        entries[failure_index + 1:before], failure_index + 1,
+    ) if entry.get("kind") == "amendment.attempt.settled"
+        and note_data(entry).get("failure") == failure_proof]
+    if len(settlements) != 1:
+        fail(f"{subject} has no exact completed deferred attempt settlement")
+    validate_amendment_attempt_settled_entry(entries, settlements[0][0], settlements[0][1])
+    commits = [(index, entry) for index, entry in enumerate(
+        entries[settlements[0][0] + 1:before], settlements[0][0] + 1,
+    ) if entry.get("kind") == "amendment.committed"]
+    if len(commits) != 1:
+        fail(f"{subject} has no exact committed Amendment generation")
+    commit_index, commit = commits[0]
+    validate_amendment_commit_entry(entries, commit_index, commit)
+    if note_data(commit).get("amendment") != supersession["amendment"]:
+        fail(f"{subject} consumes another Amendment generation")
+    prior = [entry for entry in entries[failure_index + 1:before]
+             if entry.get("kind") == "plan.written" and entry.get("lot") == lot
+             and note_data(entry).get("schema") == 2
+             and note_data(entry).get("amendment_supersession", {}).get("failure")
+             == failure_proof]
+    if prior:
+        return None
+    task_state = read_construction_plan_state(lot, failure.get("task"), subject) \
+        if recorded is None else recorded.get("task_state")
+    if not isinstance(task_state, dict) or set(task_state) != AMENDMENT_SUPERSESSION_TASK_KEYS:
+        fail(f"{subject} has no exact deferred task generation")
+    previous = supersession["previous_task"]
+    if task_state != previous:
+        fail(f"{subject}'s deferred C2 does not read the exact unchanged prior task generation")
+    expected = {
+        "schema": 1,
+        "failure": failure_proof,
+        "settlement": journal_line_proof(settlements[0][0]),
+        "amendment_commit": journal_line_proof(commit_index),
+        "task": failure.get("task"),
+        "task_state": task_state,
+        "task_state_sha256": canonical_digest(task_state),
+    }
+    if recorded is not None and recorded != expected:
+        fail(f"{subject} changes its exact deferred C2 plan authority", expected)
+    return expected
 
 
 def amendment_plan_publication_account(
@@ -4901,12 +5169,57 @@ def amendment_plan_publication_account(
                 or not commit_changes_only(commit, target):
             fail(f"{subject} changes another path or records another task manifest")
         commit_value = commit
-    replacement = supersession["replacement_task"]
-    root_digest = supersession["replacement_task_sha256"]
+    deferred = supersession.get("phase") == AMENDMENT_DEFERRED_PHASE
+    amendment_commit_proof = None
+    if deferred:
+        commits = [(index, entry) for index, entry in enumerate(
+            entries[failure_index + 1:before], failure_index + 1,
+        ) if entry.get("kind") == "amendment.committed"]
+        if len(commits) != 1:
+            fail(f"{subject}'s deferred replacement requires one exact Amendment commit")
+        amendment_commit_index, amendment_commit = commits[0]
+        validate_amendment_commit_entry(entries, amendment_commit_index, amendment_commit)
+        if note_data(amendment_commit).get("amendment") != supersession["amendment"]:
+            fail(f"{subject}'s deferred replacement consumes another Amendment")
+        amendment_commit_proof = journal_line_proof(amendment_commit_index)
+        replacement = None
+        if prior:
+            root_publication = prior[0][1]
+            root_state = normalized_committed_plan_state(
+                lot, task, note_data(root_publication).get("commit"), subject,
+            )
+            root_digest = canonical_digest(root_state)
+        else:
+            root_digest = canonical_digest(state)
+    else:
+        replacement = supersession["replacement_task"]
+        root_digest = supersession["replacement_task_sha256"]
     previous_publication = journal_line_proof(prior[-1][0]) if prior else None
     c2_proof = None
     if not prior:
-        if state != replacement:
+        if deferred:
+            c2_proof = incomplete_completeness_proof(
+                entries, amendment_commit_index, before, lot, subject,
+            )
+            c2_index, c2_terminal = journal_entry_from_proof(entries, c2_proof, subject)
+            c2_account = note_data(c2_terminal).get("deferred_amendment_plan")
+            previous = supersession["previous_task"]
+            if not isinstance(c2_account, dict) or c2_account.get("task_state") != previous \
+                    or c2_account.get("amendment_commit") != amendment_commit_proof:
+                fail(f"{subject} does not consume C2 on the unchanged prior task generation")
+            c2_openings = [(index, opening) for index, opening in open_subagent_brackets(
+                entries[:c2_index]
+            ) if opening.get("kind") == "completeness"
+                and subagent_terminal_matches(opening, c2_terminal)]
+            if len(c2_openings) != 1:
+                fail(f"{subject} has no one exact deferred C2 physical opening")
+            c2_opening_proof = journal_line_proof(c2_openings[0][0])
+            if state["contract_sha256"] == previous["contract_sha256"] \
+                    or state["plan_ownership_sha256"] == previous["plan_ownership_sha256"] \
+                    or state["design_sha256"] != previous["design_sha256"] \
+                    or state["disagreement_sha256"] != previous["disagreement_sha256"]:
+                fail(f"{subject}'s first deferred successor violates its frozen task boundary")
+        elif state != replacement:
             fail(f"{subject} changes the AMENDMENT replacement before its first publication")
     else:
         c2_proof = incomplete_completeness_proof(
@@ -4927,7 +5240,7 @@ def amendment_plan_publication_account(
     task_digest = sha256_bytes(json.dumps(
         state, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8"))
-    return {
+    publication_account = {
         "schema": 2,
         "tasks": tasks,
         "op": operation,
@@ -4942,6 +5255,15 @@ def amendment_plan_publication_account(
             "task_state_sha256": task_digest,
         },
     }
+    if deferred:
+        publication_account["amendment_supersession"].update({
+            "amendment_commit": amendment_commit_proof,
+            "c2_opening": c2_opening_proof if not prior else None,
+            "previous_task": supersession["previous_task"],
+            "replacement_task": state,
+            "replacement_task_sha256": canonical_digest(state),
+        })
+    return publication_account
 
 
 def normalize_plan_written(entries, data, context, subject):
@@ -6055,6 +6377,141 @@ def validate_attempt_failed_entry(entries, index, entry):
     )
 
 
+AMENDMENT_SETTLE_OWNER_KEYS = {
+    "schema", "amendment", "opening", "sweep", "fixer", "lot", "task", "attempt",
+    "attempt_identity", "attempt_base", "attempt_base_tree", "spec_path",
+    "base_spec_sha256", "consolidated_spec_sha256", "recovery", "session", "started",
+}
+
+
+def validate_amendment_attempt_settle_owner(entries, before, owner, subject):
+    if not isinstance(owner, dict) or set(owner) != AMENDMENT_SETTLE_OWNER_KEYS \
+            or owner.get("schema") != 1 \
+            or not construction_positive_integer(owner.get("amendment")) \
+            or not construction_positive_integer(owner.get("task")) \
+            or not construction_positive_integer(owner.get("attempt")) \
+            or not isinstance(owner.get("lot"), str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", owner["lot"]) \
+            or not isinstance(owner.get("spec_path"), str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(owner.get("base_spec_sha256"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(owner.get("consolidated_spec_sha256"))) \
+            or owner.get("recovery") != (
+                "recovery/amendment-attempt-settle/"
+                f"{owner.get('consolidated_spec_sha256')}.spec"
+            ):
+        fail(f"{subject} has a malformed settlement owner")
+    opening_index, opening = journal_entry_from_proof(entries, owner["opening"], subject)
+    sweep_index, sweep = journal_entry_from_proof(entries, owner["sweep"], subject)
+    fixer_index, fixer = journal_entry_from_proof(entries, owner["fixer"], subject)
+    if not opening_index < sweep_index < fixer_index < before \
+            or opening.get("kind") != "amendment.opened" \
+            or note_data(opening).get("amendment") != owner["amendment"] \
+            or note_data(opening).get("origin") != "construction" \
+            or (note_data(opening).get("construction_source") or {}).get("lot") != owner["lot"] \
+            or sweep.get("kind") != "sweep.reported" \
+            or fixer.get("kind") != "fixer.returned":
+        fail(f"{subject} does not bind its ordered Amendment prefix")
+    validate_amendment_opening_entry(entries, opening_index, opening)
+    _, _, _, audit = validate_sweep_entry(entries, sweep_index, sweep)
+    if not reach_sweep_is_clean(audit):
+        fail(f"{subject} does not bind one clean final Reach close")
+    _state, exact_fixer_index = amendment_deferred_prefix(
+        entries, before, opening_index, sweep_index, subject,
+    )
+    if exact_fixer_index != fixer_index:
+        fail(f"{subject} does not bind the exact final A4 fixer return")
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "session-started"
+              and entry.get("session") == owner.get("session")]
+    if len(starts) != 1 or journal_line_proof(starts[0][0]) != owner.get("started"):
+        fail(f"{subject} has no one exact implementer opening")
+    start_index, start = starts[0]
+    context = validate_construction_session_start(
+        start, subject, entries=entries, index=start_index,
+    )
+    start_data = start.get("data")
+    if context != {key: owner[key] for key in ("lot", "task", "attempt")} \
+            or start_data is not None and (
+                start_data.get("attempt_identity") != owner.get("attempt_identity")
+                or start_data.get("attempt_base") != owner.get("attempt_base")
+                or start_data.get("attempt_base_tree") != owner.get("attempt_base_tree")
+            ):
+        fail(f"{subject} changes its frozen implementer authority")
+    base, tree = git_commit_and_tree(owner.get("attempt_base"), subject)
+    if base != owner["attempt_base"] or tree != owner["attempt_base_tree"]:
+        fail(f"{subject} changes its attempt-base authority")
+    source = note_data(opening).get("construction_source") or {}
+    if source.get("spec") != owner["spec_path"]:
+        fail(f"{subject} names another living specification")
+    blob = subprocess.run(
+        ["git", "-C", REPO, "show", f"{base}:{owner['spec_path']}"],
+        capture_output=True,
+    )
+    if blob.returncode != 0 or sha256_bytes(blob.stdout) != owner["base_spec_sha256"]:
+        fail(f"{subject} changes its exact attempt-base specification")
+    return owner
+
+
+def amendment_attempt_settle_terminal_account(entries, before, owner, subject):
+    validate_amendment_attempt_settle_owner(entries, before, owner, subject)
+    owner_sha256 = canonical_digest(owner)
+    failures = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "attempt.failed"
+                and entry.get("lot") == owner["lot"] and entry.get("task") == owner["task"]
+                and note_data(entry).get("attempt") == owner["attempt"]]
+    if len(failures) != 1:
+        fail(f"{subject} has no one exact deferred attempt failure")
+    failure_index, failure = failures[0]
+    validate_attempt_failed_entry(entries, failure_index, failure)
+    supersession = note_data(failure).get("amendment_supersession") or {}
+    if supersession.get("phase") != AMENDMENT_DEFERRED_PHASE \
+            or supersession.get("settlement_owner_sha256") != owner_sha256 \
+            or supersession.get("consolidated_spec_sha256") != owner["consolidated_spec_sha256"] \
+            or supersession.get("opening") != owner["opening"] \
+            or supersession.get("sweep_proof") != owner["sweep"] \
+            or supersession.get("fixer") != owner["fixer"]:
+        fail(f"{subject}'s failure does not consume its exact settlement owner")
+    retirements = [(index, entry) for index, entry in enumerate(entries[:before])
+                   if entry.get("event") == "session-retired"
+                   and entry.get("session") == owner["session"]]
+    if len(retirements) != 1:
+        fail(f"{subject} has no one exact implementer retirement")
+    retired_index, retired = retirements[0]
+    if retired_index <= failure_index or retired.get("status") != "superseded" \
+            or retired.get("archived") is not True or retired.get("hidden") is not True \
+            or any(retired.get(key) != owner[key] for key in ("lot", "task", "attempt")):
+        fail(f"{subject} has no exact superseded archived hidden retirement")
+    return {
+        "schema": 1,
+        "owner": owner,
+        "owner_sha256": owner_sha256,
+        "failure": journal_line_proof(failure_index),
+        "restore_sha256": owner["consolidated_spec_sha256"],
+        "retirement": journal_line_proof(retired_index),
+    }
+
+
+def validate_amendment_attempt_settled_entry(entries, index, entry):
+    if entry.get("event") != "note" or entry.get("kind") != "amendment.attempt.settled" \
+            or entry.get("mode") != "amendment" or entry.get("job") != "controller":
+        fail("a durable Amendment attempt settlement has malformed context")
+    data = note_data(entry)
+    expected = amendment_attempt_settle_terminal_account(
+        entries, index, data.get("owner") if isinstance(data, dict) else None,
+        "the durable Amendment attempt settlement",
+    )
+    if data != expected or any(
+        candidate.get("kind") == "amendment.attempt.settled"
+        and isinstance(note_data(candidate).get("owner"), dict)
+        and tuple(note_data(candidate)["owner"].get(key)
+                  for key in ("amendment", "lot", "task", "attempt"))
+        == tuple(expected["owner"][key] for key in ("amendment", "lot", "task", "attempt"))
+        for candidate in entries[:index]
+    ):
+        fail("a durable Amendment attempt settlement changes or duplicates its authority", expected)
+    return expected
+
+
 def validate_attempt_succeeded_entry(entries, index, entry):
     data = note_data(entry)
     retry = data.get("retry")
@@ -6123,6 +6580,8 @@ def validate_construction_verdict_history(entries):
             validate_construction_launch_abandonment(
                 entries, index, entry, "the durable orphan-launch terminal",
             )
+        elif entry.get("event") == "note" and entry.get("kind") == "amendment.attempt.settled":
+            validate_amendment_attempt_settled_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "plan.written":
             validate_plan_written_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") in {"paused", "aborted"} \
@@ -8771,6 +9230,8 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
     context = context or {}
     if kind == "attempt.launch.abandoned":
         fail("attempt.launch.abandoned is helper-owned; use construction-launch-abandoned")
+    if kind == "amendment.attempt.settled":
+        fail("amendment.attempt.settled is helper-owned; use amendment-attempt-settle.sh")
     if kind == "attempt.failed":
         data = normalize_attempt_failed(notes, data, context)
     elif kind == "attempt.succeeded":
@@ -9226,6 +9687,7 @@ def write_validated_line(builder):
             append_start, recovery = _repair_incomplete_tail(fd)
             entries = journal_entries()
             entry = builder(entries)
+            validate_pending_amendment_attempt_settlement_append(entries, entry)
             validate_pending_pass_opening_append(
                 entries, entry, "the journal append",
             )
@@ -9246,6 +9708,36 @@ def write_validated_line(builder):
             os.close(fd)
     if recovery:
         print(f"**progress WARNING** · {recovery}")
+
+
+def validate_pending_amendment_attempt_settlement_append(entries, entry):
+    marker = amendment_attempt_settle_marker("the pending Amendment attempt settlement")
+    if marker is None:
+        return
+    owner = marker["owner"]
+    if entry.get("event") == "note" and entry.get("kind") == "attempt.failed":
+        data = note_data(entry)
+        supersession = data.get("amendment_supersession") if isinstance(data, dict) else None
+        if entry.get("lot") == owner["lot"] and entry.get("task") == owner["task"] \
+                and data.get("attempt") == owner["attempt"] \
+                and isinstance(supersession, dict) \
+                and supersession.get("settlement_owner_sha256") == marker["owner_sha256"]:
+            return
+    if entry.get("event") == "session-retired" \
+            and entry.get("session") == owner["session"] \
+            and entry.get("status") == "superseded" \
+            and entry.get("archived") is True and entry.get("hidden") is True \
+            and all(entry.get(key) == owner[key] for key in ("lot", "task", "attempt")):
+        return
+    if entry.get("event") == "note" and entry.get("kind") == "amendment.attempt.settled" \
+            and note_data(entry).get("owner_sha256") == marker["owner_sha256"]:
+        return
+    fail("the pending Amendment attempt settlement owns every workflow mutation", {
+        "event": entry.get("event"), "kind": entry.get("kind"),
+        "session": entry.get("session"), "status": entry.get("status"),
+        "lot": entry.get("lot"), "task": entry.get("task"), "attempt": entry.get("attempt"),
+        "archived": entry.get("archived"), "hidden": entry.get("hidden"),
+    })
 
 
 def event_entry(by, event, **fields):
@@ -9434,6 +9926,7 @@ def cmd_session_retired(args):
             hidden=True if args.hide else None,
             **target_context,
         )
+        validate_pending_amendment_attempt_settlement_append(entries, provisional)
         validate_pending_pass_opening_append(
             entries, provisional, "the session retirement",
         )
@@ -9489,6 +9982,7 @@ def cmd_subagent_started(args):
     product_finding_verifier = args.kind == "finding-verifier" and not (
         isinstance(data, dict) and data.get("owner") == "spec-loop"
     )
+    deferred_completeness = args.kind == "completeness"
     if args.kind == "gate-runner":
         validate_gate_subagent("subagent-started", data)
     elif args.kind == "finding-verifier" and isinstance(data, dict) \
@@ -9498,6 +9992,9 @@ def cmd_subagent_started(args):
         pass
     elif args.kind == "consolidation":
         data = normalize_consolidation_started(journal_entries(), data, args.round)
+    elif args.kind == "completeness":
+        if data is not None:
+            fail("subagent-started completeness derives its identity and takes no --data")
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
         check = args.kind.removesuffix("-checker")
         data = normalize_construction_started(
@@ -9508,7 +10005,30 @@ def cmd_subagent_started(args):
             context.pop("round", None)
     elif data is not None:
         fail(f"subagent-started {args.kind} does not take structured data")
-    if product_finding_verifier:
+    if deferred_completeness:
+        def build(entries):
+            account = deferred_amendment_c2_account(
+                entries, len(entries), context.get("lot"),
+                "the deferred post-Amendment C2 opening",
+            )
+            frozen_data = None
+            if account is not None:
+                if deferred_amendment_c2_generation_consumed(
+                        entries, len(entries), context.get("lot"), account,
+                        "the deferred post-Amendment C2 opening"):
+                    fail("the deferred plan generation already has one usable C2 result")
+                frozen_data = {"deferred_amendment_plan": account}
+            validate_subagent_transition(
+                entries, "subagent-started", me["session_id"], args.kind,
+                context, frozen_data,
+            )
+            return event_entry(
+                me["session_id"], "subagent-started", kind=args.kind,
+                data=frozen_data, **context,
+            )
+
+        write_validated_line(build)
+    elif product_finding_verifier:
         def build(entries):
             validate_product_finding_verifier(
                 "subagent-started", data, args.mandate, entries,
@@ -9555,6 +10075,7 @@ def cmd_subagent_ended(args):
     product_finding_verifier = args.kind == "finding-verifier" and not (
         isinstance(data, dict) and data.get("owner") == "spec-loop"
     )
+    deferred_completeness = args.kind == "completeness"
     if args.kind == "gate-runner":
         validate_gate_subagent("subagent-ended", data)
     elif args.kind == "finding-verifier" and isinstance(data, dict) \
@@ -9564,6 +10085,8 @@ def cmd_subagent_ended(args):
         pass
     elif args.kind == "consolidation":
         data = normalize_consolidation_ended(journal_entries(), data, args.round)
+    elif args.kind == "completeness":
+        pass
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
         check = args.kind.removesuffix("-checker")
         data = normalize_construction_ended(
@@ -9572,7 +10095,43 @@ def cmd_subagent_ended(args):
         context.update({key: data[key] for key in ("lot", "task", "attempt")})
         if check == "diagnostic":
             context.pop("round", None)
-    if product_finding_verifier:
+    if deferred_completeness:
+        requested_data = data
+
+        def build(entries):
+            openings = [(index, entry) for index, entry in open_subagent_brackets(entries)
+                        if entry.get("kind") == "completeness"
+                        and subagent_event_context(entry) == context]
+            if len(openings) != 1:
+                fail("the completeness terminal has no one exact physical opening")
+            opening_index, opening = openings[0]
+            frozen = note_data(opening).get("deferred_amendment_plan")
+            normalized = requested_data
+            if frozen is not None:
+                expected = deferred_amendment_c2_account(
+                    entries, opening_index, context.get("lot"),
+                    "the deferred post-Amendment C2 result", recorded=frozen,
+                )
+                current = deferred_amendment_c2_account(
+                    entries, len(entries), context.get("lot"),
+                    "the deferred post-Amendment C2 result",
+                )
+                if current != expected:
+                    fail("the deferred workspace plan changed while C2 was open")
+                normalized, _outcome = deferred_amendment_c2_result_account(
+                    requested_data, expected, "the deferred post-Amendment C2 result",
+                )
+            validate_subagent_transition(
+                entries, "subagent-ended", me["session_id"], args.kind,
+                context, normalized,
+            )
+            return event_entry(
+                me["session_id"], "subagent-ended", kind=args.kind,
+                data=normalized, **context,
+            )
+
+        write_validated_line(build)
+    elif product_finding_verifier:
         def build(entries):
             validate_product_finding_verifier(
                 "subagent-ended", data, args.mandate, entries,
@@ -9637,7 +10196,20 @@ def open_subagent_brackets(entries):
         if len(matches) != 1:
             fail("the journal has no one exact opening for a provider-subagent terminal",
                  f"progress.jsonl line {index + 1}")
-        del open_calls[matches[0][0]]
+        position, (opening_index, opening) = matches[0]
+        frozen = note_data(opening).get("deferred_amendment_plan")
+        if opening.get("kind") == "completeness" and frozen is not None:
+            expected = deferred_amendment_c2_account(
+                entries, opening_index, opening.get("lot"),
+                "the historical deferred post-Amendment C2 terminal", recorded=frozen,
+            )
+            normalized, _outcome = deferred_amendment_c2_result_account(
+                note_data(entry), expected,
+                "the historical deferred post-Amendment C2 terminal", recorded=True,
+            )
+            if note_data(entry) != normalized:
+                fail("the historical deferred C2 terminal changes its canonical account")
+        del open_calls[position]
     return open_calls
 
 
@@ -10136,6 +10708,46 @@ def cmd_construction_failure_check(args):
     print(json.dumps(expected, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
+def cmd_amendment_attempt_settle_terminal(args):
+    me = whoami()
+
+    def build(entries):
+        marker = amendment_attempt_settle_marker(
+            "the Amendment attempt settlement terminal", required=True,
+        )
+        owner = marker["owner"]
+        if marker["owner_sha256"] != args.owner \
+                or (owner["amendment"], owner["lot"], owner["task"], owner["attempt"]) != (
+                    args.amendment, args.lot, args.task, args.attempt,
+                ):
+            fail("the Amendment attempt settlement terminal names another retained owner")
+        data = amendment_attempt_settle_terminal_account(
+            entries, len(entries), owner, "the Amendment attempt settlement terminal",
+        )
+        candidate = event_entry(
+            me["session_id"], "note", kind="amendment.attempt.settled",
+            mode="amendment", lot=args.lot, task=args.task, attempt=args.attempt,
+            job="controller", data=data,
+        )
+        validate_pending_amendment_attempt_settlement_append(entries, candidate)
+        return candidate
+
+    write_validated_line(build)
+
+
+def cmd_amendment_attempt_settle_owner_check(args):
+    marker = amendment_attempt_settle_marker(
+        "the official failure closer's Amendment settlement owner", required=True,
+    )
+    owner = marker["owner"]
+    if marker["owner_sha256"] != args.owner \
+            or (owner["lot"], owner["task"], owner["attempt"]) != (
+                args.lot, args.task, args.attempt,
+            ):
+        fail("the official failure closer names another Amendment settlement owner")
+    print(marker["owner_sha256"])
+
+
 def cmd_construction_plan_publication_check(args):
     entries = journal_entries()
     amendment_plan_publication_account(
@@ -10387,6 +10999,21 @@ def build_parser():
     sp.add_argument("classification", choices=tuple(sorted(CONSTRUCTION_CLASSIFICATIONS)))
     sp.set_defaults(func=cmd_construction_failure_check)
 
+    sp = sub.add_parser("amendment-attempt-settle-terminal", help=argparse.SUPPRESS)
+    sp.add_argument("amendment", type=positive_int)
+    sp.add_argument("lot")
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("attempt", type=positive_int)
+    sp.add_argument("owner")
+    sp.set_defaults(func=cmd_amendment_attempt_settle_terminal)
+
+    sp = sub.add_parser("amendment-attempt-settle-owner-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("attempt", type=positive_int)
+    sp.add_argument("owner")
+    sp.set_defaults(func=cmd_amendment_attempt_settle_owner_check)
+
     sp = sub.add_parser("construction-plan-publication-check", help=argparse.SUPPRESS)
     sp.add_argument("lot")
     sp.add_argument("tasks", type=positive_int)
@@ -10417,10 +11044,14 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
-    if args.command != "subagents-open":
+    read_only = {
+        "subagents-open", "construction-failure-check",
+        "amendment-attempt-settle-owner-check",
+    }
+    if args.command not in read_only:
         repair_journal_tail()
     args.func(args)
-    if args.command != "subagents-open":
+    if args.command not in read_only:
         refresh_dashboard()
 
 

@@ -778,6 +778,34 @@ task, the plan being written; the run resumes where it stood.
 
 1. **Put the tree where the work will resume from, before anything is written to it.**
 
+   **If A4 consolidation returned before the required Construction attempt ended, do not
+   call `attempt-failed.sh` directly.** The consolidated living Spec is controller-owned.
+   Use the one public recovery command:
+
+   ```sh
+   <workspace>/prompts/amendment/amendment-attempt-settle.sh \
+     <amendment> <lot> <task> <attempt>
+   ```
+
+   The command authenticates the current clean Reach close, final A4 fixer return, unresolved
+   checker batch, exact attempt and physical implementer. It stores the consolidated Spec in
+   immutable recovery, temporarily restores the attempt-base Spec, calls the official
+   `attempt-failed.sh ... C3.9b`, restores the consolidated bytes, closes the exact diagnostic
+   checkout, retires the implementer `superseded`, and records one durable settlement terminal.
+   **Rerun this same command after any interruption or lost output.** Do not read its marker,
+   reconstruct an operation, replay the sweep or replay `fixer.returned`. No consolidation,
+   commit, stop, closer or other workflow mutation can cross its retained owner.
+
+   After `AMENDMENT ATTEMPT SETTLED`, continue with consolidation round 1. Commit the
+   Amendment normally. After `amendment.committed`, run C2 on the exact unchanged prior task
+   generation. Do not edit the controller-owned task contract before or during that bracket.
+   One canonical incomplete C2 terminal authorizes the correction. Only after that terminal,
+   correct the controller-owned task contract in the workspace plan. Publish that exact first
+   successor with the official `plan-commit.sh`, establish its fresh baseline, and only then
+   launch the next attempt. A clean C2 terminal does not authorize this required successor.
+   This deferred route never requires or invents a replacement task account in the earlier
+   `attempt.failed` event.
+
    *Going back*, below, says what becomes of the interrupted attempt. **Take that decision
    now.** If the attempt carries on, there is nothing to do here. **If it ends**, run
    everything that moves the tree before you go further: its preserve and reset, its

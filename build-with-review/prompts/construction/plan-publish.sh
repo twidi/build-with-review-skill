@@ -66,7 +66,7 @@ publishing. Nothing was copied."
 TARGET_REL="docs/plans/$(basename "$WORKSPACE")-$LOT-plan.md"
 TARGET="$REPO/$TARGET_REL"
 
-if ! controller_operation_refuse_pending "$WORKSPACE" gate-check; then
+if ! controller_operation_refuse_pending "$WORKSPACE" amendment-attempt-settle gate-check; then
     die "$CONTROLLER_OPERATION_ERROR. Plan publication must happen before the final gate opens. Nothing was copied."
 fi
 

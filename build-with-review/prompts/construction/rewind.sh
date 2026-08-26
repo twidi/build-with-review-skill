@@ -82,7 +82,7 @@ if [ -n "$RESUME" ]; then
     BASE_SHA=$(grep '^base ' "$STATE" | cut -d' ' -f2)
     mapfile -t REPLAY < <(grep '^replay ' "$STATE" | cut -d' ' -f2)
 else
-    if ! controller_operation_refuse_pending "$WORKSPACE" gate-check; then
+    if ! controller_operation_refuse_pending "$WORKSPACE" amendment-attempt-settle gate-check; then
         die "$CONTROLLER_OPERATION_ERROR. This fresh rewind cannot pass the frozen gate candidate. Nothing was moved."
     fi
     if ! bare_stop_refuse_unfinished "$WORKSPACE"; then

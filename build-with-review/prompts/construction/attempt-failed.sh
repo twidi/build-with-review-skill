@@ -40,7 +40,20 @@ cd "$REPO"
 # The preserve below stages everything and resets to attempt-base. It must not
 # absorb or unland a controller-owned operation whose marker still owns the
 # workspace. Refuse before binding this closer or changing any repository state.
-if ! controller_operation_refuse_pending "$WORKSPACE"; then
+if [ -n "${BWR_AMENDMENT_ATTEMPT_SETTLE_OWNER:-}" ]; then
+    "$WORKSPACE/prompts/common/progress.py" amendment-attempt-settle-owner-check \
+        "$LOT" "$N" "$K" "$BWR_AMENDMENT_ATTEMPT_SETTLE_OWNER" >/dev/null \
+        || die "the Amendment settlement owner does not authorize this official failure closer"
+    SETTLE_GUARD=(document-copy spec-commit amendment-commit spec-breach-recovery gate-check)
+else
+    SETTLE_GUARD=()
+fi
+if [ ${#SETTLE_GUARD[@]} -gt 0 ]; then
+    controller_operation_refuse_pending "$WORKSPACE" "${SETTLE_GUARD[@]}" || GUARD_FAILED=1
+else
+    controller_operation_refuse_pending "$WORKSPACE" || GUARD_FAILED=1
+fi
+if [ -n "${GUARD_FAILED:-}" ]; then
     die "$CONTROLLER_OPERATION_ERROR. Rerun that owner first, then retry this failure closer.
 Nothing was moved, staged, recorded or bound."
 fi
@@ -76,6 +89,19 @@ own identity. Nothing was moved, and nothing was staged."
 # anything. The shared validator refuses an unsettled batch. It requires
 # one exact immutable failure handoff for accepted items, or one exact blocker terminal
 # for a controller-owned Design or code-review contract defect.
+controller_physical_test_barrier failure-before-owner
+controller_physical_admission_acquire "$WORKSPACE" \
+    || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR. Nothing was moved, staged, recorded or bound."
+GUARD_FAILED=
+if [ ${#SETTLE_GUARD[@]} -gt 0 ]; then
+    controller_operation_refuse_pending "$WORKSPACE" "${SETTLE_GUARD[@]}" || GUARD_FAILED=1
+else
+    controller_operation_refuse_pending "$WORKSPACE" || GUARD_FAILED=1
+fi
+if [ -n "$GUARD_FAILED" ]; then
+    die "$CONTROLLER_OPERATION_ERROR. Rerun that owner first, then retry this failure closer.
+Nothing was moved, staged, recorded or bound."
+fi
 FAILURE_DATA=$("$WORKSPACE/prompts/common/progress.py" construction-failure-check \
     "$LOT" "$N" "$K" "$CLASS") \
     || die "the failure is not admitted by the exact checker state.
@@ -121,6 +147,9 @@ if ! attempt_closer_bind "$INFLIGHT" failure prompts/construction/attempt-failed
     die "$ATTEMPT_CLOSER_ERROR. Rerun only the frozen call. Nothing was moved, and
 nothing was staged."
 fi
+controller_physical_test_barrier failure-owner-published
+controller_physical_admission_release
+controller_physical_test_barrier failure-after-owner-release
 
 disposable_ground_prepare "$REPO"
 TMP="$DISPOSABLE_GROUND/bwr-$RUN_NAME-$LOT-task-$N-try-$K"

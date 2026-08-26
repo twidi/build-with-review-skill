@@ -108,7 +108,7 @@ fi
 # moving a since-closed attempt's mark is benign — nothing reads a mark
 # without the identity file beside it.
 if [ ! -f "$PENDING" ]; then
-    if ! controller_operation_refuse_pending "$WORKSPACE" gate-check; then
+    if ! controller_operation_refuse_pending "$WORKSPACE" amendment-attempt-settle gate-check; then
         die "$CONTROLLER_OPERATION_ERROR. This fresh amendment commit cannot pass the frozen gate candidate. Nothing was copied, staged or committed."
     fi
     if ! bare_stop_refuse_unfinished "$WORKSPACE"; then
