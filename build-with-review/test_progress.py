@@ -1270,7 +1270,10 @@ def configure_reach_session(session, sweep):
 
 
 def accept_reach_sweep(sweep, report, session):
-    write_report(f"reports/amendment/1/sweep-{sweep}.md", report)
+    opening = next(entry for entry in reversed(journal_lines())
+                   if entry.get("kind") == "amendment.opened")
+    number = opening["data"]["amendment"]
+    write_report(f"reports/amendment/{number}/sweep-{sweep}.md", report)
     configure_reach_session(session, sweep)
     append_live_reach_session(sweep, session)
     preflight = run_progress("amendment-sweep-check", str(sweep))
@@ -9161,6 +9164,67 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
         "source_task": 1, "source_attempt": 1,
     }, by=CALLER, mode="product-review", lot="lot-1.1", job="controller")
     seed_review_receipts("lot-1.1", confirmed=1)
+    prior_order = "change the specification and return to lot-1.1"
+    prior_opened = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1.1"}',
+        "--text", prior_order,
+    )
+    check(prior_opened.returncode == 0, prior_opened.stdout + prior_opened.stderr)
+    prior_voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
+    check(prior_voided.returncode == 0, prior_voided.stdout + prior_voided.stderr)
+    write_report("amendments/1.md", amendment_document(1, prior_order))
+    os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "1"), exist_ok=True)
+    prior_written = run_progress(
+        "note", "amendment.written", "--data", '{"amendment":1}',
+        "--text", os.path.join(WORKSPACE, "amendments", "1.md"),
+    )
+    check(prior_written.returncode == 0, prior_written.stdout + prior_written.stderr)
+    accept_reach_sweep(1, reach_report(), "prior-product-sublot-reach")
+    prior_returned = run_progress(
+        "note", "fixer.returned", "--data", '{"applied":0,"declined":0}',
+    )
+    check(prior_returned.returncode == 0, prior_returned.stdout + prior_returned.stderr)
+    write_project(spec_relative, spec_document(status="amended once"))
+    prior_started = run_progress("subagent-started", "consolidation", "--round", "1")
+    check(prior_started.returncode == 0, prior_started.stdout + prior_started.stderr)
+    prior_spent = run_progress(
+        "note", "bound.spent", "--round", "1", "--text", "consolidation round 1 of 3",
+    )
+    check(prior_spent.returncode == 0, prior_spent.stdout + prior_spent.stderr)
+    prior_ended = run_progress(
+        "subagent-ended", "consolidation", "--round", "1", "--data", '{"exact":true}',
+    )
+    check(prior_ended.returncode == 0, prior_ended.stdout + prior_ended.stderr)
+    prior_consumed = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"consolidation","outcome":"exact"}',
+    )
+    check(prior_consumed.returncode == 0, prior_consumed.stdout + prior_consumed.stderr)
+    commit_script = os.path.join(WORKSPACE, "prompts", "amendment", "amendment-commit.sh")
+    prior_commit_result = subprocess.run(
+        [commit_script, "1", spec_relative, "docs: land prior Amendment", "-"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(
+        prior_commit_result.returncode == 0,
+        prior_commit_result.stdout + prior_commit_result.stderr,
+    )
+    prior_commit = journal_lines()[-1]["data"]["sha"]
+    prior_base = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{prior_commit}^"], text=True,
+    ).strip()
+    set_caller_bwr(
+        mode="product-review", lot="lot-1.1", job="controller", task=None, attempt=None,
+    )
+    prior_owner = f"amendment/1/{prior_commit}"
+    prior_gate = seed_baseline_gate(prior_owner, prior_commit, prior_base)
+    append_note("pass.opened", {
+        "built": "lot-1.1", "commit": prior_commit, "gate": prior_gate,
+        "source_scope": "baseline", "source_owner": prior_owner, "source_lot": "-",
+        "source_task": 0, "source_attempt": 0,
+    }, by=CALLER, mode="product-review", lot="lot-1.1", job="controller")
+    seed_review_receipts("lot-1.1", confirmed=1)
     allocation = run_progress(
         "note", "sublot.allocated", "--text", "lot-1.2",
         "--data", json.dumps(allocation_data("lot-1.1"), separators=(",", ":")),
@@ -9187,7 +9251,7 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
     seed_review_receipts("lot-1.2")
     opened = run_progress(
         "note", "amendment.opened",
-        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1.2"}',
+        "--data", '{"amendment":2,"origin":"product-review","built":"lot-1.2"}',
         "--text", "apply the Product Review correction and return to lot-1.2",
     )
     check(opened.returncode == 0, opened.stdout + opened.stderr)
@@ -9204,14 +9268,16 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
     voided = run_progress("note", "pass.closed", "--data", '{"voided":true}')
     check(voided.returncode == 0, voided.stdout + voided.stderr)
     order = "apply the Product Review correction and return to lot-1.2"
-    write_report("amendments/1.md", amendment_document(1, order))
-    os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "1"), exist_ok=True)
+    write_report("amendments/2.md", amendment_document(2, order))
+    os.makedirs(os.path.join(WORKSPACE, "reports", "amendment", "2"), exist_ok=True)
     written = run_progress(
-        "note", "amendment.written", "--data", '{"amendment":1}',
-        "--text", os.path.join(WORKSPACE, "amendments", "1.md"),
+        "note", "amendment.written", "--data", '{"amendment":2}',
+        "--text", os.path.join(WORKSPACE, "amendments", "2.md"),
     )
     check(written.returncode == 0, written.stdout + written.stderr)
-    accept_reach_sweep(1, reach_report(), "product-sublot-reach")
+    accept_reach_sweep(
+        1, reach_report(sources=("A2/order",)), "product-sublot-reach",
+    )
     returned = run_progress("note", "fixer.returned", "--data", '{"applied":0,"declined":0}')
     check(returned.returncode == 0, returned.stdout + returned.stderr)
     write_project(spec_relative, spec_document(status="amended"))
@@ -9230,7 +9296,7 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
         "--data", '{"check":"consolidation","outcome":"exact"}',
     )
     check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
-    close_check = run_progress("amendment-close-check", "1", spec_relative)
+    close_check = run_progress("amendment-close-check", "2", spec_relative)
     check(close_check.returncode == 0, close_check.stdout + close_check.stderr)
     watchdog = run_progress("subagents-open")
     check(watchdog.returncode == 0, watchdog.stdout + watchdog.stderr)

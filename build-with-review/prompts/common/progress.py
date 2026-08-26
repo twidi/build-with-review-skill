@@ -1600,6 +1600,50 @@ def committed_plan_spec_account(commit, plan_relative, subject, *, fallback_spec
     }, used_fallback
 
 
+def validate_inherited_spec_transition(
+        entries, inherited, source, pass_index, subject,
+):
+    """Authenticate a changed inherited Spec through the latest exact Amendment."""
+    if source["spec_sha256"] == inherited["spec_sha256"]:
+        return
+    inherited_pass_index, _ = journal_entry_from_proof(
+        entries, inherited.get("pass"), subject,
+    )
+    source_built = note_data(entries[pass_index]).get("built")
+    openings = {
+        note_data(entry).get("amendment"): (index, entry)
+        for index, entry in amendment_openings(entries, pass_index)
+    }
+    commits = []
+    for index, entry in enumerate(
+            entries[inherited_pass_index + 1:pass_index], inherited_pass_index + 1,
+    ):
+        data = note_data(entry)
+        opening = openings.get(data.get("amendment"))
+        if entry.get("kind") != "amendment.committed" or opening is None:
+            continue
+        opening_data = note_data(opening[1])
+        opening_lot = opening_data.get("built") \
+            if opening_data.get("origin") == "product-review" \
+            else (opening_data.get("construction_source") or {}).get("lot")
+        if opening_lot == source_built:
+            commits.append((index, entry))
+    if not commits:
+        fail(f"{subject}'s inherited and source-pass specifications differ")
+    commit_index, amendment_commit = commits[-1]
+    proof = validate_amendment_commit_entry(entries, commit_index, amendment_commit)
+    data = note_data(amendment_commit)
+    ancestry = subprocess.run(
+        ["git", "-C", project_root(), "merge-base", "--is-ancestor",
+         data.get("sha", "-"), source["commit"]],
+        capture_output=True,
+    )
+    if proof.get("spec_path") != source["spec"] \
+            or data.get("spec_sha256") != source["spec_sha256"] \
+            or ancestry.returncode != 0:
+        fail(f"{subject}'s source pass does not preserve its latest exact Amendment Spec")
+
+
 def construction_lot_origin_and_spec(entries, before, lot, subject):
     cache_key = ("construction-lot-origin-and-spec", before, lot)
     if COMMAND_VALIDATION_CACHE is not None and cache_key in COMMAND_VALIDATION_CACHE:
@@ -1619,8 +1663,10 @@ def construction_lot_origin_and_spec(entries, before, lot, subject):
         source_commit, source_plan, subject,
         fallback_spec=inherited_spec["spec"] if inherited_spec is not None else None,
     )
-    if used_fallback and source["spec_sha256"] != inherited_spec["spec_sha256"]:
-        fail(f"{subject}'s inherited and source-pass specifications differ")
+    if used_fallback:
+        validate_inherited_spec_transition(
+            entries, inherited_spec, source, pass_index, subject,
+        )
     result = origin, {
         "schema": 1,
         "route": "sublot-pass",
