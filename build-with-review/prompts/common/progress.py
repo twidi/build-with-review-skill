@@ -105,6 +105,11 @@ AMENDMENT_REACH_LABELS = (
     "tests asserting any changed behaviour",
     "frontier",
 )
+
+# One CLI command reads one immutable journal/workspace generation until its
+# admission succeeds. Cache only exact historical projectors inside that
+# command. Direct module callers and the next process always start uncached.
+COMMAND_VALIDATION_CACHE = None
 AMENDMENT_REACH_COMPLETION_TEMPLATE = (
     "COMPLETION (6 items)",
     "- [ ] hops walked — <N> hops, last one returning <M> new places",
@@ -1596,14 +1601,13 @@ def committed_plan_spec_account(commit, plan_relative, subject, *, fallback_spec
 
 
 def construction_lot_origin_and_spec(entries, before, lot, subject):
-    origin = validate_construction_lot_origin(entries, before, lot, subject)
+    cache_key = ("construction-lot-origin-and-spec", before, lot)
+    if COMMAND_VALIDATION_CACHE is not None and cache_key in COMMAND_VALIDATION_CACHE:
+        return COMMAND_VALIDATION_CACHE[cache_key]
+    origin, close = construction_lot_origin_account(entries, before, lot, subject)
     if origin == "root":
         return origin, None
-    opening_index, _ = journal_entry_from_proof(entries, origin, subject)
-    pass_index, pass_opening, _, _, _, built = current_pass_close(
-        entries[:opening_index], subject,
-        validate_origin=False, validate_current_gate=False,
-    )
+    pass_index, pass_opening, _, _, _, built = close
     source_commit = note_data(pass_opening).get("commit")
     source_plan = f"docs/plans/{os.path.basename(WORKSPACE)}-{built}-plan.md"
     inherited_spec = None
@@ -1617,7 +1621,7 @@ def construction_lot_origin_and_spec(entries, before, lot, subject):
     )
     if used_fallback and source["spec_sha256"] != inherited_spec["spec_sha256"]:
         fail(f"{subject}'s inherited and source-pass specifications differ")
-    return origin, {
+    result = origin, {
         "schema": 1,
         "route": "sublot-pass",
         "opening": origin,
@@ -1625,6 +1629,9 @@ def construction_lot_origin_and_spec(entries, before, lot, subject):
         "built": built,
         **source,
     }
+    if COMMAND_VALIDATION_CACHE is not None:
+        COMMAND_VALIDATION_CACHE[cache_key] = result
+    return result
 
 
 def construction_run_and_plan(entries, before, lot, subject):
@@ -8988,9 +8995,10 @@ def validate_sublot_opening(entries, data, text, subject):
            for entry in entries):
         fail(f"{subject} repeats the opening of {text}")
 
-    opening_index, _, close_index, _, confirmed, built = current_pass_close(
+    close = current_pass_close(
         entries, subject, validate_origin=False, validate_current_gate=False,
     )
+    opening_index, _, close_index, _, confirmed, built = close
     if confirmed < 1:
         fail(f"{subject} does not consume a positive product-review pass close", confirmed)
     allocations = [(index, entry) for index, entry in enumerate(
@@ -9016,16 +9024,20 @@ def validate_sublot_opening(entries, data, text, subject):
     )
     if unfinished:
         fail(f"{subject} still has open decision-batch routing", unfinished)
+    return close
 
 
-def validate_construction_lot_origin(entries, before, lot, subject):
-    """Authenticate the PRODUCT REVIEW terminal that created a construction sub-lot."""
+def construction_lot_origin_account(entries, before, lot, subject):
+    """Return one validated sub-lot opening and its exact source pass close."""
     if not isinstance(lot, str) or not re.fullmatch(
         r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot,
     ):
         fail(f"{subject} has a malformed lot identity", lot)
     if "." not in lot:
-        return "root"
+        return "root", None
+    cache_key = ("construction-lot-origin", before, lot)
+    if COMMAND_VALIDATION_CACHE is not None and cache_key in COMMAND_VALIDATION_CACHE:
+        return COMMAND_VALIDATION_CACHE[cache_key]
     openings = [(index, entry) for index, entry in enumerate(entries[:before])
                 if entry.get("kind") == "sublot.opened" and entry.get("text") == lot]
     if len(openings) != 1:
@@ -9034,10 +9046,18 @@ def validate_construction_lot_origin(entries, before, lot, subject):
             f"{lot}: found {len(openings)}",
         )
     opening_index, opening = openings[0]
-    validate_sublot_opening(
+    close = validate_sublot_opening(
         entries[:opening_index], opening.get("data"), opening.get("text"), subject,
     )
-    return journal_line_proof(opening_index)
+    result = journal_line_proof(opening_index), close
+    if COMMAND_VALIDATION_CACHE is not None:
+        COMMAND_VALIDATION_CACHE[cache_key] = result
+    return result
+
+
+def validate_construction_lot_origin(entries, before, lot, subject):
+    """Authenticate the PRODUCT REVIEW terminal that created a construction sub-lot."""
+    return construction_lot_origin_account(entries, before, lot, subject)[0]
 
 
 def confirmed_account(path, subject):
@@ -11529,6 +11549,7 @@ def build_parser():
 
 
 def main():
+    global COMMAND_VALIDATION_CACHE
     args = build_parser().parse_args()
     read_only = {
         "subagents-open", "construction-failure-check",
@@ -11537,14 +11558,18 @@ def main():
     # A retained success owner admits only its helper-owned terminal. Do not
     # repair shared bytes before that locked admission can refuse another
     # command.
-    pending_attempt_success = os.path.lexists(ATTEMPT_SUCCESS_MARKER)
-    if pending_attempt_success and args.command not in read_only:
-        fail("the pending attempt success owns every workflow mutation")
-    if args.command not in read_only and not pending_attempt_success:
-        repair_journal_tail()
-    args.func(args)
-    if args.command not in read_only:
-        refresh_dashboard()
+    COMMAND_VALIDATION_CACHE = {}
+    try:
+        pending_attempt_success = os.path.lexists(ATTEMPT_SUCCESS_MARKER)
+        if pending_attempt_success and args.command not in read_only:
+            fail("the pending attempt success owns every workflow mutation")
+        if args.command not in read_only and not pending_attempt_success:
+            repair_journal_tail()
+        args.func(args)
+        if args.command not in read_only:
+            refresh_dashboard()
+    finally:
+        COMMAND_VALIDATION_CACHE = None
 
 
 if __name__ == "__main__":

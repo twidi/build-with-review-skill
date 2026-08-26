@@ -9232,6 +9232,8 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
     check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
     close_check = run_progress("amendment-close-check", "1", spec_relative)
     check(close_check.returncode == 0, close_check.stdout + close_check.stderr)
+    watchdog = run_progress("subagents-open")
+    check(watchdog.returncode == 0, watchdog.stdout + watchdog.stderr)
 
     reset()
     append_note(
