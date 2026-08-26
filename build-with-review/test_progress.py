@@ -1616,8 +1616,11 @@ def seed_baseline_gate(owner, commit, base):
     return gate
 
 
-def seed_review_pass(*, built="lot-1", commit=None, confirmed=0, omit=None):
-    commit, gate, owner = seed_task_gate(built, commit)
+def seed_review_pass(*, built="lot-1", commit=None, confirmed=0, omit=None,
+                     spec_relative=None):
+    commit, gate, owner = seed_task_gate(
+        built, commit, spec_relative=spec_relative,
+    )
     append_note("pass.opened", {
         "built": built, "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": owner, "source_lot": built,
@@ -7952,7 +7955,9 @@ def construction_feature_run_opens_an_amendment_from_a_later_root_sublot():
         "run.started", {"cap": 3}, "construction-only-feature",
         mode="construction", lot="lot-1", job="controller",
     )
-    seed_review_pass(built="lot-2", confirmed=1)
+    spec_relative = "docs/plans/construction-only-direct-design.md"
+    write_project(spec_relative, spec_document())
+    seed_review_pass(built="lot-2", confirmed=1, spec_relative=spec_relative)
     allocation = run_progress(
         "note", "sublot.allocated", "--text", "lot-2.1",
         "--data", json.dumps(allocation_data("lot-2"), separators=(",", ":")),
@@ -7967,13 +7972,10 @@ def construction_feature_run_opens_an_amendment_from_a_later_root_sublot():
     set_caller_bwr(
         mode="construction", lot="lot-2.1", job="controller", task=None, attempt=None,
     )
-    spec_relative = "docs/plans/construction-only-direct-design.md"
     plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-lot-2.1-plan.md"
-    write_project(spec_relative, spec_document())
     write_project(
         plan_relative,
         "# Construction plan\n\n"
-        f"Spec: {spec_relative}\n\n"
         "## Task 1 - Implement the allocated correction\n"
         "Achieves: The allocated correction follows the specification.\n"
         "To verify: The allocated correction matches the specification.\n",
@@ -7989,7 +7991,7 @@ def construction_feature_run_opens_an_amendment_from_a_later_root_sublot():
         mode="construction", lot="lot-2.1", job="controller",
     )
     state_path = seed_direct_ruling(ruling="R1", route="amendment")
-    opened = run_progress(
+    opening_command = (
         "note", "amendment.opened",
         "--data", json.dumps({
             "amendment": 1,
@@ -8001,6 +8003,24 @@ def construction_feature_run_opens_an_amendment_from_a_later_root_sublot():
         }),
         "--text", "apply R1 and return to lot-2.1 task 1",
     )
+    write_project(spec_relative, spec_document(extra="\nChanged after source review.\n"))
+    subprocess.run(["git", "-C", REPO, "add", spec_relative], check=True)
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "change reviewed specification"],
+        check=True,
+    )
+    before = len(journal_lines())
+    refused_after(
+        run_progress(*opening_command), before,
+        "a changed current predecessor specification",
+    )
+    write_project(spec_relative, spec_document())
+    subprocess.run(["git", "-C", REPO, "add", spec_relative], check=True)
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "restore reviewed specification"],
+        check=True,
+    )
+    opened = run_progress(*opening_command)
     check(opened.returncode == 0, opened.stdout + opened.stderr)
     source = journal_lines()[-1]["data"].get("construction_source")
     with open(os.path.join(WORKSPACE, "progress.jsonl"), "rb") as journal:
@@ -8010,13 +8030,39 @@ def construction_feature_run_opens_an_amendment_from_a_later_root_sublot():
         for index, raw in enumerate(raw_lines)
         if json.loads(raw).get("kind") == "run.started"
     )
+    spec_source = source.get("spec_source") if isinstance(source, dict) else None
     check(
         isinstance(source, dict)
         and source.get("lot") == "lot-2.1"
         and source.get("run") == run_proof
-        and source.get("origin"),
-        "the later sub-lot opening did not bind the feature run and exact lot origin",
+        and source.get("origin")
+        and isinstance(spec_source, dict)
+        and spec_source.get("route") == "sublot-pass"
+        and spec_source.get("opening") == source.get("origin")
+        and spec_source.get("spec") == spec_relative
+        and spec_source.get("spec_sha256") == source.get("spec_sha256")
+        and spec_source.get("predecessor_spec_sha256") == source.get("spec_sha256"),
+        "the later sub-lot opening did not bind its complete Spec provenance",
     )
+    entries = journal_lines()
+    opening_index = len(entries) - 1
+    progress = load_common_module("progress")
+    for field in ("plan_sha256", "spec_sha256"):
+        changed = json.loads(json.dumps(entries))
+        changed[opening_index]["data"]["construction_source"]["spec_source"][field] = "0" * 64
+        changed[opening_index]["data"]["opening_sha256"] = (
+            progress.amendment_opening_digest(changed[opening_index])
+        )
+        try:
+            progress.validate_amendment_opening_entry(
+                changed, opening_index, changed[opening_index],
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(
+                f"historical replay accepted a changed source-pass {field}"
+            )
 
 
 @test

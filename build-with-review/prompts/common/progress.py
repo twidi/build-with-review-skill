@@ -1510,6 +1510,13 @@ CONSTRUCTION_AMENDMENT_SOURCE_KEYS = {
     "schema", "lot", "run", "origin", "plan_written", "commit",
     "plan", "plan_sha256", "spec", "spec_sha256",
 }
+CONSTRUCTION_AMENDMENT_SUBLOT_SOURCE_KEYS = (
+    CONSTRUCTION_AMENDMENT_SOURCE_KEYS | {"spec_source"}
+)
+CONSTRUCTION_AMENDMENT_SPEC_SOURCE_KEYS = {
+    "schema", "route", "opening", "pass", "built", "commit", "plan",
+    "plan_sha256", "spec", "spec_sha256", "predecessor_spec_sha256",
+}
 
 
 def committed_regular_payload(commit, relative, subject):
@@ -1543,7 +1550,7 @@ def committed_regular_payload(commit, relative, subject):
     return content.stdout
 
 
-def committed_plan_spec_account(commit, plan_relative, subject):
+def committed_plan_spec_account(commit, plan_relative, subject, *, fallback_spec=None):
     plan_payload = committed_regular_payload(commit, plan_relative, f"{subject}'s plan")
     try:
         plan_text = plan_payload.decode("utf-8")
@@ -1558,9 +1565,20 @@ def committed_plan_spec_account(commit, plan_relative, subject):
         (index, line[len("Spec: "):]) for index, line in enumerate(visible)
         if isinstance(line, str) and line.startswith("Spec: ")
     ]
-    if len(spec_lines) != 1 or not task_headings or spec_lines[0][0] >= task_headings[0]:
+    raw_spec_lines = [
+        line for line in plan_text.splitlines() if line.lstrip().startswith("Spec:")
+    ]
+    if len(spec_lines) > 1 or not task_headings \
+            or spec_lines and spec_lines[0][0] >= task_headings[0] \
+            or not spec_lines and raw_spec_lines:
         fail(f"{subject}'s committed plan has no one exact root Spec source")
-    spec_relative = spec_lines[0][1]
+    used_fallback = not spec_lines
+    if spec_lines:
+        spec_relative = spec_lines[0][1]
+    elif isinstance(fallback_spec, str) and fallback_spec:
+        spec_relative = fallback_spec
+    else:
+        fail(f"{subject}'s committed plan has no one exact root Spec source")
     spec_payload = committed_regular_payload(
         commit, spec_relative, f"{subject}'s specification",
     )
@@ -1570,6 +1588,32 @@ def committed_plan_spec_account(commit, plan_relative, subject):
         "plan_sha256": sha256_bytes(plan_payload),
         "spec": spec_relative,
         "spec_sha256": sha256_bytes(spec_payload),
+    }, used_fallback
+
+
+def construction_lot_origin_and_spec(entries, before, lot, subject):
+    origin = validate_construction_lot_origin(entries, before, lot, subject)
+    if origin == "root":
+        return origin, None
+    opening_index, _ = journal_entry_from_proof(entries, origin, subject)
+    pass_index, pass_opening, _, _, _, built = current_pass_close(
+        entries[:opening_index], subject,
+        validate_origin=False, validate_current_gate=False,
+    )
+    source_commit = note_data(pass_opening).get("commit")
+    source_plan = f"docs/plans/{os.path.basename(WORKSPACE)}-{built}-plan.md"
+    source, used_fallback = committed_plan_spec_account(
+        source_commit, source_plan, subject,
+    )
+    if used_fallback:
+        fail(f"{subject}'s source pass plan has no direct Spec authority")
+    return origin, {
+        "schema": 1,
+        "route": "sublot-pass",
+        "opening": origin,
+        "pass": journal_line_proof(pass_index),
+        "built": built,
+        **source,
     }
 
 
@@ -1625,7 +1669,15 @@ def current_construction_amendment_source(entries, context, subject):
         fail(f"{subject} has no current committed tree", commit_result.stderr)
     commit = commit_result.stdout.strip()
     plan_relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
-    committed = committed_plan_spec_account(commit, plan_relative, subject)
+    origin, spec_source = construction_lot_origin_and_spec(
+        entries, len(entries), lot, subject,
+    )
+    committed, used_fallback = committed_plan_spec_account(
+        commit, plan_relative, subject,
+        fallback_spec=spec_source["spec"] if spec_source is not None else None,
+    )
+    if used_fallback and committed["spec_sha256"] != spec_source["spec_sha256"]:
+        fail(f"{subject}'s source-pass and predecessor specifications differ")
     live_plan = exact_real_file(project_root(), plan_relative, f"{subject}'s current plan")
     live_spec = exact_real_file(project_root(), committed["spec"], f"{subject}'s current spec")
     with open(live_plan, "rb") as source:
@@ -1635,19 +1687,27 @@ def current_construction_amendment_source(entries, context, subject):
     if live_plan_sha256 != committed["plan_sha256"] \
             or live_spec_sha256 != committed["spec_sha256"]:
         fail(f"{subject} does not start from its exact committed plan and specification")
-    return {
+    source = {
         "schema": 1,
         "lot": lot,
         "run": journal_line_proof(run_index),
-        "origin": validate_construction_lot_origin(entries, len(entries), lot, subject),
+        "origin": origin,
         "plan_written": journal_line_proof(plan_index),
         **committed,
     }
+    if used_fallback:
+        source["spec_source"] = {
+            **spec_source,
+            "predecessor_spec_sha256": committed["spec_sha256"],
+        }
+    return source
 
 
 def validate_construction_amendment_source(entries, before, source, subject):
-    if not isinstance(source, dict) or set(source) != CONSTRUCTION_AMENDMENT_SOURCE_KEYS \
-            or source.get("schema") != 1:
+    if not isinstance(source, dict) or frozenset(source) not in {
+        frozenset(CONSTRUCTION_AMENDMENT_SOURCE_KEYS),
+        frozenset(CONSTRUCTION_AMENDMENT_SUBLOT_SOURCE_KEYS),
+    } or source.get("schema") != 1:
         fail(f"{subject} has no exact frozen Construction spec source")
     lot = source.get("lot")
     if not isinstance(lot, str) or not re.fullmatch(
@@ -1662,15 +1722,32 @@ def validate_construction_amendment_source(entries, before, source, subject):
             or plan.get("kind") != "plan.written" or plan.get("lot") != lot \
             or expected_run[0] != run_index or expected_plan[0] != plan_index:
         fail(f"{subject} does not bind its ordered Construction run and plan")
-    expected_origin = validate_construction_lot_origin(entries, before, lot, subject)
+    expected_origin, expected_spec_source = construction_lot_origin_and_spec(
+        entries, before, lot, subject,
+    )
+    committed, used_fallback = committed_plan_spec_account(
+        source.get("commit"), source.get("plan"), subject,
+        fallback_spec=(
+            expected_spec_source["spec"] if expected_spec_source is not None else None
+        ),
+    )
+    if used_fallback and committed["spec_sha256"] != expected_spec_source["spec_sha256"]:
+        fail(f"{subject}'s source-pass and predecessor specifications differ")
     expected = {
         "schema": 1,
         "lot": lot,
         "run": source["run"],
         "origin": expected_origin,
         "plan_written": source["plan_written"],
-        **committed_plan_spec_account(source.get("commit"), source.get("plan"), subject),
+        **committed,
     }
+    if used_fallback:
+        expected["spec_source"] = {
+            **expected_spec_source,
+            "predecessor_spec_sha256": committed["spec_sha256"],
+        }
+        if set(source.get("spec_source") or {}) != CONSTRUCTION_AMENDMENT_SPEC_SOURCE_KEYS:
+            fail(f"{subject} has no exact sub-lot Spec provenance account")
     if source != expected:
         fail(f"{subject} changes its frozen Construction spec source", expected)
     return source
