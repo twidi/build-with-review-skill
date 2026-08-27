@@ -29,7 +29,9 @@ RUN="refs/bwr/$(basename "$WORKSPACE")"   # this run's own ref namespace — see
 # marker.
 if [ -e "$WORKSPACE/attempt-success-in-progress.json" ] \
    || [ -L "$WORKSPACE/attempt-success-in-progress.json" ]; then
-    python3 "$SUCCESS_HELPER" "$LOT" "$N" "$REPORTED" "$GATE_OP"
+    SHA=$(git rev-parse --verify --quiet "$REPORTED^{commit}") \
+        || die "\`$REPORTED\` is not a commit — pass the hash the implementer reported"
+    python3 "$SUCCESS_HELPER" "$LOT" "$N" "$SHA" "$GATE_OP"
     exit $?
 fi
 

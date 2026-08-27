@@ -1804,6 +1804,35 @@ def task_success_resumes_every_helper_owned_public_phase():
 
 
 @test
+def task_success_resolves_a_short_commit_before_resuming_its_marker():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        reported = sha[:8]
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+
+        fixture.env["BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER"] = "owned"
+        interrupted = fixture.run(
+            "bash", succeeded, "lot-1", "1", reported, op, ok=False,
+        )
+        check(interrupted.returncode == 75, interrupted.stdout + interrupted.stderr)
+        fixture.env.pop("BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER")
+
+        resumed = fixture.run("bash", succeeded, "lot-1", "1", reported, op, ok=True)
+        check("task-1" in resumed.stdout
+              and fixture.git(
+                  "rev-parse", "refs/bwr/2026-08-19-demo/lot-1/task-1",
+              ).stdout.strip() == sha
+              and not (fixture.workspace / "attempt-success-in-progress.json").exists(),
+              resumed.stdout + resumed.stderr)
+    finally:
+        fixture.close()
+
+
+@test
 def task_success_serializes_two_exact_public_reruns():
     fixture = Fixture()
     first = second = None
