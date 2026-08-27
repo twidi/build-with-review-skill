@@ -195,7 +195,9 @@ def exact_existing_terminal(entries, lot, task, commit, gate):
     if len(matches) != 1 or progress.note_data(matches[0][1]).get("gate") != gate:
         die("the stable task already has another durable success terminal")
     progress.validate_attempt_succeeded_entry(entries, matches[0][0], matches[0][1])
-    return True
+    return "helper" if isinstance(
+        progress.note_data(matches[0][1]).get("success_recovery"), dict,
+    ) else "ordinary"
 
 
 def stable_ref_state(stable_ref):
@@ -318,17 +320,24 @@ def prepare(lot, task, commit, gate):
                 return prepare(lot, task, commit, gate)
             refuse_competing_owner()
             entries = progress.journal_entries()
-            progress.validate_construction_verdict_history(entries)
             stable_ref = f"refs/bwr/{WORKSPACE.name}/{lot}/task-{task}"
             existing = git("rev-parse", "--verify", "--quiet", stable_ref, ok=False)
             if existing.returncode == 0 and existing.stdout.strip() != commit:
                 die("the stable task ref names another commit")
             if existing.returncode not in {0, 1}:
                 die("the stable task ref cannot be read")
-            if exact_existing_terminal(entries, lot, task, commit, gate):
+            existing_terminal = exact_existing_terminal(entries, lot, task, commit, gate)
+            if existing_terminal:
                 if existing.returncode != 0:
                     die("the durable success terminal has no exact stable task ref")
+                if existing_terminal != "helper":
+                    progress.validate_construction_verdict_history(entries)
                 return None
+            if existing.returncode == 0:
+                # A stable ref without a terminal is the closed legacy crash
+                # prefix. It has no helper-owned admission marker, so it must
+                # still pass the complete historical gate before recovery.
+                progress.validate_construction_verdict_history(entries)
             attempt = select_attempt(entries, lot, task)
             owner = progress.attempt_success_recovery_account(
                 entries, len(entries), lot, task, attempt, commit, gate,
@@ -481,11 +490,23 @@ def finish(lot, task, commit, gate):
     print(f"task-{task} {commit}")
 
 
+def recorded_only(lot, task, commit, gate):
+    entries = progress.journal_entries()
+    stable_ref = f"refs/bwr/{WORKSPACE.name}/{lot}/task-{task}"
+    if stable_ref_state(stable_ref) != commit:
+        die("the completed attempt success has no exact stable task ref")
+    if exact_existing_terminal(entries, lot, task, commit, gate) != "helper":
+        die("the completed attempt success has no exact helper-owned terminal")
+    print(f"task-{task} {commit} (already recorded)")
+
+
 def main():
-    if len(sys.argv) != 5:
-        die("usage: attempt_success.py <lot> <task> <commit> <gate operation>")
+    recorded = len(sys.argv) == 6 and sys.argv[1] == "--recorded-only"
+    offset = 2 if recorded else 1
+    if len(sys.argv) != offset + 4:
+        die("usage: attempt_success.py [--recorded-only] <lot> <task> <commit> <gate operation>")
     try:
-        task = int(sys.argv[2])
+        task = int(sys.argv[offset + 1])
     except ValueError:
         die("the task number must be a positive integer")
     if task < 1:
@@ -497,7 +518,11 @@ def main():
             die("the attempt success lock is not one real regular file")
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         test_owner_barrier()
-        finish(sys.argv[1], task, sys.argv[3], sys.argv[4])
+        arguments = sys.argv[offset:offset + 4]
+        if recorded:
+            recorded_only(arguments[0], task, arguments[2], arguments[3])
+        else:
+            finish(arguments[0], task, arguments[2], arguments[3])
     finally:
         os.close(descriptor)
 

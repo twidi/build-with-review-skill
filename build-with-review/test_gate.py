@@ -2172,6 +2172,82 @@ def task_success_historical_replay_binds_schema_two_start_session():
         fixture.close()
 
 
+@test
+def task_success_does_not_replay_the_complete_construction_history_per_phase():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+
+        helper = fixture.workspace / "prompts" / "construction" / "attempt_success.py"
+        source = helper.read_text(encoding="utf-8")
+        import_line = "import progress  # noqa: E402\n"
+        check(source.count(import_line) == 1, "the task-success progress import changed")
+        helper.write_text(
+            source.replace(
+                import_line,
+                import_line
+                + "\n"
+                + "def forbid_complete_history_replay(_entries):\n"
+                + "    raise RuntimeError('task success invoked the complete history replay')\n"
+                + "progress.validate_construction_verdict_history = "
+                + "forbid_complete_history_replay\n"
+                + "\n",
+            ),
+            encoding="utf-8",
+        )
+
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        result = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
+        check("task-1" in result.stdout, result.stdout + result.stderr)
+    finally:
+        fixture.close()
+
+
+@test
+def task_success_legacy_ref_does_not_bypass_invalid_construction_history():
+    fixture = Fixture()
+    try:
+        fixture.prepare_task_candidate()
+        op = fixture.open_task_gate()
+        fixture.close_gate(op)
+        sha = fixture.commit_task()
+        stable_ref = "refs/bwr/2026-08-19-demo/lot-1/task-1"
+        fixture.git("update-ref", stable_ref, sha)
+        (fixture.workspace / "attempt-in-flight").unlink()
+
+        journal = fixture.workspace / "progress.jsonl"
+        malformed = {
+            "session": "foreign-controller",
+            "event": "note",
+            "kind": "verdict.consumed",
+            "lot": "lot-99",
+            "task": 1,
+            "data": {"check": "code"},
+        }
+        with journal.open("a", encoding="utf-8") as target:
+            target.write(json.dumps(malformed, separators=(",", ":")) + "\n")
+        journal_before = journal.read_bytes()
+
+        succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
+        result = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
+        terminals = [
+            entry for entry in fixture.journal()
+            if entry.get("kind") == "attempt.succeeded"
+            and entry.get("lot") == "lot-1" and entry.get("task") == 1
+        ]
+        check(result.returncode != 0
+              and not terminals
+              and not (fixture.workspace / "attempt-success-in-progress.json").exists()
+              and journal.read_bytes() == journal_before
+              and fixture.git("rev-parse", stable_ref).stdout.strip() == sha,
+              result.stdout + result.stderr)
+    finally:
+        fixture.close()
+
+
 def prepare_accepted_first_task_in_two_task_plan(fixture):
     plan = (
         "# Plan\n\n## Task 1 - One\n"

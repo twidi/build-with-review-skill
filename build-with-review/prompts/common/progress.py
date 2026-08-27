@@ -6497,11 +6497,11 @@ def attempt_success_marker(subject, *, required=False):
 def historical_final_code_proof(entries, proof, lot, task, attempt_number, tree, subject):
     proof_index, _ = journal_entry_from_proof(entries, proof, subject)
     prefix = entries[:proof_index + 1]
-    validate_construction_verdict_history(prefix)
     verdicts = code_verdicts(prefix, len(prefix), lot, task, attempt_number)
     if not verdicts:
         fail(f"{subject} has no proved code-checker verdict")
     verdict_index, verdict = verdicts[-1]
+    validate_construction_verdict_entry(prefix, verdict_index, verdict)
     verdict_data = note_data(verdict)
     manifest = verdict_data.get("manifest", "")
     disagreement = "-"
@@ -6515,6 +6515,7 @@ def historical_final_code_proof(entries, proof, lot, task, attempt_number, tree,
         if len(resolutions) != 1:
             fail(f"{subject} has no exact final code resolution")
         resolution_index, resolution = resolutions[0]
+        validate_code_resolution_entry(prefix, resolution_index, resolution)
         resolution_data = note_data(resolution)
         if resolution_data.get("verdict") != journal_line_proof(verdict_index) \
                 or resolution_data.get("accepted") != 0:

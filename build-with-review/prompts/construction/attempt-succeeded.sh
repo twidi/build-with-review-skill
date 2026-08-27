@@ -208,11 +208,24 @@ Nothing was recorded."
 #     and current gate.md, and reports both green commands and an unchanged gate surface.
 #     A commit hook that changed the staged payload is caught here: HEAD's tree
 #     no longer equals the tree frozen before the runner started.
-bash "$WORKSPACE/prompts/construction/gate-check.sh" require-task \
-    "$GATE_OP" "$LOT" "$N" "$F_K" "$SHA" >/dev/null \
-    || die "the supplied final gate does not prove this attempt's exact accepted commit.
+if ! bash "$WORKSPACE/prompts/construction/gate-check.sh" require-task \
+        "$GATE_OP" "$LOT" "$N" "$F_K" "$SHA" >/dev/null; then
+    # Another exact caller can complete while this caller is still traversing
+    # the read-only shell preflight. Let the helper serialize and authenticate
+    # that retained or completed owner instead of reporting a stale gate error.
+    if [ -e "$WORKSPACE/attempt-success-in-progress.json" ] \
+       || [ -L "$WORKSPACE/attempt-success-in-progress.json" ]; then
+        python3 "$SUCCESS_HELPER" "$LOT" "$N" "$SHA" "$GATE_OP"
+        exit $?
+    fi
+    if [ "$(git rev-parse --verify --quiet "$RUN/$LOT/task-$N" || true)" = "$SHA" ]; then
+        python3 "$SUCCESS_HELPER" --recorded-only "$LOT" "$N" "$SHA" "$GATE_OP"
+        exit $?
+    fi
+    die "the supplied final gate does not prove this attempt's exact accepted commit.
 No stable ref or success terminal was written. Return the attempt to its code-checker and
 final-gate boundary; a content-changing repair needs a new logical gate operation."
+fi
 
 # The helper publishes the durable owner before the stable ref. It then appends
 # the helper-owned success terminal and removes only the exact attempt identity.
