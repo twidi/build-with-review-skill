@@ -94,6 +94,40 @@ else:
         self.current_attempt = attempt
         self.write_context()
 
+    def set_controller_context(self, mandate=None):
+        session_id = "gate-test-controller"
+        bwr = {
+            "schema": 1, "job": "controller", "mode": "construction",
+            "feature": "demo", "lot": "lot-1", "status": "working",
+        }
+        if mandate is not None:
+            bwr["mandate"] = mandate
+        payload = {
+            "session_id": session_id,
+            "session": {
+                "id": session_id,
+                "annotations": {"bwr": bwr},
+            },
+        }
+        self.fake.write_text(
+            f"""#!/usr/bin/env python3
+import json, os, sys
+payload = {payload!r}
+if sys.argv[1] == "whoami":
+    print(json.dumps(payload))
+elif sys.argv[1] == "session":
+    print(json.dumps(payload["session"]))
+elif sys.argv[1] == "update-session":
+    if os.environ.get("BWR_TEST_UPDATE_LOG"):
+        with open(os.environ["BWR_TEST_UPDATE_LOG"], "a", encoding="utf-8") as target:
+            target.write(json.dumps(sys.argv[1:]) + "\\n")
+    print(json.dumps({{"status":"updated"}}))
+else:
+    raise SystemExit(64)
+""",
+            encoding="utf-8",
+        )
+
     def close(self):
         shutil.rmtree(self.temp, ignore_errors=True)
 
@@ -2796,6 +2830,184 @@ def intermediate_code_contract_blocker_reaches_the_corrected_plan_retry():
         fixture.progress_call("construction-verdict-check", "history", ok=False)
     finally:
         fixture.close()
+
+
+@test
+def mistaken_code_resolution_can_be_reclassified_as_one_exact_contract_blocker():
+    fixture = Fixture()
+    try:
+        fixture.start_attempt_state()
+        fixture.run_code_round(1, 2)
+        resolution = fixture.resolve_code_correction(1)
+        check(resolution.returncode == 0, resolution.stdout + resolution.stderr)
+        before = fixture.journal()
+        resolution_index = len(before) - 1
+        raw = (fixture.workspace / "progress.jsonl").read_bytes().splitlines()
+        resolution_proof = (
+            f"{resolution_index}:{hashlib.sha256(raw[resolution_index]).hexdigest()}"
+        )
+
+        original_journal = (fixture.workspace / "progress.jsonl").read_bytes()
+        fixture.progress_call(
+            "construction-code-blocker-recover", "lot-1", "1", "1", "1", "2",
+            ok=False,
+        )
+        check(
+            (fixture.workspace / "progress.jsonl").read_bytes() == original_journal,
+            "an implementer caller changed the journal through controller-owned recovery",
+        )
+
+        fixture.set_controller_context("foreign")
+        fixture.progress_call(
+            "construction-code-blocker-recover", "lot-1", "1", "1", "1", "2",
+            ok=False,
+        )
+        check(
+            (fixture.workspace / "progress.jsonl").read_bytes() == original_journal,
+            "a controller with foreign transient context gained a blocker recovery",
+        )
+        fixture.set_controller_context()
+        original_plan = fixture.plan.read_bytes()
+        fixture.plan.write_bytes(original_plan + b"\nChanged controller contract.\n")
+        fixture.progress_call(
+            "construction-code-blocker-recover", "lot-1", "1", "1", "1", "2",
+            ok=False,
+        )
+        check(
+            (fixture.workspace / "progress.jsonl").read_bytes() == original_journal,
+            "a changed plan generation gained a blocker recovery",
+        )
+        fixture.plan.write_bytes(original_plan)
+        fixture.progress_call(
+            "construction-code-blocker-recover", "lot-1", "1", "1", "1", "3",
+            ok=False,
+        )
+        check(
+            (fixture.workspace / "progress.jsonl").read_bytes() == original_journal,
+            "a foreign finding ID gained a blocker recovery",
+        )
+        verdict = next(
+            entry for entry in reversed(fixture.journal())
+            if entry.get("kind") == "verdict.consumed"
+            and (entry.get("data") or {}).get("check") == "code"
+        )
+        result_path = fixture.workspace / verdict["data"]["report"]
+        result_bytes = result_path.read_bytes()
+        result_path.write_bytes(result_bytes + b"\n")
+        fixture.progress_call(
+            "construction-code-blocker-recover", "lot-1", "1", "1", "1", "2",
+            ok=False,
+        )
+        check(
+            (fixture.workspace / "progress.jsonl").read_bytes() == original_journal,
+            "a changed immutable checker result gained a blocker recovery",
+        )
+        result_path.write_bytes(result_bytes)
+        recovered = fixture.progress_call(
+            "construction-code-blocker-recover", "lot-1", "1", "1", "1", "2",
+            ok=True,
+        )
+        check(
+            recovered.stdout.strip() == "CODE REVIEW BLOCKER RECOVERED lot-1 1 1 1",
+            recovered.stdout,
+        )
+        blocker = fixture.journal()[-1]
+        check(blocker.get("kind") == "code.review.blocked", blocker)
+        check(blocker["data"]["schema"] == 2, blocker)
+        check(
+            blocker["data"]["items"] == [
+                {"id": 1, "status": "carried"},
+                {"id": 2, "status": "contract-blocked"},
+            ],
+            blocker,
+        )
+        check(
+            blocker["data"]["reclassification"]["resolution"] == resolution_proof,
+            blocker,
+        )
+        check(
+            blocker["data"]["reclassification"]["session"] == "gate-test-session-1",
+            blocker,
+        )
+        fixture.progress_call("construction-verdict-check", "history", ok=True)
+
+        exact_journal = (fixture.workspace / "progress.jsonl").read_bytes()
+        changed = fixture.journal()
+        changed[-1]["mandate"] = "foreign"
+        with (fixture.workspace / "progress.jsonl").open("w", encoding="utf-8") as target:
+            for entry in changed:
+                target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        fixture.progress_call("construction-verdict-check", "history", ok=False)
+        (fixture.workspace / "progress.jsonl").write_bytes(exact_journal)
+
+        changed = fixture.journal()
+        changed[-1]["data"]["reclassification"]["resolution"] = "0:" + "0" * 64
+        with (fixture.workspace / "progress.jsonl").open("w", encoding="utf-8") as target:
+            for entry in changed:
+                target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        fixture.progress_call("construction-verdict-check", "history", ok=False)
+        (fixture.workspace / "progress.jsonl").write_bytes(exact_journal)
+        fixture.progress_call("construction-verdict-check", "history", ok=True)
+
+        count = len(fixture.journal())
+        fixture.progress_call(
+            "construction-code-blocker-recover", "lot-1", "1", "1", "1", "2",
+            ok=False,
+        )
+        check(len(fixture.journal()) == count, "duplicate recovery appended another blocker")
+
+        plan = fixture.plan.read_text(encoding="utf-8")
+        fixture.plan.write_text(
+            plan.replace(
+                "To verify: The changed value is covered.",
+                "Files: app.txt, migration-test.txt\n"
+                "To verify: The changed value and migration path are covered.",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
+        fixture.run("bash", failed, "lot-1", "1", "1", "C3.9b", ok=True)
+        terminal = fixture.journal()[-1]
+        check(terminal.get("kind") == "attempt.failed", terminal)
+        check(terminal["data"]["code_review"]["contract_blocked"] == [2], terminal)
+        check(terminal["data"]["code_review"]["required"] == [1, 2], terminal)
+    finally:
+        fixture.close()
+
+
+@test
+def mistaken_code_resolution_recovery_is_one_public_controller_route():
+    implementer = (HERE / "prompts" / "construction" / "implementer.md").read_text(
+        encoding="utf-8"
+    )
+    implementer_section = implementer.split(
+        "Before you write `code.review.resolved`", 1,
+    )[1].split("There is one controller-owned exception", 1)[0]
+    implementer_words = " ".join(implementer_section.split())
+    check("`Files`, `Achieves` and `To verify`" in implementer_words, implementer_section)
+    check("Restore any attempted Design edit byte-for-byte" in implementer_words,
+          implementer_section)
+    check("Do not open another checker round" in implementer_words, implementer_section)
+
+    mode = (HERE / "prompts" / "construction" / "MODE.md").read_text(encoding="utf-8")
+    recovery = mode.split(
+        "A mistaken intermediate `code.review.resolved`", 1,
+    )[1].split("1. **Fix the plan yourself**", 1)[0]
+    recovery_words = " ".join(recovery.split())
+    check(
+        "construction-code-blocker-recover \\ <lot> <N> <K> <round> "
+        "<contract-blocked IDs>" in recovery_words,
+        recovery,
+    )
+    for required in (
+        "accepted Design and task contract are unchanged",
+        "no later checker or attempt terminal exists",
+        "schema-2 `code.review.blocked`",
+        "Every other finding becomes `carried`",
+        "continue with the same C3.10 steps below",
+    ):
+        check(required in recovery_words, recovery)
 
 
 @test

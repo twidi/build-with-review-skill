@@ -4668,14 +4668,22 @@ def code_contract_failure_handoff(entries, before, lot, task, attempt, subject):
     verdict_data = note_data(verdict)
     result, findings = immutable_code_result(verdict_data, subject)
     items = blocker_data.get("items")
-    expected = canonical_code_blocker(
-        construction_frozen_logical(
-            entries, blocker_index,
-            {key: blocker_data[key] for key in ("check", "lot", "task", "attempt", "round")},
-            subject,
-        ),
-        verdict_index, verdict, items,
-    )
+    if blocker_data.get("schema") == 2:
+        expected = code_blocker_reclassification_account(
+            entries, blocker_index, lot, task, attempt, round_number,
+            blocker_data.get("contract_blocked"), subject,
+            live=False, recorded=blocker_data,
+        )
+    else:
+        expected = canonical_code_blocker(
+            construction_frozen_logical(
+                entries, blocker_index,
+                {key: blocker_data[key]
+                 for key in ("check", "lot", "task", "attempt", "round")},
+                subject,
+            ),
+            verdict_index, verdict, items,
+        )
     if blocker_data != expected:
         fail(f"{subject}'s code-review blocker changed", expected)
     obligation = {
@@ -5898,6 +5906,143 @@ def canonical_code_blocker(logical, verdict_index, verdict, items):
     }
 
 
+def code_blocker_reclassification_account(
+        entries, before, lot, task, attempt, round_number, blocked_ids, subject,
+        *, live, recorded=None,
+):
+    base = {
+        "check": "code", "lot": lot, "task": task,
+        "attempt": attempt, "round": round_number,
+    }
+    if not isinstance(lot, str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot) \
+            or not all(construction_positive_integer(value)
+                       for value in (task, attempt, round_number)) \
+            or round_number >= CONSTRUCTION_CHECKER_ROUNDS["code"]:
+        fail(f"{subject} has malformed code-review identity")
+    logical = construction_frozen_logical(entries, before, base, subject)
+    verdicts = [(index, entry) for index, entry in code_verdicts(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") == round_number]
+    resolutions = [(index, entry) for index, entry in code_resolutions(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") == round_number]
+    blockers = [(index, entry) for index, entry in code_blockers(
+        entries, before, lot, task, attempt,
+    ) if note_data(entry).get("round") == round_number]
+    if len(verdicts) != 1 or len(resolutions) != 1 or blockers:
+        fail(f"{subject} requires one settled code-review batch and no blocker")
+    verdict_index, verdict = verdicts[0]
+    resolution_index, resolution = resolutions[0]
+    if resolution_index <= verdict_index:
+        fail(f"{subject}'s settlement does not follow its checker verdict")
+    validate_code_resolution_entry(entries, resolution_index, resolution)
+    verdict_data = note_data(verdict)
+    resolution_data = note_data(resolution)
+    if resolution_data.get("verdict") != journal_line_proof(verdict_index):
+        fail(f"{subject}'s settlement belongs to another checker verdict")
+    result, findings = immutable_code_result(verdict_data, subject)
+    finding_ids = [item["id"] for item in findings]
+    if not isinstance(blocked_ids, list) or not blocked_ids \
+            or any(not construction_positive_integer(item) for item in blocked_ids) \
+            or blocked_ids != sorted(set(blocked_ids)) \
+            or any(item not in finding_ids for item in blocked_ids):
+        fail(f"{subject} has no exact nonempty contract-blocked finding set")
+
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "session-started"
+              and entry.get("mode") == "construction"
+              and entry.get("job") == "implementer"
+              and entry.get("lot") == lot and entry.get("task") == task
+              and entry.get("attempt") == attempt]
+    if len(starts) != 1:
+        fail(f"{subject} has no one exact physical implementer start")
+    start_index, start = starts[0]
+    if start_index >= verdict_index:
+        fail(f"{subject}'s implementer starts after its checker batch")
+    validate_construction_session_start(
+        start, subject, entries=entries, index=start_index,
+    )
+    start_account = start.get("data")
+    if not isinstance(start_account, dict) or start_account.get("schema") != 2:
+        fail(f"{subject} has no complete frozen implementer start account")
+    if any(entry.get("event") == "session-retired"
+           and entry.get("session") == start["session"] for entry in entries[:before]):
+        fail(f"{subject} cannot replace a retired implementer's settlement")
+    if any(construction_attempt_terminal(entry, lot, task, attempt)
+           for entry in entries[:before]):
+        fail(f"{subject} cannot replace a settlement after the attempt terminal")
+
+    later_code_activity = [
+        entry for entry in entries[resolution_index + 1:before]
+        if entry.get("lot") == lot and entry.get("task") == task
+        and entry.get("attempt") == attempt and (
+            entry.get("event") in {"subagent-started", "subagent-ended"}
+            and entry.get("kind") == "code-checker"
+            or entry.get("event") == "note" and (
+                entry.get("kind") in {
+                    "verdict.consumed", "code.review.resolved", "code.review.blocked",
+                } and note_data(entry).get("check") == "code"
+                or entry.get("kind") == "bound.spent"
+                and note_data(entry).get("check") == "code"
+            )
+        )
+    ]
+    if later_code_activity:
+        fail(f"{subject} does not own the current code-review batch")
+    if live:
+        identity = active_attempt_identity(base, subject)
+        if any(identity.get(key) != logical.get(key) for key in (
+            "lot", "task", "attempt", "plan_manifest", "plan_tasks",
+            "plan_ownership_sha256", "contract_sha256", "retry",
+        )):
+            fail(f"{subject} changes its active attempt identity")
+        current = construction_plan_generation(logical, subject)
+        if any(current.get(key) != logical.get(key) for key in current):
+            fail(f"{subject} follows a changed controller contract or Design")
+
+    items = [
+        {"id": item, "status": "contract-blocked" if item in blocked_ids else "carried"}
+        for item in finding_ids
+    ]
+    expected = {
+        **canonical_code_blocker(logical, verdict_index, verdict, items),
+        "schema": 2,
+        "reclassification": {
+            "schema": 1,
+            "reason": "frozen-task-contract-omission",
+            "resolution": journal_line_proof(resolution_index),
+            "resolution_items": resolution_data["items"],
+            "started": journal_line_proof(start_index),
+            "session": start["session"],
+            "start_account": start_account,
+            "result": verdict_data["report"],
+            "result_sha256": verdict_data["report_sha256"],
+            "checker_result_sha256": canonical_digest(result),
+        },
+    }
+    if recorded is not None and recorded != expected:
+        fail(f"{subject} changes its exact settlement reclassification", expected)
+    return expected
+
+
+def code_blocker_reclassification_text(items):
+    sections = []
+    for item in items:
+        if item["status"] == "contract-blocked":
+            evidence = (
+                "The frozen task contract omits work required by this checker finding."
+            )
+        else:
+            evidence = (
+                "The failed candidate is reset, so the replacement attempt must carry this finding."
+            )
+        sections.append(
+            f"## Finding {item['id']} — {item['status']}\n{evidence}"
+        )
+    return "\n\n".join(sections) + "\n"
+
+
 def canonical_design_resolution(
     logical, verdict_index, verdict, items, *, next_generation=None,
     disagreement_sha256=None,
@@ -6384,6 +6529,23 @@ def validate_code_blocker_entry(entries, index, entry):
     logical = construction_frozen_logical(
         entries, index, base, "a durable code-review controller-contract blocker",
     )
+    if data.get("schema") == 2:
+        context = {key: entry[key] for key in CONTEXT_FIELDS if key in entry}
+        expected_context = {
+            "mode": "construction", "lot": base["lot"], "task": base["task"],
+            "attempt": base["attempt"], "round": base["round"], "job": "controller",
+        }
+        if context != expected_context:
+            fail("a durable reclassified code-review blocker changes its controller context")
+        expected = code_blocker_reclassification_account(
+            entries, index, base["lot"], base["task"], base["attempt"], base["round"],
+            data.get("contract_blocked"),
+            "a durable reclassified code-review controller-contract blocker",
+            live=False, recorded=data,
+        )
+        if data != expected:
+            fail("a durable reclassified code-review blocker changes its account", expected)
+        return
     if code_blockers(entries, index, logical["lot"], logical["task"], logical["attempt"]):
         fail("an attempt has more than one durable code-review controller-contract blocker")
     if any(note_data(candidate).get("round") == logical["round"] for _, candidate in code_resolutions(
@@ -11243,6 +11405,39 @@ def cmd_construction_failure_handoff(args):
     print("```")
 
 
+def cmd_construction_code_blocker_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+    if caller.get("mode") != "construction" or caller.get("job") != "controller" \
+            or caller.get("lot") != args.lot \
+            or any(caller.get(key) is not None
+                   for key in ("task", "attempt", "round", "mandate")):
+        fail("code-review blocker recovery requires the exact Construction controller and lot")
+
+    def build(entries):
+        validate_construction_verdict_history(entries)
+        data = code_blocker_reclassification_account(
+            entries, len(entries), args.lot, args.task, args.attempt, args.round,
+            args.contract_blocked, "the code-review blocker recovery",
+            live=True,
+        )
+        context = {
+            "mode": "construction", "job": "controller", "lot": args.lot,
+            "task": args.task, "attempt": args.attempt, "round": args.round,
+        }
+        return event_entry(
+            me["session_id"], "note", kind="code.review.blocked",
+            text=code_blocker_reclassification_text(data["items"]),
+            data=data, **context,
+        )
+
+    write_validated_line(build)
+    print(
+        f"CODE REVIEW BLOCKER RECOVERED {args.lot} {args.task} "
+        f"{args.attempt} {args.round}"
+    )
+
+
 def cmd_amendment_sweep_check(args):
     entries = journal_entries()
     proof = amendment_sweep_preflight(entries, args.round, "the amendment sweep preflight")
@@ -11423,6 +11618,15 @@ def positive_int(value):
     return number
 
 
+def positive_id_list(value):
+    if not re.fullmatch(r"[1-9][0-9]*(?:,[1-9][0-9]*)*", value):
+        raise argparse.ArgumentTypeError("must be one sorted comma-separated positive ID list")
+    ids = [int(item) for item in value.split(",")]
+    if ids != sorted(set(ids)):
+        raise argparse.ArgumentTypeError("must contain unique IDs in increasing order")
+    return ids
+
+
 def add_context_flags(parser):
     parser.add_argument("--mandate", metavar="SLUG")
     parser.add_argument("--task", type=positive_int, metavar="N")
@@ -11544,6 +11748,14 @@ def build_parser():
     sp.add_argument("task", type=positive_int)
     sp.add_argument("attempt", type=positive_int)
     sp.set_defaults(func=cmd_construction_failure_handoff)
+
+    sp = sub.add_parser("construction-code-blocker-recover", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("attempt", type=positive_int)
+    sp.add_argument("round", type=positive_int)
+    sp.add_argument("contract_blocked", type=positive_id_list)
+    sp.set_defaults(func=cmd_construction_code_blocker_recover)
 
     sp = sub.add_parser("construction-failure-check", help=argparse.SUPPRESS)
     sp.add_argument("lot")

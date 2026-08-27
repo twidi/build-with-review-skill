@@ -1672,6 +1672,25 @@ Read what it is asking, and answer in one of three ways:
   each one to its matching first checker. If the blocker note is absent, do not edit the
   plan or close the attempt yet.
 
+  A mistaken intermediate `code.review.resolved` can hide this exact controller-owned
+  omission. Use this recovery only when the same code-review batch is still current, the
+  accepted Design and task contract are unchanged, and no later checker or attempt
+  terminal exists. Give every finding that requires omitted controller-owned work in
+  the sorted comma-separated ID list:
+
+  ```sh
+  <workspace>/prompts/common/progress.py construction-code-blocker-recover \
+    <lot> <N> <K> <round> <contract-blocked IDs>
+  ```
+
+  The helper authenticates the exact verdict, false settlement, physical implementer,
+  frozen task generation and immutable result under the journal lock. It appends one
+  schema-2 `code.review.blocked`. Each listed ID becomes `contract-blocked`. Every other
+  finding becomes `carried`, because the failure closer resets the current candidate.
+  Never edit the journal, repeat the checker, invent another resolution, or run this
+  command after any later code-review activity. After `CODE REVIEW BLOCKER RECOVERED`,
+  continue with the same C3.10 steps below.
+
   1. **Fix the plan yourself**, in the workspace copy. You wrote it: a silence is yours to
      fill, a contradiction yours to resolve. **This gesture exists nowhere else** — a
      failed attempt says nothing about the plan, so no failure route corrects it.

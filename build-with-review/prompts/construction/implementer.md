@@ -676,6 +676,16 @@ you to free work. A green one permits the next logical code checker. Its manifes
 the next checker every prior finding and this exact account. The next checker must mark
 each prior identity `addressed` or carry it into one current `still-open` finding.
 
+Before you write `code.review.resolved`, compare every correction with the frozen task
+contract. This includes its `Files`, `Achieves` and `To verify` fields. If any correction
+requires work that those fields omit, use the controller-owned blocker route below.
+Never edit the accepted Design to make a `corrected` disposition true.
+
+If a mistaken `code.review.resolved` is already durable, stop immediately. Restore any
+attempted Design edit byte-for-byte. Do not open another checker round. Report the
+finding IDs that require the missing controller contract. The controller owns the one
+append-only reclassification route in C3.10.
+
 There is one controller-owned exception at **every code round**. A valid implementation
 or required test can expose that the frozen task contract omits a necessary file, outcome
 or verification obligation. Do not call that finding `corrected` or `unchanged`. Do not
