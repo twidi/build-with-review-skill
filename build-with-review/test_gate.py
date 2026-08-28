@@ -3,6 +3,7 @@
 
 Run from the skill root with: python3 test_gate.py
 """
+import atexit
 import hashlib
 import json
 import os
@@ -661,6 +662,46 @@ else:
     def commit_task(self, message="task"):
         self.git("commit", "-q", "-m", message)
         return self.git("rev-parse", "HEAD").stdout.strip()
+
+
+TASK_SUCCESS_TEMPLATE = None
+TASK_SUCCESS_AUTHORITY = None
+
+
+def prepared_task_success_fixture():
+    global TASK_SUCCESS_TEMPLATE, TASK_SUCCESS_AUTHORITY
+    if TASK_SUCCESS_TEMPLATE is None:
+        template = Fixture()
+        template.prepare_task_candidate()
+        operation = template.open_task_gate()
+        template.close_gate(operation)
+        commit = template.commit_task()
+        TASK_SUCCESS_TEMPLATE = template
+        TASK_SUCCESS_AUTHORITY = (operation, commit)
+
+    clone = Fixture.__new__(Fixture)
+    clone.temp = pathlib.Path(tempfile.mkdtemp(prefix="bwr-gate-success-clone-"))
+    shutil.rmtree(clone.temp)
+    shutil.copytree(TASK_SUCCESS_TEMPLATE.temp, clone.temp)
+    clone.repo = clone.temp / "repo"
+    clone.workspace = clone.repo / ".superpowers" / "bwr" / "2026-08-19-demo"
+    clone.fake = clone.temp / "fake_twicc.py"
+    clone.current_attempt = TASK_SUCCESS_TEMPLATE.current_attempt
+    clone.env = dict(TASK_SUCCESS_TEMPLATE.env)
+    clone.env["TWICC_BIN"] = f"{sys.executable} {clone.fake}"
+    clone.plan_copy = clone.repo / "docs" / "plans" / "2026-08-19-demo-lot-1-plan.md"
+    clone.plan = clone.workspace / "plans" / "lot-1-plan.md"
+    clone.base = TASK_SUCCESS_TEMPLATE.base
+    operation, commit = TASK_SUCCESS_AUTHORITY
+    return clone, operation, commit
+
+
+def close_task_success_template():
+    if TASK_SUCCESS_TEMPLATE is not None:
+        TASK_SUCCESS_TEMPLATE.close()
+
+
+atexit.register(close_task_success_template)
 
 
 @test
@@ -1718,13 +1759,32 @@ def task_acceptance_consumes_exact_gate_tree_and_rejects_done_repair():
 
 
 @test
-def task_success_recovers_one_legacy_ref_without_attempt_identity():
-    fixture = Fixture()
+def task_success_fixture_clones_one_valid_authority_prefix():
+    first, first_op, first_sha = prepared_task_success_fixture()
+    second, second_op, second_sha = prepared_task_success_fixture()
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
+        check(first_op == second_op and first_sha == second_sha,
+              "task-success clones changed their frozen gate or commit")
+        first_journal = first.workspace / "progress.jsonl"
+        second_journal = second.workspace / "progress.jsonl"
+        second_before = second_journal.read_bytes()
+        first_journal.write_bytes(first_journal.read_bytes() + b'{"clone":"first"}\n')
+        check(second_journal.read_bytes() == second_before,
+              "task-success clones share mutable journal bytes")
+        replay = second.run(
+            "bash", second.gate_check, "require-task", second_op,
+            "lot-1", "1", "1", second_sha, ok=True,
+        )
+        check(replay.returncode == 0, replay.stdout + replay.stderr)
+    finally:
+        first.close()
+        second.close()
+
+
+@test
+def task_success_recovers_one_legacy_ref_without_attempt_identity():
+    fixture, op, sha = prepared_task_success_fixture()
+    try:
         journal = fixture.workspace / "progress.jsonl"
         entries = fixture.journal()
         start = next(entry for entry in entries if entry.get("event") == "session-started")
@@ -1794,12 +1854,8 @@ def task_success_recovers_one_legacy_ref_without_attempt_identity():
 def task_success_resumes_every_helper_owned_public_phase():
     for phase in ("owned", "ref-written", "ref-published", "terminal-written",
                   "terminal-recorded"):
-        fixture = Fixture()
+        fixture, op, sha = prepared_task_success_fixture()
         try:
-            fixture.prepare_task_candidate()
-            op = fixture.open_task_gate()
-            fixture.close_gate(op)
-            sha = fixture.commit_task()
             succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
             fixture.env["BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER"] = phase
             interrupted = fixture.run(
@@ -1844,12 +1900,8 @@ def task_success_resumes_every_helper_owned_public_phase():
 
 @test
 def task_success_resolves_a_short_commit_before_resuming_its_marker():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         reported = sha[:8]
         succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
 
@@ -1873,13 +1925,9 @@ def task_success_resolves_a_short_commit_before_resuming_its_marker():
 
 @test
 def task_success_serializes_two_exact_public_reruns():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     first = second = None
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
         barrier = fixture.temp / "attempt-success-barrier"
         barrier.mkdir()
@@ -1923,12 +1971,8 @@ def task_success_serializes_two_exact_public_reruns():
 
 @test
 def task_success_reprojects_every_retained_owner_field_before_ref_publication():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
         fixture.env["BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER"] = "owned"
         stopped = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
@@ -1981,12 +2025,8 @@ def task_success_reprojects_every_retained_owner_field_before_ref_publication():
 @test
 def task_success_refuses_same_byte_marker_substitution_before_each_phase_gesture():
     for boundary in ("ref-written", "terminal-written", "before-cleanup"):
-        fixture = Fixture()
+        fixture, op, sha = prepared_task_success_fixture()
         try:
-            fixture.prepare_task_candidate()
-            op = fixture.open_task_gate()
-            fixture.close_gate(op)
-            sha = fixture.commit_task()
             succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
             fixture.env["BWR_TEST_ATTEMPT_SUCCESS_SUBSTITUTE_AFTER"] = boundary
             refused = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
@@ -2008,13 +2048,9 @@ def task_success_refuses_same_byte_marker_substitution_before_each_phase_gesture
 
 @test
 def task_success_and_gate_open_share_one_physical_admission():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     success = gate = None
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
         barrier = fixture.temp / "success-gate-race"
         barrier.mkdir()
@@ -2071,13 +2107,9 @@ def task_success_and_gate_open_share_one_physical_admission():
                 process.wait()
         fixture.close()
 
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     success = gate = None
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         barrier = fixture.temp / "gate-success-race"
         barrier.mkdir()
         gate_env = dict(fixture.env)
@@ -2121,12 +2153,8 @@ def task_success_and_gate_open_share_one_physical_admission():
 
 @test
 def task_success_rejects_an_invented_document_copy_physical_descriptor():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
         fixture.env["BWR_TEST_ATTEMPT_SUCCESS_STOP_AFTER"] = "owned"
         stopped = fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=False)
@@ -2203,12 +2231,8 @@ def task_success_rejects_an_invented_document_copy_physical_descriptor():
 
 @test
 def task_success_historical_replay_binds_schema_two_start_session():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         succeeded = fixture.workspace / "prompts" / "construction" / "attempt-succeeded.sh"
         fixture.run("bash", succeeded, "lot-1", "1", sha, op, ok=True)
         journal = fixture.workspace / "progress.jsonl"
@@ -2243,13 +2267,8 @@ def task_success_historical_replay_binds_schema_two_start_session():
 
 @test
 def task_success_does_not_replay_the_complete_construction_history_per_phase():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
-
         helper = fixture.workspace / "prompts" / "construction" / "attempt_success.py"
         source = helper.read_text(encoding="utf-8")
         import_line = "import progress  # noqa: E402\n"
@@ -2277,12 +2296,8 @@ def task_success_does_not_replay_the_complete_construction_history_per_phase():
 
 @test
 def task_success_legacy_ref_does_not_bypass_invalid_construction_history():
-    fixture = Fixture()
+    fixture, op, sha = prepared_task_success_fixture()
     try:
-        fixture.prepare_task_candidate()
-        op = fixture.open_task_gate()
-        fixture.close_gate(op)
-        sha = fixture.commit_task()
         stable_ref = "refs/bwr/2026-08-19-demo/lot-1/task-1"
         fixture.git("update-ref", stable_ref, sha)
         (fixture.workspace / "attempt-in-flight").unlink()
