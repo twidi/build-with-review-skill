@@ -2606,6 +2606,11 @@ def final_design_contract_blocker_uses_the_real_plan_fault_closer():
         )
         proof = retry.stdout.strip()
         check(proof != "-", "the plan-fault closer lost its Design obligation")
+        fixture.progress_call(
+            "session-retired", "gate-test-session-1", "superseded",
+            "--archive", "--hide", ok=True,
+        )
+        fixture.set_controller_context()
 
         plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
         fixture.run(
@@ -2683,6 +2688,11 @@ def early_design_contract_blocker_uses_the_real_plan_fault_closer():
             "construction-retry-check", "lot-1", "1", "-", ok=True,
         ).stdout.strip()
         check(proof != "-", "the early plan-fault closer lost its Design obligation")
+        fixture.progress_call(
+            "session-retired", "gate-test-session-1", "superseded",
+            "--archive", "--hide", ok=True,
+        )
+        fixture.set_controller_context()
 
         plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
         fixture.run(
