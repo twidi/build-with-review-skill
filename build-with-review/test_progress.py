@@ -95,6 +95,7 @@ sys.exit(64)
 
 # Globals filled by main() once the temp layout exists.
 BASE = REPO = WORKSPACE = SCRIPT = FAKE_DIR = ENV = BASE_REPO_SNAPSHOT = None
+PROGRESS_RUNNER = None
 
 TESTS = []
 FIXTURE_SNAPSHOTS = {}
@@ -176,9 +177,15 @@ def restore_fixture_snapshot(name, builder):
         target.write(config)
 
 
-def run_progress(*args, env=None):
+def run_progress_process(*args, env=None):
     return subprocess.run([sys.executable, SCRIPT, *args],
                           capture_output=True, text=True, env=env or ENV, timeout=120)
+
+
+def run_progress(*args, env=None):
+    if PROGRESS_RUNNER is None:
+        return run_progress_process(*args, env=env)
+    return PROGRESS_RUNNER(*args, env=env)
 
 
 def in_process_progress_runner():
@@ -191,10 +198,12 @@ def in_process_progress_runner():
         stderr = io.StringIO()
         returncode = 0
         previous_argv = sys.argv
+        previous_twicc = progress.TWICC
 
         def invoke():
             nonlocal returncode
             sys.argv = [SCRIPT, *args]
+            progress.TWICC = shlex.split(command_env.get("TWICC_BIN") or "twicc")
             try:
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     progress.main()
@@ -206,6 +215,7 @@ def in_process_progress_runner():
                 returncode = 1
             finally:
                 sys.argv = previous_argv
+                progress.TWICC = previous_twicc
 
         run_with_test_environment(command_env, invoke)
         return subprocess.CompletedProcess(
@@ -12164,13 +12174,12 @@ def code_checker_admission_keeps_one_strict_output_route():
 
 @test
 def in_process_runner_matches_real_note_and_refusal_results():
-    real = run_progress("note", "ruling", "--text", "same authority")
+    real = run_progress_process("note", "ruling", "--text", "same authority")
     check(real.returncode == 0, real.stdout + real.stderr)
     real_entry = journal_lines()[0]
     reset()
 
-    runner = in_process_progress_runner()
-    local = runner("note", "ruling", "--text", "same authority")
+    local = run_progress("note", "ruling", "--text", "same authority")
     check(local.returncode == 0, local.stdout + local.stderr)
     local_entry = journal_lines()[0]
     for entry in (real_entry, local_entry):
@@ -12179,9 +12188,9 @@ def in_process_runner_matches_real_note_and_refusal_results():
           "the in-process runner changed the durable note account")
 
     reset()
-    real_refusal = run_progress("note", "ruling", "--data", "[]")
+    real_refusal = run_progress_process("note", "ruling", "--data", "[]")
     reset()
-    local_refusal = runner("note", "ruling", "--data", "[]")
+    local_refusal = run_progress("note", "ruling", "--data", "[]")
     check(real_refusal.returncode != 0 and local_refusal.returncode != 0,
           "one runner accepted malformed note data")
     check("--data` must be a JSON object" in real_refusal.stdout
@@ -12244,7 +12253,7 @@ def format_slowest_tests(durations, limit=10):
 # ------------------------------------------------------------------ runner
 
 def main():
-    global BASE, REPO, WORKSPACE, SCRIPT, FAKE_DIR, ENV, BASE_REPO_SNAPSHOT
+    global BASE, REPO, WORKSPACE, SCRIPT, FAKE_DIR, ENV, BASE_REPO_SNAPSHOT, PROGRESS_RUNNER
     BASE = tempfile.mkdtemp(prefix="progress-test-")
     try:
         REPO = os.path.join(BASE, "repo")
@@ -12326,6 +12335,7 @@ def main():
         BASE_REPO_SNAPSHOT = os.path.join(BASE, "fixture-snapshots", "pristine-repo")
         os.makedirs(os.path.dirname(BASE_REPO_SNAPSHOT), exist_ok=True)
         shutil.copytree(REPO, BASE_REPO_SNAPSHOT)
+        PROGRESS_RUNNER = in_process_progress_runner()
 
         selected = TESTS
         test_filter = os.environ.get("BWR_TEST_FILTER")
