@@ -3506,6 +3506,22 @@ def code_checker_contract_repairs_invalid_results_before_regeneration():
               f"root skill lost live-only repair resume rule: {required}")
 
 
+@test
+def format_slowest_tests_orders_descending():
+    check(
+        format_slowest_tests([(0.2, "fast"), (1.5, "slow")], limit=2)
+        == ["1.500s slow", "0.200s fast"],
+        "the functional duration report is not ordered from slowest to fastest",
+    )
+
+
+def format_slowest_tests(durations, limit=10):
+    return [
+        f"{seconds:.3f}s {name}"
+        for seconds, name in sorted(durations, reverse=True)[:limit]
+    ]
+
+
 def main():
     selected = TESTS
     test_filter = os.environ.get("BWR_TEST_FILTER")
@@ -3514,16 +3530,26 @@ def main():
         if not selected:
             raise SystemExit(f"no test matches BWR_TEST_FILTER={test_filter!r}")
     failures = 0
+    durations = []
     for function in selected:
+        started = time.monotonic()
         try:
             function()
         except Exception:
+            duration = time.monotonic() - started
+            durations.append((duration, function.__name__))
             failures += 1
-            print(f"FAIL  {function.__name__}")
+            print(f"FAIL  {duration:.3f}s {function.__name__}")
             traceback.print_exc()
             print()
         else:
-            print(f"ok    {function.__name__}")
+            duration = time.monotonic() - started
+            durations.append((duration, function.__name__))
+            print(f"ok    {duration:.3f}s {function.__name__}")
+    print()
+    print("slowest tests:")
+    for line in format_slowest_tests(durations):
+        print(f"  {line}")
     print()
     if failures:
         print(f"{failures} of {len(selected)} tests FAILED")
