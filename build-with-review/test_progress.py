@@ -1868,6 +1868,32 @@ def construction_unrecorded_orphan_launch_can_only_end_as_abandoned():
 
 
 @test
+def construction_launch_candidate_ignores_foreign_abandonment_accounts():
+    progress = load_common_module("progress")
+    foreign = [progress.event_entry(
+        "fixture", "note", kind="attempt.launch.abandoned",
+        mode="construction", job="controller", lot=f"lot-{number + 2}", task=9,
+        attempt=4, data={"malformed": True},
+    ) for number in range(2_000)]
+
+    highest = progress.validate_construction_launch_candidate(
+        foreign, "lot-1", 1, 1, "the bounded launch candidate",
+    )
+
+    check(highest == 0, "a foreign abandonment changed the local attempt sequence")
+    matching = dict(foreign[0])
+    matching.update(lot="lot-1", task=1)
+    refused = False
+    try:
+        progress.validate_construction_launch_candidate(
+            [matching], "lot-1", 1, 1, "the bounded launch candidate",
+        )
+    except SystemExit:
+        refused = True
+    check(refused, "a malformed matching abandonment escaped validation")
+
+
+@test
 def construction_orphan_launch_refuses_any_owned_attempt_work():
     seed_active_attempt()
     cfg = default_config()

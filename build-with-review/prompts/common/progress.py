@@ -3512,7 +3512,8 @@ def validate_construction_launch_candidate(entries, lot, task, attempt_number, s
         fail(f"{subject} has malformed attempt identity")
     abandonments = {}
     for index, entry in enumerate(entries):
-        if entry.get("event") != "note" or entry.get("kind") != "attempt.launch.abandoned":
+        if entry.get("event") != "note" or entry.get("kind") != "attempt.launch.abandoned" \
+                or entry.get("lot") != lot or entry.get("task") != task:
             continue
         data = validate_construction_launch_abandonment(
             entries, index, entry, "a durable orphan-launch terminal",
