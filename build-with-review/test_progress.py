@@ -2216,6 +2216,153 @@ def subagent_watchdog_accepts_a_late_exact_terminal():
 
 
 @test
+def construction_checker_opening_is_atomic_and_recovers_one_legacy_duplicate():
+    seed_active_attempt()
+    command = [
+        sys.executable, SCRIPT, "subagent-started", "design-checker", "--round", "1",
+    ]
+    journal_lock_path = os.path.join(WORKSPACE, "progress.jsonl.lock")
+    with open(journal_lock_path, "a+b") as journal_lock:
+        fcntl.flock(journal_lock, fcntl.LOCK_EX)
+        processes = [subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        ) for _ in range(2)]
+        time.sleep(0.05)
+        check(all(process.poll() is None for process in processes),
+              "the concurrent checker openings did not reach the journal owner")
+        fcntl.flock(journal_lock, fcntl.LOCK_UN)
+    results = [process.communicate(timeout=120) + (process.returncode,)
+               for process in processes]
+    check([result[2] for result in results] == [0, 0], results)
+    check(results[0][0] == results[1][0], results)
+    starts = [entry for entry in journal_lines()
+              if entry.get("event") == "subagent-started"
+              and entry.get("kind") == "design-checker"]
+    check(len(starts) == 1, "concurrent exact openings appended more than one owner")
+
+    duplicate = json.loads(json.dumps(starts[0]))
+    duplicate["ts"] = "legacy-output-loss-duplicate"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+    recovered = run_progress("subagent-started", "design-checker", "--round", "1")
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    check(recovered.stdout == results[0][0], recovered.stdout)
+    recoveries = [entry for entry in journal_lines()
+                  if entry.get("kind") == "subagent.opening.recovered"]
+    check(len(recoveries) == 1, recoveries)
+    openings = run_progress("subagents-open")
+    check(openings.returncode == 0, openings.stdout + openings.stderr)
+    rows = json.loads(openings.stdout)
+    check(len(rows) == 1 and rows[0]["identity"] == starts[0]["data"], rows)
+
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1",
+        "--text", "design checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    ended = run_progress(
+        "subagent-ended", "design-checker", "--round", "1",
+        "--data", '{"unusable":"lost"}',
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    openings = run_progress("subagents-open")
+    check(openings.returncode == 0 and json.loads(openings.stdout) == [],
+          openings.stdout + openings.stderr)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    exact_lines = journal_lines()
+    changed = json.loads(json.dumps(exact_lines))
+    recovery = next(entry for entry in changed
+                    if entry.get("kind") == "subagent.opening.recovered")
+    recovery["data"]["identity_sha256"] = "f" * 64
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in changed:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_history = run_progress("construction-verdict-check", "history")
+    check(refused_history.returncode != 0,
+          "a changed duplicate-opening recovery passed historical replay")
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in exact_lines:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+@test
+def code_checker_exact_rerun_recovers_the_active_legacy_duplicate():
+    seed_active_attempt()
+    append_checker_verdict("design", lot="lot-1", task=3, attempt=2)
+    gate = seed_review_gate()
+    command = (
+        "subagent-started", "code-checker", "--round", "1",
+        "--data", json.dumps({"gate": gate}),
+    )
+    first = run_progress(*command)
+    check(first.returncode == 0, first.stdout + first.stderr)
+    opening = next(entry for entry in reversed(journal_lines())
+                   if entry.get("event") == "subagent-started"
+                   and entry.get("kind") == "code-checker")
+    malformed_requests = (
+        {"gate": gate, "foreign": True},
+        {"foreign": True},
+        {"gate": "malformed"},
+        [],
+    )
+    for malformed in malformed_requests:
+        before = len(journal_lines())
+        refused_request = run_progress(
+            "subagent-started", "code-checker", "--round", "1",
+            "--data", json.dumps(malformed),
+        )
+        check(refused_request.returncode != 0 and len(journal_lines()) == before,
+              f"a malformed retained code opening request changed authority: {malformed}")
+    duplicate = json.loads(json.dumps(opening))
+    duplicate["ts"] = "legacy-code-output-loss-duplicate"
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    changed_duplicate = json.loads(json.dumps(duplicate))
+    changed_duplicate["data"]["manifest_sha256"] = "f" * 64
+    with open(journal_path, "a", encoding="utf-8") as target:
+        target.write(json.dumps(changed_duplicate, separators=(",", ":")) + "\n")
+    before = len(journal_lines())
+    changed = run_progress(*command)
+    check(changed.returncode != 0 and len(journal_lines()) == before,
+          "a changed duplicate opening received recovery authority")
+    lines = journal_lines()
+    lines[-1] = duplicate
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in lines:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    before = len(journal_lines())
+    malformed_recovery = run_progress(
+        "subagent-started", "code-checker", "--round", "1",
+        "--data", json.dumps({"gate": gate, "foreign": True}),
+    )
+    check(malformed_recovery.returncode != 0 and len(journal_lines()) == before
+          and not any(entry.get("kind") == "subagent.opening.recovered"
+                      for entry in journal_lines()),
+          "a malformed legacy rerun appended duplicate-opening recovery authority")
+
+    recovered = run_progress(*command)
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    check(recovered.stdout == first.stdout, recovered.stdout)
+    recoveries = [entry for entry in journal_lines()
+                  if entry.get("kind") == "subagent.opening.recovered"]
+    check(len(recoveries) == 1, recoveries)
+    before_retry = len(journal_lines())
+    retried = run_progress(*command)
+    check(retried.returncode == 0 and retried.stdout == first.stdout
+          and len(journal_lines()) == before_retry,
+          "an exact post-recovery retry changed durable opening authority")
+    listed = run_progress("subagents-open")
+    check(listed.returncode == 0, listed.stdout + listed.stderr)
+    rows = json.loads(listed.stdout)
+    check(len(rows) == 1 and rows[0]["identity"] == opening["data"], rows)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+
+@test
 def subagent_recovery_discovery_closes_lost_before_regeneration():
     started = run_progress(
         "subagent-started", "gate-runner", "--data", '{"scope":"discovery"}'
@@ -4674,10 +4821,10 @@ def design_parity_invalid_result_repair_keeps_the_same_open_physical_call():
         ),
         before, "an invalid design result",
     )
-    refused_after(
-        run_progress("subagent-started", "design-checker", "--round", "1"),
-        before, "another physical opening over the live repair call",
-    )
+    retained = run_progress("subagent-started", "design-checker", "--round", "1")
+    check(retained.returncode == 0 and len(journal_lines()) == before,
+          "an exact retry did not resume the same live physical call")
+    check(json.loads(retained.stdout) == opening, retained.stdout)
     valid = write_design_result(
         "replacement-design-result.json", design_result_payload(opening),
     )
@@ -4785,7 +4932,8 @@ def code_checker_regenerates_under_one_logical_spend():
         "subagent-started", "code-checker", "--round", "1",
         "--data", json.dumps({"gate": gate}),
     )
-    refused_after(open_again, before, "regeneration beside a live physical call")
+    check(open_again.returncode == 0 and len(journal_lines()) == before,
+          "an exact code opening retry did not resume the live physical call")
 
     proc = run_progress(
         "subagent-ended", "code-checker", "--round", "1", "--data", '{"unusable":"error"}',

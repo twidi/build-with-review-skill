@@ -304,7 +304,7 @@ def parse_data(raw):
     return data
 
 
-def journal_entries():
+def raw_journal_entries():
     if not os.path.exists(JOURNAL):
         return []
     entries = []
@@ -323,6 +323,10 @@ def journal_entries():
                      f"progress.jsonl line {line_number}")
             entries.append(entry)
     return entries
+
+
+def journal_entries():
+    return project_subagent_opening_recoveries(raw_journal_entries())
 
 
 CONSTRUCTION_HISTORY_DEPENDENCY_PAIRS = (
@@ -7472,6 +7476,15 @@ def validate_construction_verdict_history(entries):
                 entry, "the durable construction implementer start",
                 entries=entries, index=index,
             )
+    raw_entries = None
+    for index, entry in enumerate(entries[start:], start):
+        if entry.get("event") == "note" \
+                and entry.get("kind") == "subagent.opening.recovered":
+            if raw_entries is None:
+                raw_entries = raw_journal_entries()
+            validate_recovered_construction_opening_history(
+                entries, raw_entries, index, entry,
+            )
     for index, entry in enumerate(entries[start:], start):
         if entry.get("event") == "note" \
                 and entry.get("kind") == "construction.spend.recovered":
@@ -10648,6 +10661,10 @@ def write_validated_line(builder, *, attempt_success=False):
             entries = journal_entries()
             checkpoint_start, journal_sha256 = construction_history_validation_start(entries)
             entry = builder(entries)
+            if entry is None:
+                if recovery:
+                    print(f"**progress WARNING** · {recovery}")
+                return None
             validate_construction_history_append(entries, entry)
             validate_pending_amendment_attempt_settlement_append(entries, entry)
             validate_pending_attempt_success_append(entries, entry)
@@ -10708,6 +10725,7 @@ def write_validated_line(builder, *, attempt_success=False):
             "**progress WARNING** · the construction-history checkpoint was not "
             f"advanced: {checkpoint_warning}"
         )
+    return entry
 
 
 def validate_pending_attempt_success_append(entries, entry):
@@ -10991,6 +11009,120 @@ def cmd_session_retired(args):
         fail(f"`{step}` failed after the status change", detail, journaled=True)
 
 
+def construction_opening_request_matches(entry, owner, kind, context, check, requested_data):
+    if entry.get("event") != "subagent-started" or entry.get("kind") != kind \
+            or entry.get("by") != owner or subagent_event_context(entry) != context:
+        return False
+    data = note_data(entry)
+    if data.get("check") != check:
+        return False
+    if check == "code":
+        return isinstance(requested_data, dict) \
+            and data.get("gate") == requested_data.get("gate")
+    return requested_data is None
+
+
+def validate_retained_construction_opening(entries, opening_index, opening, subject):
+    data = note_data(opening)
+    if not construction_positive_integer(data.get("call")):
+        fail(f"{subject} has a malformed physical call identity")
+    logical = dict(data)
+    logical.pop("call")
+    if logical.get("check") == "design":
+        validate_design_generation_history(entries, len(entries), logical, subject)
+    elif logical.get("check") == "code":
+        validate_code_generation_history(entries, len(entries), logical, subject)
+    elif logical.get("check") != "diagnostic":
+        fail(f"{subject} has an unknown checker identity")
+    validate_current_construction_generation(logical, subject)
+    calls = construction_physical_calls(
+        entries, len(entries), logical, subject, require_closed=False,
+    )
+    open_calls = [(index, candidate) for index, candidate in open_subagent_brackets(entries)
+                  if candidate is opening]
+    if len(open_calls) != 1 or open_calls[0][0] != opening_index \
+            or not calls or calls[-1][0] is not opening or calls[-1][1] is not None:
+        fail(f"{subject} is not the one exact retained physical opening")
+    return data
+
+
+def build_construction_subagent_opening(
+        entries, owner, kind, context, check, requested_data, round_number, result,
+):
+    if check == "code" and (
+        not isinstance(requested_data, dict) or set(requested_data) != {"gate"}
+        or not re.fullmatch(r"[0-9a-f]{64}", requested_data.get("gate", ""))
+    ):
+        fail("subagent-started code-checker requires only its ordinary gate operation")
+    matching = [(index, entry) for index, entry in enumerate(entries)
+                if construction_opening_request_matches(
+                    entry, owner, kind, context, check, requested_data,
+                )]
+    duplicate_pairs = [
+        (first, second) for position, first in enumerate(matching)
+        for second in matching[position + 1:]
+        if exact_subagent_opening_duplicate(first[1], second[1])
+    ]
+    if len(duplicate_pairs) > 1:
+        fail("the retained Construction checker has more than one duplicate opening pair")
+    if duplicate_pairs:
+        (canonical_index, canonical), (duplicate_index, duplicate) = duplicate_pairs[0]
+        recovery_data = subagent_opening_recovery_account(
+            entries, len(entries), canonical_index, duplicate_index,
+            "the retained Construction checker opening",
+        )
+        candidate = event_entry(
+            owner, "note", kind="subagent.opening.recovered",
+            data=recovery_data, **context,
+        )
+        raw_with_candidate = [*entries, candidate]
+        validate_subagent_opening_recovery_entry(
+            raw_with_candidate, len(entries), candidate,
+        )
+        canonical_entries = list(entries)
+        canonical_entries[duplicate_index] = {
+            "ts": duplicate["ts"], "by": duplicate["by"], "event": "note",
+            "kind": "subagent.opening.duplicate",
+            "data": {"recovery": "pending"},
+        }
+        result["data"] = validate_retained_construction_opening(
+            canonical_entries, canonical_index, canonical,
+            "the recovered Construction checker opening",
+        )
+        return candidate
+    open_matching = [
+        (index, opening) for index, opening in open_subagent_brackets(entries)
+        if construction_opening_request_matches(
+            opening, owner, kind, context, check, requested_data,
+        )
+    ]
+    if len(open_matching) > 1:
+        fail("the retained Construction checker has more than one open physical call")
+    if open_matching:
+        opening_index, opening = open_matching[0]
+        result["data"] = validate_retained_construction_opening(
+            entries, opening_index, opening,
+            "the retained Construction checker opening",
+        )
+        return None
+
+    normalized = normalize_construction_started(
+        entries, requested_data, context, check, round_number,
+    )
+    locked_context = dict(context)
+    locked_context.update({key: normalized[key] for key in ("lot", "task", "attempt")})
+    if check == "diagnostic":
+        locked_context.pop("round", None)
+    validate_subagent_transition(
+        entries, "subagent-started", owner, kind, locked_context, normalized,
+    )
+    result["data"] = normalized
+    result["context"] = locked_context
+    return event_entry(
+        owner, "subagent-started", kind=kind, data=normalized, **locked_context,
+    )
+
+
 def cmd_subagent_started(args):
     if args.kind not in SUBAGENT_KINDS:
         fail(f"unknown subagent kind `{args.kind}`",
@@ -11016,12 +11148,17 @@ def cmd_subagent_started(args):
             fail("subagent-started completeness derives its identity and takes no --data")
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
         check = args.kind.removesuffix("-checker")
-        data = normalize_construction_started(
-            journal_entries(), data, context, check, args.round,
-        )
-        context.update({key: data[key] for key in ("lot", "task", "attempt")})
-        if check == "diagnostic":
-            context.pop("round", None)
+        result = {}
+
+        def build(entries):
+            return build_construction_subagent_opening(
+                entries, me["session_id"], args.kind, context, check,
+                data, args.round, result,
+            )
+
+        write_validated_line(build)
+        data = result["data"]
+        context = result.get("context", context)
     elif data is not None:
         fail(f"subagent-started {args.kind} does not take structured data")
     if deferred_completeness:
@@ -11060,7 +11197,7 @@ def cmd_subagent_started(args):
             )
 
         write_validated_line(build)
-    else:
+    elif args.kind not in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
         validate_subagent_transition(
             journal_entries(), "subagent-started", me["session_id"], args.kind, context, data,
         )
@@ -11172,6 +11309,144 @@ def cmd_subagent_ended(args):
 
 def subagent_event_context(entry):
     return {key: entry[key] for key in CONTEXT_FIELDS if key in entry}
+
+
+def exact_subagent_opening_duplicate(first, second):
+    if first.get("event") != "subagent-started" \
+            or second.get("event") != "subagent-started" \
+            or set(first) != set(second):
+        return False
+    return all(first[key] == second[key] for key in first if key != "ts")
+
+
+def subagent_opening_identity_sha256(opening):
+    identity = {
+        "by": opening.get("by"), "kind": opening.get("kind"),
+        "context": subagent_event_context(opening), "data": note_data(opening),
+    }
+    return sha256_bytes(json.dumps(
+        identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8"))
+
+
+def subagent_opening_recovery_account(
+        entries, before, canonical_index, duplicate_index, subject,
+):
+    if not (0 <= canonical_index < duplicate_index < before):
+        fail(f"{subject} has unordered duplicate opening proofs")
+    canonical = entries[canonical_index]
+    duplicate = entries[duplicate_index]
+    canonical_context = subagent_event_context(canonical)
+    if canonical.get("kind") not in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"} \
+            or not isinstance(canonical.get("ts"), str) or not canonical["ts"] \
+            or not isinstance(canonical.get("by"), str) or not canonical["by"] \
+            or set(canonical) != {
+                "ts", "by", "event", "kind", "data", *canonical_context,
+            } or not exact_subagent_opening_duplicate(canonical, duplicate):
+        fail(f"{subject} does not select two exact Construction checker openings")
+    data = note_data(canonical)
+    if not construction_positive_integer(data.get("call")):
+        fail(f"{subject} has no exact physical call identity")
+    matches = [
+        index for index, candidate in enumerate(entries[:before])
+        if exact_subagent_opening_duplicate(canonical, candidate)
+    ]
+    if matches != [canonical_index, duplicate_index]:
+        fail(f"{subject} does not select one exact duplicate opening pair")
+    terminals = [
+        entry for entry in entries[canonical_index + 1:before]
+        if entry.get("event") == "subagent-ended"
+        and subagent_terminal_matches(canonical, entry)
+    ]
+    if terminals:
+        fail(f"{subject} follows a provider-subagent terminal")
+    return {
+        "schema": 1,
+        "canonical_opening": journal_line_proof(canonical_index),
+        "duplicate_opening": journal_line_proof(duplicate_index),
+        "identity_sha256": subagent_opening_identity_sha256(canonical),
+    }
+
+
+def validate_subagent_opening_recovery_entry(entries, index, entry):
+    data = note_data(entry)
+    if set(data) != {
+        "schema", "canonical_opening", "duplicate_opening", "identity_sha256",
+    } or data.get("schema") != 1 \
+            or not re.fullmatch(r"[0-9a-f]{64}", data.get("identity_sha256", "")) \
+            or not isinstance(entry.get("ts"), str) or not entry["ts"]:
+        fail("a durable subagent-opening recovery has malformed authority")
+    canonical_index, canonical = journal_entry_from_proof(
+        entries, data.get("canonical_opening"),
+        "the durable subagent-opening recovery",
+    )
+    duplicate_index, _duplicate = journal_entry_from_proof(
+        entries, data.get("duplicate_opening"),
+        "the durable subagent-opening recovery",
+    )
+    expected = subagent_opening_recovery_account(
+        entries, index, canonical_index, duplicate_index,
+        "the durable subagent-opening recovery",
+    )
+    expected_context = subagent_event_context(canonical)
+    if data != expected or entry.get("event") != "note" \
+            or entry.get("kind") != "subagent.opening.recovered" \
+            or entry.get("by") != canonical.get("by") \
+            or subagent_event_context(entry) != expected_context \
+            or set(entry) != {"ts", "by", "event", "kind", "data", *expected_context}:
+        fail("a durable subagent-opening recovery changes its exact owner", expected)
+    earlier = [candidate for candidate in entries[:index]
+               if candidate.get("event") == "note"
+               and candidate.get("kind") == "subagent.opening.recovered"
+               and note_data(candidate).get("canonical_opening")
+               == data["canonical_opening"]]
+    if earlier:
+        fail("a provider-subagent opening identity has more than one recovery")
+    return canonical_index, duplicate_index, canonical
+
+
+def project_subagent_opening_recoveries(entries):
+    projected = list(entries)
+    replaced = set()
+    for index, entry in enumerate(entries):
+        if entry.get("event") != "note" \
+                or entry.get("kind") != "subagent.opening.recovered":
+            continue
+        _canonical_index, duplicate_index, _canonical = \
+            validate_subagent_opening_recovery_entry(entries, index, entry)
+        if duplicate_index in replaced:
+            fail("a duplicate provider-subagent opening has more than one recovery")
+        replaced.add(duplicate_index)
+        duplicate = entries[duplicate_index]
+        projected[duplicate_index] = {
+            "ts": duplicate["ts"], "by": duplicate["by"], "event": "note",
+            "kind": "subagent.opening.duplicate",
+            "data": {"recovery": journal_line_proof(index)},
+        }
+    return projected
+
+
+def validate_recovered_construction_opening_history(entries, raw_entries, index, entry):
+    canonical_index, _duplicate_index, canonical = \
+        validate_subagent_opening_recovery_entry(raw_entries, index, entry)
+    logical = dict(note_data(canonical))
+    logical.pop("call", None)
+    prefix = entries[:index + 1]
+    subject = "the durable recovered Construction checker opening"
+    if logical.get("check") == "design":
+        validate_design_generation_history(prefix, len(prefix), logical, subject)
+    elif logical.get("check") == "code":
+        validate_code_generation_history(prefix, len(prefix), logical, subject)
+    elif logical.get("check") != "diagnostic":
+        fail(f"{subject} has an unknown checker identity")
+    calls = construction_physical_calls(
+        prefix, len(prefix), logical, subject, require_closed=False,
+    )
+    openings = [(opening_index, opening) for opening_index, opening
+                in open_subagent_brackets(prefix) if opening is prefix[canonical_index]]
+    if len(calls) != 1 or calls[0][0] is not prefix[canonical_index] \
+            or calls[0][1] is not None or openings != [(canonical_index, prefix[canonical_index])]:
+        fail(f"{subject} does not preserve one canonical open physical call")
 
 
 def subagent_terminal_matches(opening, terminal):
