@@ -666,6 +666,24 @@ else:
 
 TASK_SUCCESS_TEMPLATE = None
 TASK_SUCCESS_AUTHORITY = None
+ROUND_TEN_TEMPLATES = {}
+
+
+def clone_fixture(template, prefix):
+    clone = Fixture.__new__(Fixture)
+    clone.temp = pathlib.Path(tempfile.mkdtemp(prefix=prefix))
+    shutil.rmtree(clone.temp)
+    shutil.copytree(template.temp, clone.temp)
+    clone.repo = clone.temp / "repo"
+    clone.workspace = clone.repo / ".superpowers" / "bwr" / "2026-08-19-demo"
+    clone.fake = clone.temp / "fake_twicc.py"
+    clone.current_attempt = template.current_attempt
+    clone.env = dict(template.env)
+    clone.env["TWICC_BIN"] = f"{sys.executable} {clone.fake}"
+    clone.plan_copy = clone.repo / "docs" / "plans" / "2026-08-19-demo-lot-1-plan.md"
+    clone.plan = clone.workspace / "plans" / "lot-1-plan.md"
+    clone.base = template.base
+    return clone
 
 
 def prepared_task_success_fixture():
@@ -679,26 +697,26 @@ def prepared_task_success_fixture():
         TASK_SUCCESS_TEMPLATE = template
         TASK_SUCCESS_AUTHORITY = (operation, commit)
 
-    clone = Fixture.__new__(Fixture)
-    clone.temp = pathlib.Path(tempfile.mkdtemp(prefix="bwr-gate-success-clone-"))
-    shutil.rmtree(clone.temp)
-    shutil.copytree(TASK_SUCCESS_TEMPLATE.temp, clone.temp)
-    clone.repo = clone.temp / "repo"
-    clone.workspace = clone.repo / ".superpowers" / "bwr" / "2026-08-19-demo"
-    clone.fake = clone.temp / "fake_twicc.py"
-    clone.current_attempt = TASK_SUCCESS_TEMPLATE.current_attempt
-    clone.env = dict(TASK_SUCCESS_TEMPLATE.env)
-    clone.env["TWICC_BIN"] = f"{sys.executable} {clone.fake}"
-    clone.plan_copy = clone.repo / "docs" / "plans" / "2026-08-19-demo-lot-1-plan.md"
-    clone.plan = clone.workspace / "plans" / "lot-1-plan.md"
-    clone.base = TASK_SUCCESS_TEMPLATE.base
+    clone = clone_fixture(TASK_SUCCESS_TEMPLATE, "bwr-gate-success-clone-")
     operation, commit = TASK_SUCCESS_AUTHORITY
     return clone, operation, commit
+
+
+def prepared_code_round_ten_fixture(findings):
+    template = ROUND_TEN_TEMPLATES.get(findings)
+    if template is None:
+        template = Fixture()
+        template.start_attempt_state()
+        template.append_code_round_ten_findings(findings=findings)
+        ROUND_TEN_TEMPLATES[findings] = template
+    return clone_fixture(template, f"bwr-gate-round-ten-{findings}-clone-")
 
 
 def close_task_success_template():
     if TASK_SUCCESS_TEMPLATE is not None:
         TASK_SUCCESS_TEMPLATE.close()
+    for template in ROUND_TEN_TEMPLATES.values():
+        template.close()
 
 
 atexit.register(close_task_success_template)
@@ -2519,11 +2537,8 @@ def task_gate_refuses_an_unproved_historical_code_verdict():
 
 @test
 def round_ten_resolution_without_an_accepted_defect_can_finish_the_task():
-    fixture = Fixture()
+    fixture = prepared_code_round_ten_fixture(2)
     try:
-        fixture.start_attempt_state()
-        fixture.append_code_round_ten_findings()
-
         fixture.run(
             "bash", fixture.gate_check, "open", "task", "lot-1/task-1/attempt-1",
             "lot-1", "1", "1", "refs/bwr/2026-08-19-demo/lot-1/attempt-base", ok=False,
@@ -2547,10 +2562,8 @@ def round_ten_resolution_without_an_accepted_defect_can_finish_the_task():
 
 @test
 def an_accepted_round_ten_defect_refuses_the_final_gate_before_mutation():
-    fixture = Fixture()
+    fixture = prepared_code_round_ten_fixture(1)
     try:
-        fixture.start_attempt_state()
-        fixture.append_code_round_ten_findings(findings=1)
         fixture.resolve_code_round_ten(["accepted"])
         (fixture.repo / "app.txt").write_text("defective candidate\n", encoding="utf-8")
         fixture.git("add", "app.txt")
@@ -2569,10 +2582,8 @@ def an_accepted_round_ten_defect_refuses_the_final_gate_before_mutation():
 
 @test
 def failure_closer_refuses_unsettled_round_ten_findings_before_mutation():
-    fixture = Fixture()
+    fixture = prepared_code_round_ten_fixture(1)
     try:
-        fixture.start_attempt_state()
-        fixture.append_code_round_ten_findings(findings=1)
         before_head = fixture.git("rev-parse", "HEAD").stdout.strip()
         before_identity = (fixture.workspace / "attempt-in-flight").read_bytes()
         failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
@@ -3114,10 +3125,8 @@ def mistaken_code_resolution_recovery_is_one_public_controller_route():
 
 @test
 def accepted_round_ten_defect_requires_its_exact_failure_handoff():
-    fixture = Fixture()
+    fixture = prepared_code_round_ten_fixture(1)
     try:
-        fixture.start_attempt_state()
-        fixture.append_code_round_ten_findings(findings=1)
         fixture.resolve_code_round_ten(["accepted"])
         before_head = fixture.git("rev-parse", "HEAD").stdout.strip()
         before_identity = (fixture.workspace / "attempt-in-flight").read_bytes()
@@ -3135,10 +3144,8 @@ def accepted_round_ten_defect_requires_its_exact_failure_handoff():
 
 @test
 def accepted_round_ten_handoff_is_bound_to_the_next_checker_generation():
-    fixture = Fixture()
+    fixture = prepared_code_round_ten_fixture(2)
     try:
-        fixture.start_attempt_state()
-        fixture.append_code_round_ten_findings(findings=2)
         fixture.resolve_code_round_ten(["accepted", "refuted"])
         handoff = fixture.progress_call(
             "construction-failure-handoff", "lot-1", "1", "1",
@@ -3166,6 +3173,11 @@ def accepted_round_ten_handoff_is_bound_to_the_next_checker_generation():
               terminal_data)
         raw_lines = (fixture.workspace / "progress.jsonl").read_bytes().splitlines()
         failure_proof = f"{terminal_index}:{hashlib.sha256(raw_lines[terminal_index]).hexdigest()}"
+        fixture.progress_call(
+            "session-retired", "gate-test-session-1", "failed",
+            "--archive", "--hide", ok=True,
+        )
+        fixture.set_controller_context()
 
         head = fixture.git("rev-parse", "HEAD").stdout.strip()
         opened = fixture.run(
@@ -3184,6 +3196,7 @@ def accepted_round_ten_handoff_is_bound_to_the_next_checker_generation():
               "the next attempt identity does not freeze the accepted-defect handoff")
 
         fixture.set_attempt_context(2)
+        fixture.progress_call("session-started", "gate-test-session-2", ok=True)
         fixture.run_code_round(1, 0)
         opening = next(
             entry for entry in reversed(fixture.journal())
@@ -3201,6 +3214,11 @@ def accepted_round_ten_handoff_is_bound_to_the_next_checker_generation():
               "the accepted finding lost its public impact during retry handoff")
 
         fixture.run("bash", failed, "lot-1", "1", "2", "C3.9a", ok=True)
+        fixture.progress_call(
+            "session-retired", "gate-test-session-2", "failed",
+            "--archive", "--hide", ok=True,
+        )
+        fixture.set_controller_context()
         propagated = next(
             entry for entry in reversed(fixture.journal())
             if entry.get("kind") == "attempt.failed" and entry.get("task") == 1
@@ -3335,7 +3353,7 @@ def plan_commit_refuses_when_any_task_lacks_a_design_boundary():
               "a refused plan changed the repository copy")
         check(not (fixture.workspace / "plan-commit-in-progress").exists(),
               "a refused plan created a commit marker")
-        check(not (fixture.workspace / "progress.jsonl").exists(),
+        check((fixture.workspace / "progress.jsonl").read_bytes() == b"",
               "a refused plan wrote the journal")
     finally:
         fixture.close()
