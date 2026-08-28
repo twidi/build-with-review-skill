@@ -684,7 +684,7 @@ PY
 }
 
 require_pass() {
-    local op=$1 commit=$2 fields scope owner lot task attempt
+    local op=$1 commit=$2 fields scope owner lot task attempt correction
     [ "$(git rev-parse HEAD)" = "$(git rev-parse --verify "$commit^{commit}")" ] \
         || die "the reviewed commit $commit is not the current HEAD"
     [ -z "$(git status --porcelain)" ] \
@@ -699,10 +699,15 @@ results = [e["data"] for e in events if e.get("event") == "subagent-ended"
 if len(results) != 1:
     raise SystemExit("the pass gate has no unique result")
 d = results[0]
-if d.get("scope") == "baseline":
+if d.get("scope") in {"baseline", "correction-baseline"}:
     if d.get("head") != commit:
         raise SystemExit("the baseline gate checked another commit")
-    print("baseline", d.get("owner"), "-", 0, 0)
+    if d.get("scope") == "correction-baseline":
+        if not isinstance(d.get("lot"), str) or not isinstance(d.get("correction"), int):
+            raise SystemExit("the correction baseline has no exact Correction Round")
+        print("correction-baseline", d.get("owner"), d["lot"], 0, 0, d["correction"])
+    else:
+        print("baseline", d.get("owner"), "-", 0, 0, "-")
     raise SystemExit(0)
 matches = [e for e in events if e.get("kind") == "attempt.succeeded"
            and (e.get("data") or {}).get("gate") == op
@@ -710,11 +715,22 @@ matches = [e for e in events if e.get("kind") == "attempt.succeeded"
 if len(matches) != 1:
     raise SystemExit("the task gate was not consumed by this reviewed commit")
 data = matches[0]["data"]
-print("task", d.get("owner"), matches[0]["lot"], matches[0]["task"], data["attempt"])
+if d.get("scope") == "correction-task":
+    correction = d.get("correction")
+    if not isinstance(correction, int) or matches[0].get("correction") != correction:
+        raise SystemExit("the correction task gate belongs to another Correction Round")
+    print("correction-task", d.get("owner"), matches[0]["lot"], matches[0]["task"],
+          data["attempt"], correction)
+else:
+    print("task", d.get("owner"), matches[0]["lot"], matches[0]["task"], data["attempt"], "-")
 PY
 ) || die "gate operation $op is not an accepted proof for reviewed commit $commit"
-    read -r scope owner lot task attempt <<< "$fields"
-    validate_result "$op" "$scope" "$lot" "$task" "$attempt" "$commit"
+    read -r scope owner lot task attempt correction <<< "$fields"
+    if [ "$scope" = correction-task ] || [ "$scope" = correction-baseline ]; then
+        validate_result "$op" "$scope" "$lot" "$task" "$attempt" "$commit" "$correction"
+    else
+        validate_result "$op" "$scope" "$lot" "$task" "$attempt" "$commit"
+    fi
     printf '%s\n' "$fields"
 }
 

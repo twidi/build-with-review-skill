@@ -42,6 +42,150 @@ path you hand to every child.*
 
 ---
 
+## Correction Round entry
+
+This entry precedes ordinary C0. Use it only after PRODUCT REVIEW hands you one exact
+`correction.round.opened`, or when a resume names that same open Correction Round. An
+ordinary root lot or sub-lot skips this section and continues at C0 unchanged.
+
+### Bind your controller annotations before the first Correction command
+
+Use `mcp__twicc__update_session_annotations` on your own exact session. Perform one
+update before the resolver, baseline selector, stop helper, journal command, or child.
+
+- Set `bwr.mode=construction`, `bwr.job=controller`, `bwr.lot=<built lot>`, and
+  `bwr.correction=<round>`.
+- Preserve `bwr.schema`, `bwr.feature`, and `bwr.status`.
+- Remove `bwr.task`, `bwr.attempt`, `bwr.round`, `bwr.mandate`, `bwr.position`,
+  `bwr.pass`, and `bwr.generation`.
+
+Read the annotations back. Continue only when this exact generation is visible. A resume
+repeats only a missing or refused annotation update. It never changes the Correction
+identity. Ordinary root-lot and sub-lot entries do not perform this update.
+
+### Resolve one frozen work unit
+
+Run the shared resolver before any gate, child, marker, ref or document action:
+
+```sh
+python3 <workspace>/prompts/construction/work_unit.py resolve-correction <built lot> <round>
+```
+
+The command must return one canonical JSON account. Treat it as the only work-unit
+authority. It freezes the exact built unit and round, current Correction artifact,
+controller and task manifest, source findings, task count, report root, ref root, current
+contract proof, current tree authority and composite execution-authority digest. A
+refusal returns to the exact PRODUCT REVIEW opening or retained Correction owner that it
+names. Never infer a replacement identity from a file name, `HEAD`, an ordinary lot or a
+controller annotation.
+
+The resolved `workspace_document` is the plan for this work unit. The resolved
+`report_root` and `ref_root` own all task evidence and refs. Do not create or publish an
+ordinary plan. Do not run ordinary C1 or ordinary AI C2. Do not publish ordinary
+`plan.written`, task-0, sub-lot origin or a second Correction Round. The opening helper
+already published the immutable artifact and exact Correction task-0.
+
+### Establish the exact Correction baseline
+
+Select the only admissible baseline:
+
+```sh
+<workspace>/prompts/construction/correction-round-baseline.sh <built lot> <round>
+```
+
+Its canonical JSON result names `mode`, `owner`, `base_commit`, `task_zero` and optional
+`gate`.
+
+- `mode:"required"` with no gate: open exactly one Correction baseline:
+
+  ```sh
+  <workspace>/prompts/construction/gate-check.sh open correction-baseline \
+    <owner> <built lot> 0 0 <base_commit> <round>
+  ```
+
+  Launch the ordinary physical gate runner for the returned operation. It must publish
+  its canonical report. Close that operation through `gate-check.sh close <op>`, then
+  require it through `gate-check.sh require-correction-baseline <op> <base_commit>
+  <built lot> <round>`.
+- `mode:"fresh"`: require the returned gate through the same
+  `require-correction-baseline` call. Do not open another logical gate.
+
+Rerun `correction-round-baseline.sh` after the gate terminal. It must now return that
+same fresh gate and same owner. Only then enter shared C3 at Task 1, or at the exact first
+missing task derived by the resolver and attempt helper. The Correction branch never runs
+ordinary C0, C1 or C2.
+
+### Use shared C3 with the Correction identity
+
+The implementer still follows C3.1 through C3.10. Its session title and annotations add
+the resolved round as `bwr.correction=<round>` and retain `bwr.lot=<built lot>`. Its
+message identifies the work unit as Correction and supplies the resolver's exact
+canonical JSON account, including `workspace_document`, `report_root`, `ref_root`, task
+manifest and current execution authority. It does not supply an ordinary plan path.
+
+Every physical helper uses the Correction form. The principal controller boundaries are:
+
+```sh
+<workspace>/prompts/construction/attempt-started.sh --correction <built lot> <round> <task N> <attempt K> [retry proof or -]
+<workspace>/prompts/construction/attempt-failed.sh --correction <built lot> <round> <task N> <attempt K> <C3.9a|b|c|d>
+<workspace>/prompts/construction/diagnostic-open.sh --correction <built lot> <round> <task N> <attempt K>
+<workspace>/prompts/construction/diagnostic-close.sh --correction <built lot> <round> <task N> <attempt K>
+<workspace>/prompts/construction/attempt-succeeded.sh --correction <built lot> <round> <task N> <commit> <final gate op>
+<workspace>/prompts/construction/plan-publish.sh --correction <built lot> <round>
+<workspace>/prompts/common/stop.sh <pause|abort> --correction <built lot> <round> <task N> <attempt K>
+```
+
+Design, code, diagnostic and gate brackets carry the same `correction=<round>` context.
+Their existing manifests and Correction gate scopes bind the canonical artifact,
+contract, composite execution authority, final-checker set and attempt identity. Never
+substitute an ordinary task, review or baseline gate.
+
+A controller-contract revision, rewind, final-checker mapping or Correction-origin
+AMENDMENT follows only its existing exact helper. After each operation that requires a
+fresh baseline, return to **Establish the exact Correction baseline**. When every task is
+accepted and the final-checker set is empty, close only through:
+
+```sh
+python3 <workspace>/prompts/construction/correction_round_built.py <built lot> <round>
+```
+
+Then enter the PRODUCT REVIEW successor for that exact terminal. Do not write ordinary
+`lot.built`. The PRODUCT entry removes `bwr.correction` before its first `pass.opened`.
+
+### Exact Correction resume table
+
+Run `work_unit.py resolve-correction <built lot> <round>` first only for an active,
+nonterminal round: opening, baseline, task or attempt, paused-between-attempts, and
+final-checker rows. Keep the same built unit and round throughout those rows. Do not call
+the active-round resolver for an AMENDMENT return owner, a Correction revision owner, a
+Correction escalation owner, a terminal helper marker, or a durable built, resolved or
+escalated terminal.
+
+| Durable prefix | Exact continuation |
+|---|---|
+| **Opening only** | Run only `correction-round-baseline.sh` for this built unit and round. Do not repeat allocation, pass close or `correction-round-open.sh`. |
+| **Baseline opening without terminal** | Reconcile the exact gate runner. Close or replace only that physical call. Then require its Correction baseline and rerun the selector. |
+| **Baseline terminal** | Rerun the selector. Enter the first missing Correction task only when it returns the exact fresh gate. |
+| **Task or attempt owner** | Resume the exact C3 phase, task and attempt frozen by `attempt-in-flight`, its checker/gate bracket or its helper marker. Never start another attempt before its exclusive terminal. |
+| **Paused between attempts** | Follow the exact Correction `resumed` route, then rerun the resolver and baseline selector. An abort never resumes. |
+| **AMENDMENT return owner** | Resume only the retained `correction-amendment-return-in-progress` route through its exact rebase, resolved or post-AMENDMENT escalation helper. Do not call the ordinary resolver until its terminal consumes that owner. |
+| **Final-checker owner** | Run only `final-checker-contract-map.sh <built lot> <round>`. Use its public document-update account, never its marker. Complete its document, transition, baseline or cleanup tail before another task action. |
+| **Correction revision owner** | This row covers every retained `correction-round-revision-in-progress` prefix: pre-task owner, post-task document commit, `BASELINE REQUIRED`, terminal append or marker cleanup. Do not run `resolve-correction`. Rerun only this public retained-owner command: `correction-round-revise.sh <built lot> <round>`. The helper reads and authenticates its exact owner internally. If it prints `BASELINE REQUIRED`, run only `correction-round-baseline.sh <built lot> <round>`, finish that exact baseline, then rerun only this same command. Never parse, copy, guess, replace or remove the marker yourself. |
+| **Correction escalation owner** | This row covers every retained `correction-round-escalation-in-progress` prefix: owner-only, immutable object published, terminal-ready, terminal appended, final-map cleanup or marker cleanup. Do not run `resolve-correction`. Rerun only `correction-round-escalate.sh <built lot> <round>`. The helper reads and authenticates its exact owner internally. Never read, copy, infer, replace or remove the marker. |
+| **Correction terminal marker** | Do not run `resolve-correction`. Rerun only the matching built or resolved helper. It authenticates its owner before or after terminal append and removes only its exact marker. The escalation marker uses its separate retained-owner row above. |
+| **`correction.round.built` without `pass.opened`** | Do not run `resolve-correction`. Run `correction-round-restore.sh <built lot> <round>` once. It authenticates the exact built terminal and atomically restores its canonical artifact from the immutable object when required. Then enter only its exact Product successor and append the minimal opening once. Never enter delivery, allocate a sub-lot, append `lot.built`, reopen the round or create another successor. |
+| **`correction.round.resolved` without `pass.opened`** | Do not run `resolve-correction`. Run `correction-round-restore.sh <built lot> <round>` once. It authenticates the exact resolved terminal and atomically restores its canonical artifact from the immutable object when required. Then enter only its exact Product successor and append the minimal opening once. Never enter delivery, allocate a sub-lot, append `lot.built`, reopen the round or create another successor. |
+| **Ordinary `correction.round.escalated` without a sub-lot** | Do not run `resolve-correction`. Let the structural successor preflight authenticate the exact ordinary producer. Consume only its successor: one `sublot.allocated`, one `sublot.opened`, the complete mapped plan, `construction-plan-publication-check`, then `plan-commit.sh`. Never enter Product, delivery or an ordinary lot exit. |
+| **Post-AMENDMENT-return `correction.round.escalated` without a sub-lot** | Do not run `resolve-correction`. Let the structural successor preflight authenticate the exact post-AMENDMENT-return producer. Consume only its successor: one `sublot.allocated`, one `sublot.opened`, the complete mapped plan, `construction-plan-publication-check`, then `plan-commit.sh`. Never enter Product, delivery or an ordinary lot exit. |
+| **Retained-authority-rewind `correction.round.escalated` without a sub-lot** | Do not run `resolve-correction`. Let the structural successor preflight authenticate the exact retained-authority-rewind producer. Consume only its successor: one `sublot.allocated`, one `sublot.opened`, the complete mapped plan, `construction-plan-publication-check`, then `plan-commit.sh`. Never enter Product, delivery or an ordinary lot exit. |
+| **Partial escalated structural successor** | Do not run `resolve-correction`. Let the retained structural successor preflight authenticate its producer and resume only its earliest missing tail: retained `sublot.allocated`, then `sublot.opened`, then the complete mapped plan, `construction-plan-publication-check`, or `plan-commit.sh`. Never repeat a durable prefix, create a second successor, enter Product or enter delivery. |
+
+Every row retains one Correction identity. A continuation that would create an ordinary
+plan, ordinary task-0, sub-lot origin, second allocation or second round is a refusal.
+No Correction terminal directly enters delivery.
+
+---
+
 ## C0 — The ground
 
 The gate is this project's complete verification command list. It lives in
@@ -968,13 +1112,26 @@ lot, the task and the attempt** — `attempt.succeeded`, `attempt.failed`, `paus
 `aborted` — which is the only trace left by a rewound success, an untouched stop, or
 a reportless failure. The start script refuses a number that left any of those traces.
 
-**Mark where the attempt begins first, before the session that will run it exists:**
+**Mark where the attempt begins first, before the session that will run it exists.**
+Select the form from the authenticated attempt authority, never from the lot spelling.
+
+#### Ordinary attempt start
 
 ```sh
 <workspace>/prompts/construction/attempt-started.sh <lot> <N> <K> [checker-obligation report or -]
 ```
 
-*It runs the equivalent of:*
+#### Correction attempt start
+
+```sh
+<workspace>/prompts/construction/attempt-started.sh --correction \
+  <built lot> <round> <N> <K> [retry proof or -]
+```
+
+The Correction form consumes the complete resolved work-unit and retry authority. It
+uses the Correction ref root. It never publishes an ordinary attempt owner.
+
+*The following pseudocode is ordinary-only:*
 
 ```sh
 git status --porcelain                                  # must be empty
@@ -1027,14 +1184,24 @@ controller re-cut commits that copy first and therefore establishes the new mani
 A typo, removed task, gap, reopened task, or branch that dropped its predecessor is
 refused before any session or mutable start state exists.
 
-**Then create the session.** `mcp__twicc__create_session`, one call carrying everything:
+**Then create the session.** Select the work-unit form from the authenticated attempt
+owner. Never infer it from the lot name. Use `mcp__twicc__create_session` once with:
 
-- preset **`Implementer`**, the provider the human chose, **question widget disabled**
-- project: the repository's exact TwiCC project, passed explicitly
-- title `- Task <N> attempt <K> (<feature>)`
-- annotations: `bwr.schema=1` · `bwr.job=implementer` · `bwr.mode=construction` ·
-  `bwr.feature=<feature>` · `bwr.lot=<lot>` · `bwr.task=<N>` · `bwr.attempt=<K>` ·
-  `bwr.status=working`
+- preset **`Implementer`**, the provider the human chose, **question widget disabled**;
+- project: the repository's exact TwiCC project, passed explicitly;
+- title `- Task <N> attempt <K> (<feature>)`.
+
+#### Ordinary implementer launch annotations
+
+Use exactly: `bwr.schema=1` · `bwr.job=implementer` · `bwr.mode=construction` ·
+`bwr.feature=<feature>` · `bwr.lot=<lot>` · `bwr.task=<N>` · `bwr.attempt=<K>` ·
+`bwr.status=working`. `bwr.correction` is absent.
+
+#### Correction implementer launch annotations
+
+Use exactly: `bwr.schema=1` · `bwr.job=implementer` · `bwr.mode=construction` ·
+`bwr.feature=<feature>` · `bwr.lot=<built lot>` · `bwr.correction=<round>` ·
+`bwr.task=<N>` · `bwr.attempt=<K>` · `bwr.status=working`.
 
 The message starts with this fixed block, with absolute paths:
 
@@ -1067,11 +1234,27 @@ Never test either file directly.
 Tell it to stop before reading or writing any project or workspace path when one required
 input field has no value, or one supplied value is relative, unresolved or contradictory.
 The current working directory is never
-the workspace. After that block, the message gives these role inputs, and nothing more:
+the workspace. After that block, give one exact work-unit role-input block.
 
-1. **the lot** and **the task number**
-2. the attempt number
-3. on a retry: **which of C3.9a–d it was classified as**, and **the path to the failure
+#### Ordinary implementer role inputs
+
+Give the work-unit form `ordinary`, the lot, task number, and attempt number. The
+implementer builds ordinary paths only in this form. The plan is
+`<workspace>/plans/<lot>-plan.md`. Read a past task only with `task-diff.sh`; the
+repository plan copy remains `plan-publish.sh`'s responsibility.
+
+#### Correction implementer role inputs
+
+Give the work-unit form `Correction`, the built lot, Correction Round, task number, and
+attempt number. Give the **complete canonical resolver JSON account**, unchanged, from
+`work_unit.py resolve-correction <built lot> <round> <task N>`. The account is one
+required input, not a summary. Use only its resolved `workspace_document`, `report_root`,
+and `ref_root` for work-unit paths. Do not derive a plan, report, history, task, or ref
+path from the built lot.
+
+#### Retry inputs for both forms
+
+On a retry, also give **which of C3.9a–d it was classified as**, and **the path to the failure
    report — the path the failed attempt reported, passed on as it is** — **when there is
    one.** The file carries its *writer's* task and attempt, so a path rebuilt from this
    launch's own numbers names a file that does not exist: an ordinary retry reads its
@@ -1102,10 +1285,6 @@ the workspace. After that block, the message gives these role inputs, and nothin
    `design.review.blocked` proof and complete immutable batch. Pass `-` to
    `attempt-started.sh`. The first Design manifest carries every blocked-batch identity as
    `contract-blocked` or `carried` against the corrected plan.
-
-**It builds its own paths from the lot.** The plan is at `<workspace>/plans/<lot>-plan.md`,
-the repository copy is `plan-publish.sh`'s business, and a past task is read with
-`task-diff.sh` — none of that has to travel in a message any more.
 
 ```
 progress.py session-started <id>
@@ -1158,7 +1337,7 @@ First confirm that the implementer's latest final gate-runner report for this at
 green, says `Gate surface: unchanged`, and reports no repository-status difference. The
 canonical `reports/gate/<op>.json` must account for every real gate line in order; the
 controller cannot replace it with remembered booleans or a copied list.
-**Then record it** — `attempt-succeeded.sh <lot> <N> <that hash> <gate op>`, see
+**Then record it** with the matching ordinary or Correction command in
 *Recording a success* below. **That call is the check**. It consumes the exact logical
 gate after the latest final code-review proof. It refuses a dirty tree, another
 commit, another candidate tree, another gate file or a later code-review boundary.
@@ -1227,8 +1406,19 @@ attempt that has never been nudged, so count only the lines naming THIS attempt.
   1. **Stop its process** — `mcp__twicc__processes_stop`. Silent is not stopped, and
      retiring a session does not stop it. A process that wakes after its replacement has
      started is a second implementer on the same task, committing into the same tree.
-  2. **Preserve and reset** — `attempt-failed.sh <lot> <N> <K> C3.9b`. It may have written
-     code before it went quiet, and the replacement must not find it there.
+  2. **Preserve and reset.** Select from the authenticated attempt owner:
+
+     ```sh
+     # ordinary
+     <workspace>/prompts/construction/attempt-failed.sh <lot> <N> <K> C3.9b
+
+     # Correction
+     <workspace>/prompts/construction/attempt-failed.sh --correction \
+       <built lot> <round> <N> <K> C3.9b
+     ```
+
+     It may have written code before it went quiet, and the replacement must not find
+     it there. Never send a Correction attempt through the ordinary failure closer.
 
      **Always `C3.9b`, and never `C3.9a`**, whatever the plan holds. `C3.9a` means *the
      design was sound*, and only its checker can say that. **A `### Design` block that is
@@ -1247,11 +1437,60 @@ attempt that has never been nudged, so count only the lines naming THIS attempt.
 ### C3.8 · When it fails
 
 The implementer keeps its attempt and reports. **You do the git work, with one call**,
-carrying the classification the implementer gave you:
+carrying the classification the implementer gave you. Select from the authenticated
+attempt owner, never from the lot spelling.
+
+#### Ordinary failure
 
 ```sh
 <workspace>/prompts/construction/attempt-failed.sh <lot> <N> <K> <C3.9a|b|c|d>
 ```
+
+#### Correction failure
+
+```sh
+<workspace>/prompts/construction/attempt-failed.sh --correction \
+  <built lot> <round> <N> <K> <C3.9a|b|c|d>
+```
+
+That closer publishes or resumes the nested diagnostic checkout and its schema-2 manifest.
+If its tail needs recovery, rerun only:
+
+```sh
+<workspace>/prompts/construction/diagnostic-open.sh --correction <built lot> <round> <N> <K>
+```
+
+Never use the ordinary diagnostic form for a Correction task. The pseudocode and every
+unqualified command in the remainder of this section are **ordinary-only**.
+
+#### Correction final-checker contract-map continuation
+
+A Correction failure that accepts one final Design or code checker obligation prints:
+
+```text
+NEXT <workspace>/prompts/construction/final-checker-contract-map.sh <built lot> <round>
+```
+
+Run exactly that two-argument command. Do not read
+`final-checker-contract-map-in-progress`. Do not copy or reconstruct its private
+`operation`. The helper selects and authenticates the one exact retained owner.
+
+Before document publication, the command prints
+`FINAL CHECKER CONTRACT MAP DOCUMENT UPDATE REQUIRED`, followed by one canonical JSON
+account. Use only that account. In its exact `target_task` section of `artifact`, replace
+the single `Consumes final-checker obligations:` line with the exact public `replacement`
+string. This consumes every and only `obligation_ids` required on that task. Change no
+other controller, task, Design, Disagreement, coverage or dependency byte.
+
+Rerun only the exact command in the account's `continue` array. The same two-argument
+route resumes after output loss and after every document-copy, document-commit,
+`correction.round.revised`, baseline, `final-checker.contract-mapped` or marker-cleanup
+prefix. It never uses an ordinary plan, ref, task or gate.
+
+If it prints `BASELINE REQUIRED`, return to **Establish the exact Correction baseline**.
+Complete only that gate. Then rerun the same two-argument map command. Start no new
+attempt before `FINAL CHECKER CONTRACT MAPPED` is durable and the helper removes its
+exact owner. A rerun after a lost terminal output completes only the remaining cleanup.
 
 Before this closer runs, settle every current `document-copy-in-progress`,
 `spec-commit-in-progress`, `amendment-commit-in-progress` or
@@ -1358,12 +1597,21 @@ their files may be absent. Always call both helpers. Empty stdout is valid absen
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.
 
+For a Correction diagnosis, also give the exact diagnostic manifest printed by the
+failure closer. The diagnostic must use `construction-diagnostic-task-show` for every
+prior accepted task. Do not give it an ordinary `task-diff.sh` fallback.
+
 ```
 progress.py subagent-started diagnostic --task <N>
 progress.py note bound.spent --task <N> --text "diagnostic ran - once per task"
 progress.py subagent-ended diagnostic --task <N> --data '{"classification":"<C3.9a|b|c|d>"}'
 progress.py note verdict.consumed --task <N> --data '{"check":"diagnostic","outcome":"<C3.9a|b|c|d>"}' --text-file "$JOURNAL_TEXT_FILE"
 ```
+
+On the Correction branch, the controller retains `bwr.lot=<built>` and
+`bwr.correction=<round>` for all four calls. The derived schema-2 identity freezes the
+failure proof, manifest, nested try ref, worktree, physical call, spend, terminal and
+consumed verdict. Do not put the round in caller-supplied `--data`.
 
 An errored, empty or unusable diagnostic closes its physical bracket first:
 `progress.py subagent-ended diagnostic --task <N> --data
@@ -1425,6 +1673,9 @@ instead of from nothing.
 <workspace>/prompts/construction/diagnostic-close.sh <lot> <N> <K>
 ```
 
+For Correction, close only with
+`diagnostic-close.sh --correction <built lot> <round> <N> <K>`.
+
 It rebuilds the path from the same three values `attempt-failed.sh` used, so you do not
 have to have kept it. **Call it every time**: an attempt that left the tree untouched had
 nothing to preserve and opened no worktree, and the script says so instead of failing.
@@ -1441,8 +1692,43 @@ git worktree remove --force <tmp>    # never opened — an untouched attempt —
 The attempt itself stays readable on its `try-<K>` ref. Leave the worktree open and
 they pile up, one per failure, until `git worktree list` is unreadable.
 
-For **C3.9c** and **C3.9d**, reset the tree **and take the refs of every task going back
-to work out of the way**, before launching anything:
+For an ordinary **C3.9c** or **C3.9d**, select the ordinary rewind from the authenticated
+failure and attempt authority. For a Correction Round, **C3.9c** selects the Correction
+rewind below. A Correction **C3.9d** does not use either rewind form. It consumes the
+exact failure proof through its structural Correction terminal and continues only through
+that terminal's escalation successor. Never select any route from the lot spelling.
+
+For a Correction **C3.9d**, follow only the exact `NEXT` printed by the failure closer:
+
+```sh
+<workspace>/prompts/construction/correction-round-escalate.sh \
+  <built lot> <round> <failure proof>
+```
+
+Before the fresh call, read
+`<workspace>/prompts/construction/correction-escalation-format.md` in full. Write its one
+canonical schema-1 artifact. Perform its bounded self-review once. The failure proof is
+the exact `attempt.failed` proof printed by the closer. The helper owns immutable object
+publication, the `correction.round.escalated` terminal, final-checker map cleanup, and its
+marker cleanup.
+
+After output loss or compaction, do not reconstruct the failure proof. Resume every
+retained prefix only with:
+
+```sh
+<workspace>/prompts/construction/correction-round-escalate.sh <built lot> <round>
+```
+
+The helper reads and authenticates its marker internally. Never read, copy, infer,
+replace or remove that marker. This route never runs Correction rewind, bounded revision,
+ordinary plan or C2 work, Product Review, delivery, or `lot.built`. C3.9d is the only
+structural escalation route. Follow only the structural successor printed after its
+terminal.
+
+#### Ordinary rewind
+
+Reset the tree **and take the refs of every task going back to work out of the way**
+before launching anything:
 
 ```sh
 <workspace>/prompts/construction/rewind.sh <lot> <K> <N> "<subject for the re-land commit>"
@@ -1451,7 +1737,7 @@ to work out of the way**, before launching anything:
 **The subject is yours, in the project's own conventions** — the re-land commit stays on
 the branch, and it is made only when the rewind removed controller commits to re-land.
 
-*It runs the equivalent of:*
+*The following pseudocode is ordinary-only:*
 
 ```sh
 # the whole plan — base, refs to move, commits to re-land — is written to
@@ -1516,8 +1802,34 @@ holds the plan, and the next task commit republishes it.
 **Say it in your report when the count is not zero** — a decision that was taken off the
 branch and put back is worth one line.
 
-For **C3.9d**, the decomposition changed, so rewrite the plan in the workspace, copy it,
-and commit it — exactly as at the end of C1.
+#### Correction rewind
+
+Use this form only for a Correction **C3.9c**. Use only the complete Correction identity
+and the exact durable failure proof:
+
+```sh
+<workspace>/prompts/construction/rewind.sh --correction \
+  <built lot> <round> <earliest task K> <next attempt> <failure proof>
+```
+
+`<next attempt>` is the accepted success of the **first moved task** plus one. It
+does not come from the task that carries the failure. For example, if Task 1
+succeeded at attempt 2, Task 2 fails at attempt 1, and Task 1 is the first moved
+task, pass `3`, not `2`. Each other moved task derives its own next attempt ordinal
+from its own accepted success. It does not reuse `<next attempt>`.
+
+The proof is the exact current `attempt.failed` proof printed by the failure route. The
+helper authenticates the moved suffix, current execution authority, final-checker set,
+and next attempt. Follow only the continuation it prints. If it prints
+`BASELINE REQUIRED`, return to the exact Correction baseline selector, complete that
+gate, then rerun the same Correction rewind command. Do not start an attempt between
+those calls. The Correction form takes **no re-land subject**. Never invent or pass the
+ordinary subject. If it publishes a structural Correction terminal, continue only
+through that terminal's own escalation successor.
+
+For an ordinary **C3.9d**, the decomposition changed. Rewrite the plan in the workspace,
+copy it, and commit it exactly as at the end of C1. A Correction **C3.9d** never enters
+ordinary C1. It follows only the structural Correction terminal named above.
 
 ### After a C3.9c, the later tasks are rebuilt
 
@@ -1539,10 +1851,30 @@ would carry code written against a task that no longer exists.
 
 ### Recording a success
 
+Select the form from the authenticated attempt owner, never from the lot spelling.
+
+#### Ordinary success
+
 ```sh
 <workspace>/prompts/construction/attempt-succeeded.sh \
   <lot> <N> <the reported commit> <final gate op>
 ```
+
+#### Correction success
+
+```sh
+<workspace>/prompts/construction/attempt-succeeded.sh --correction \
+  <built lot> <round> <N> <the reported commit> <final gate op>
+```
+
+The Correction closer consumes the exact Correction attempt, manifest, final-checker
+authority and gate. It publishes only the nested Correction stable ref and success
+terminal. It never falls back to the ordinary ref namespace.
+
+The refusal table below applies to both work-unit forms. Every literal command without
+`--correction` in that table is **ordinary-only**. For a Correction attempt, use the
+matching `--correction <built lot> <round> <N> <K> ...` failure or retry form against the
+same authenticated attempt owner. Never translate a Correction ref into an ordinary ref.
 
 This closer has the same controller-operation precondition as failure. It refuses all
 four markers before both its fresh path and its already-recorded task-ref tail. Settle
@@ -1557,13 +1889,13 @@ route has run:**
 | the call's task does not match the attempt in flight | **the identity file names the attempt that was started** — `attempt-in-flight`, written by the start script. The recording takes the attempt's own identity: recheck which task this session was, and rerun with it. |
 | the attempt was never marked as started | **your own launch order broke**, and nothing can attribute what sits on the branch — a mark cannot be taken after the fact. Stop and take it to the human, as you would a tree that is not yours. |
 | the tree is not clean, or the final gate does not prove the exact commit tree | the task is not finished. **Any content repair returns to the code checker and opens a new logical final gate before `--amend`.** A path it does not recognise as its own is reported and never committed or removed. A second refused `Done` ends the attempt. The final gate proof is either a clean checker verdict or the complete round-10 resolution with no accepted defect. |
-| `HEAD` is still the attempt's own starting mark | **the task delivered nothing**, whatever it reported. End it — `attempt-failed.sh <lot> <N> <K> C3.9b` records the failure and preserves nothing, since there is nothing — retire it `failed`, launch a fresh attempt. |
+| `HEAD` is still the attempt's own starting mark | **the task delivered nothing**, whatever it reported. End it through the authenticated owner: ordinary uses `attempt-failed.sh <lot> <N> <K> C3.9b`; Correction uses `attempt-failed.sh --correction <built lot> <round> <N> <K> C3.9b`. The closer records the failure and preserves nothing, since there is nothing. Retire it `failed`, then launch a fresh attempt. |
 | the reported value is not a commit | a garbled report, not a bad state: **ask the live session again** — `git rev-parse HEAD` — and rerun this call. |
 | `HEAD` is not the commit that was reported | the report and the branch disagree — nothing more is proved yet. **Read `attempt-base..HEAD` before choosing**: **exactly one commit, the implementer's own** → the branch is right and the report is wrong — a garbled hash, not a bad state: ask the live session again, `git rev-parse HEAD`, and rerun this call, as the row above does; **several commits, all the implementer's** → it committed more than once and reported an early one — the last row's route; **any commit that is not the implementer's** → **a foreign commit is on the branch: stop and ask the human**, as C0.1 does. |
 | the commit does not carry the plan copy, or carries a stale one | **the write set is the code AND the refreshed plan copy**. Send it back once through the complete code-checker, pre-gate publication, staging and fresh final-gate boundary before `--amend`. A second refusal ends the attempt. |
 | the workspace or committed plan has a different whole-plan ownership projection from the attempt's frozen line 2 | **the implementer changed controller-owned plan bytes.** Do not publish or accept it. Restore them. If the plan truly must change, fail the attempt and take the controller-owned re-cut route; only its plan commit establishes new authority. |
 | the task's own ref already exists | **a validated ref never moves — and the script settles this first, before it requires the identity.** This closer has no journal note and no pending marker, so the ref is its only completion proof: **equal to the reported commit, the recording completed and only its output was lost** — the script answers `already recorded`, clears a matching stale identity, and what remains is yours: retire the implementer and advance, never rerun anything. A ref that differs refuses: the task number is wrong, or the report is — check which task you meant. A rebuilt task has no ref to collide with; the rewind took it out of the way. |
-| more than one commit since that mark | **the task broke *one task, one commit*** — a rewind reads any commit not at a task ref as the controller's and re-lands it, so half a task would come back from the dead. The attempt cannot repair this — a reset is not the implementer's to make. Route it as a failed attempt, classification `C3.9a` — its design was closed by its checker — `attempt-failed.sh` preserves the commits on the try ref and puts the branch back to the mark; the next attempt implements the design again, in one commit. |
+| more than one commit since that mark | **the task broke *one task, one commit*** — a rewind reads any commit not at a task ref as the controller's and re-lands it, so half a task would come back from the dead. The attempt cannot repair this — a reset is not the implementer's to make. Route it as `C3.9a`: ordinary uses `attempt-failed.sh <lot> <N> <K> C3.9a`; Correction uses `attempt-failed.sh --correction <built lot> <round> <N> <K> C3.9a`. The authenticated closer preserves the commits on its own try ref and returns to its own mark. The next attempt implements the accepted design again in one commit. |
 
 The **missing start marker** row is a non-routine human judgement. Before its widget, use
 `SKILL.md`'s **human-judgment presentation rule** with a workflow orientation. Name the
@@ -1641,19 +1973,41 @@ Read what it is asking, and answer in one of three ways:
   each one to its matching first checker. If the blocker note is absent, do not edit the
   plan or close the attempt yet.
 
-  1. **Fix the plan yourself**, in the workspace copy. You wrote it: a silence is yours to
-     fill, a contradiction yours to resolve. **This gesture exists nowhere else** — a
-     failed attempt says nothing about the plan, so no failure route corrects it.
-     **Classify what you had to change: C3.9b if the task's own section was at fault,
-     C3.9d if it reached the decomposition or an interface.** On a C3.9d, stop after
-     classifying: the routing rewrites and recommits the plan itself, and you are not
-     doing it twice.
+  1. **Classify the controller-contract defect by work-unit form.** You wrote the
+     controller contract. Its silence or contradiction is yours to resolve. A failed
+     attempt says nothing about that contract, so no failure route corrects it.
+
+     #### Ordinary plan
+
+     Fix the plan in the workspace copy. Classify the change as C3.9b when the current
+     task's own section was at fault. Classify it as C3.9d when the decomposition or an
+     interface was at fault. On C3.9d, stop after classifying. Its routing rewrites and
+     recommits the plan, so do not do that work twice.
+
+     #### Correction artifact
+
+     Classify a bounded defect in the current task or later unopened tasks as C3.9b. Do
+     not edit an ordinary plan. Do not edit the canonical Correction artifact while the
+     attempt remains active. Close the attempt and retire its implementer first. Step 4
+     owns the exact artifact edit and revision.
+
+     A defect in the decomposition or an interface is C3.9d. Do not change the artifact
+     through the bounded revision route. C3.9d remains the only structural escalation
+     route.
   2. **Preserve and reset, exactly as a failed attempt**, before anything else is
      launched:
 
      ```sh
+     # ordinary
      <workspace>/prompts/construction/attempt-failed.sh <lot> <N> <K> <C3.9b|C3.9d>
+
+     # Correction
+     <workspace>/prompts/construction/attempt-failed.sh --correction \
+       <built lot> <round> <N> <K> <C3.9b|C3.9d>
      ```
+
+     Select from the authenticated attempt owner. Never send the Correction blocker
+     through the ordinary failure closer.
 
      A frozen-task-contract Design finding already has one exact
      `design.review.blocked` note from the implementer. A code finding against the
@@ -1670,10 +2024,13 @@ Read what it is asking, and answer in one of three ways:
      script records the first, the retirement records the second, and they are allowed to
      say different things.*
 
-  4. **Publish a C3.9b controller-contract correction before the retry.** This step
-     applies when step 1 changed controller-owned task bytes. After the failure closer
-     removes `attempt-in-flight`, commit the exact corrected workspace plan through its
-     existing controller boundary:
+  4. **Publish a C3.9b controller-contract correction before the retry.** Select exactly
+     one form from the authenticated work unit. This step does not replace C3.9d.
+
+     #### Ordinary controller-contract correction
+
+     After the failure closer removes `attempt-in-flight`, commit the exact corrected
+     workspace plan through its existing controller boundary:
 
      ```sh
      <workspace>/prompts/construction/plan-commit.sh <lot> "<subject>"
@@ -1685,8 +2042,34 @@ Read what it is asking, and answer in one of three ways:
      can precede `attempt-started.sh` for the replacement. Never restore the old
      committed controller bytes to make the start pass.
 
-     This step does not replace the C3.9d route. C3.9d still performs its existing
-     re-cut, plan commit, C2 proof, rewind, and baseline sequence.
+     #### Correction controller-contract revision
+
+     After the failure closer and the exact `superseded` retirement, edit only the
+     canonical Correction artifact. Change only the current task or later unopened
+     tasks. Do not change an accepted or preserved task. Use the earliest changed task as
+     `<from task>`. Then run only:
+
+     ```sh
+     <workspace>/prompts/construction/correction-round-revise.sh \
+       <built lot> <round> <from task>
+     ```
+
+     The helper records the closed semantic reason `task-contract-correction`. No
+     caller-supplied text participates in its owner identity. If the helper prints
+     `BASELINE REQUIRED`, run only:
+
+     ```sh
+     <workspace>/prompts/construction/correction-round-baseline.sh <built lot> <round>
+     ```
+
+     Finish that exact Correction baseline. Then use the resume-table row and rerun only
+     `correction-round-revise.sh <built lot> <round>`. On every retained revision prefix,
+     the controller supplies no task or reason. Never parse or remove its marker.
+
+     Wait for `CORRECTION ROUND REVISED`, every required baseline, and marker cleanup.
+     Only then may `attempt-started.sh --correction` launch the replacement. This bounded
+     Correction route uses no ordinary plan, C2, task-0 or ordinary ref. It does not
+     enter C3.9d. C3.9d remains the only structural escalation route.
 
   **Then go to C3.9 with that classification and follow it as written**, and nothing of it
   is repeated here — the rewind that takes the earlier tasks and their refs out of the way
@@ -1778,16 +2161,55 @@ invent a product surface.
 `reset --hard` leaves those where they are. The script removes them and lists what it
 removed. It leaves ignored paths alone, which is how the workspace survives its own abort.
 
-**`SKILL.md` puts the tree back with one call, and this mode is what fills its arguments:**
+**`SKILL.md` puts the tree back with one call.** Select from the authenticated current
+attempt owner. Never select from the lot spelling.
+
+#### Ordinary active-attempt stop
 
 ```sh
 <workspace>/prompts/common/stop.sh pause <lot> <N> <K>     an implementer was alive
 <workspace>/prompts/common/stop.sh abort <lot> <N> <K>     the same, aborting
+```
+
+#### Correction active-attempt stop
+
+```sh
+<workspace>/prompts/common/stop.sh pause --correction <built lot> <round> <N> <K>
+<workspace>/prompts/common/stop.sh abort --correction <built lot> <round> <N> <K>
+```
+
+The Correction form preserves and closes only the exact nested attempt owner. It keeps
+the complete Correction retry and final-checker authority. It never uses the ordinary
+attempt ref namespace.
+
+After that exact terminal, retire the same physical Correction implementer through its
+derived status:
+
+```sh
+# pause -> the paused attempt is replaced by a later physical attempt
+python3 <workspace>/prompts/common/progress.py session-retired <implementer id> superseded --archive --hide
+
+# abort -> the assignment is cancelled and has no resume
+python3 <workspace>/prompts/common/progress.py session-retired <implementer id> cancelled --archive --hide
+```
+
+Never use `cancelled` for a paused Correction implementer. Never use `superseded` for an
+aborted Correction implementer. The runtime derives this status from the exact durable
+`paused` or `aborted` terminal.
+
+#### No attempt in flight
+
+Keep the existing bare stop. The controller's current durable context selects the
+ordinary or Correction between-attempt account:
+
+```sh
 <workspace>/prompts/common/stop.sh pause                   nothing in flight
 <workspace>/prompts/common/stop.sh abort
 ```
 
-*It runs the equivalent of:*
+Never add `--correction` to this bare form.
+
+*The following pseudocode is ordinary-only:*
 
 ```sh
 # pause — preserve whatever the attempt holds: the commit only if anything is
@@ -1816,8 +2238,8 @@ progress.py note aborted --task <N> --data '{"sha":"<sha>","attempt":<K>}'
 attempt. Report both.
 
 **A diagnostic worktree that was open rides through a pause** — its path is rebuilt from
-the lot, the task and the attempt, and a resumed diagnosis finds it where it was. **On an
-abort, close it**: `diagnostic-close.sh <lot> <N> <K>` — a registered checkout is the one
+the complete ordinary or Correction identity, and a resumed diagnosis finds it where it
+was. **On an abort, close it** with the matching ordinary or `--correction` form — a registered checkout is the one
 thing the abort's reset and clean cannot reach, and nothing after the abort comes back
 for it. **After the stop's wait step, as everything here**: a diagnostic still reading
 that checkout must have ended — returned, or errored out — before its input is removed
@@ -1827,14 +2249,58 @@ from under it.
 
 ## Leaving construction
 
-1. Check every task has its git ref and the tree is clean.
-2. Report to the human: what was built, and how many attempts.
+Select the exit from the authenticated terminal authority. Never select it from the lot
+spelling.
+
+#### Ordinary lot
+
+1. Check every ordinary task has its git ref and the tree is clean.
+2. Report what was built and how many attempts:
 
    ```
    progress.py note lot.built --data '{"tasks":<N>,"attempts":<M>}'
    ```
 3. **Do not delete the refs.** PRODUCT REVIEW and the sub-lots still use them.
 4. Go to **MODE PRODUCT REVIEW**.
+
+#### Built or resolved Correction terminal
+
+For an active round with every task accepted, require the exact current Correction
+resolver account, an empty canonical final-checker set, and a clean tree. Close only
+through:
+
+```sh
+python3 <workspace>/prompts/construction/correction_round_built.py <built lot> <round>
+```
+
+This helper publishes or resumes the one `correction.round.built` terminal. A durable
+`correction.round.resolved` already owns the same Product-only exit. Never append
+`lot.built`. After the exact terminal marker cleanup, run:
+
+```sh
+<workspace>/prompts/construction/correction-round-restore.sh <built lot> <round>
+```
+
+This one helper authenticates either exact terminal. It restores missing or changed
+canonical artifact bytes from the terminal's immutable object. Rerun only this command
+after interruption. Then enter the exact Product successor. Perform the documented
+controller annotation update before one minimal `pass.opened`. Neither terminal enters
+delivery directly.
+
+#### Structural Correction terminal
+
+A durable `correction.round.escalated` does not run the built helper and does not append
+`lot.built`. Select its exact `ordinary`, `post-amendment-return`, or
+`retained-authority-rewind` producer. Resume only that producer's **own structural
+successor**: one exact `sublot.allocated`, one exact `sublot.opened`, a plan that maps
+every carried final-checker obligation, the mechanical
+`construction-plan-publication-check <sub-lot> <task count>`, then the official
+`plan-commit.sh <sub-lot> "<subject>"` call. The plan helper reruns and binds the same
+mechanical check before publication.
+
+At a partial successor, derive the earliest missing boundary from the durable journal.
+Do not repeat allocation, opening or `plan.written`. Never create a second successor,
+reopen the Correction Round, enter Product, enter delivery or use the ordinary lot exit.
 
 ---
 

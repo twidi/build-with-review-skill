@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Closes the diagnostic worktree that attempt-failed.sh opened.
 #
-# It rebuilds the path from the same three values, so nobody has to carry it
-# across turns — and a path printed twenty messages ago is exactly what a
+# It rebuilds the path from the same ordinary or Correction identity, so
+# nobody has to carry it across turns — and a path printed twenty messages ago is exactly what a
 # compaction takes away.
 #
 # --force: the worktree is disposable by construction, and a reader who left a
@@ -15,8 +15,20 @@ die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 [ -e "$REPO/.git" ] || die "$REPO is not a git repository"
 source "$WORKSPACE/prompts/common/disposable-worktree.sh"
 
-[ $# -eq 3 ] || die "3 arguments expected, $# given — usage: diagnostic-close.sh <lot> <task N> <attempt K>"
-LOT=$1 N=$2 K=$3
+CORRECTION=
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    [ $# -eq 4 ] || die "4 arguments expected after --correction, $# given — usage: diagnostic-close.sh --correction <built> <round> <task N> <attempt K>"
+    LOT=$1 CORRECTION=$2 N=$3 K=$4
+    [[ $CORRECTION =~ ^[1-9][0-9]*$ ]] \
+        || die "the Correction round must be a positive integer without leading zeros, got \`$CORRECTION\`"
+    MANIFEST="reports/construction/$LOT/correction-$CORRECTION/task-$N-attempt-$K-diagnostic.json"
+    "$WORKSPACE/prompts/common/progress.py" construction-diagnostic-account \
+        "$MANIFEST" >/dev/null
+else
+    [ $# -eq 3 ] || die "3 arguments expected, $# given — usage: diagnostic-close.sh <lot> <task N> <attempt K>"
+    LOT=$1 N=$2 K=$3
+fi
 [[ $LOT =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "the lot must read lot-<N> or lot-<N>.<M> — positive integers, no leading zeros — got \`$LOT\`"
 [[ $N =~ ^[1-9][0-9]*$ ]] || die "the task number must be a positive integer without leading zeros, got \`$N\`"
 [[ $K =~ ^[1-9][0-9]*$ ]] || die "the attempt number must be a positive integer without leading zeros, got \`$K\`"
@@ -25,7 +37,11 @@ LOT=$1 N=$2 K=$3
 # run, so neither another repository's checkout nor another feature's can ever
 # be the path this removes.
 disposable_ground_prepare "$REPO"
-TMP="$DISPOSABLE_GROUND/bwr-$(basename "$WORKSPACE")-$LOT-task-$N-try-$K"
+if [ -n "$CORRECTION" ]; then
+    TMP="$DISPOSABLE_GROUND/bwr-$(basename "$WORKSPACE")-$LOT-correction-$CORRECTION-task-$N-try-$K"
+else
+    TMP="$DISPOSABLE_GROUND/bwr-$(basename "$WORKSPACE")-$LOT-task-$N-try-$K"
+fi
 
 cd "$REPO"
 

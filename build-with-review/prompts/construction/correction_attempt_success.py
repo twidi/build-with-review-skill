@@ -178,19 +178,45 @@ def ensure_no_foreign_owner():
             refuse(f"another workflow owner is unfinished: {name}")
 
 
+def with_resolved_work_unit(resolved, callback, *args, **kwargs):
+    active = progress.CORRECTION_RESOLVED_WORK_UNITS.get()
+    token = progress.CORRECTION_RESOLVED_WORK_UNITS.set((*active, resolved))
+    try:
+        return callback(*args, **kwargs)
+    finally:
+        progress.CORRECTION_RESOLVED_WORK_UNITS.reset(token)
+
+
 def close_owned(args, lease, operation):
     ensure_no_foreign_owner()
-    try:
-        resolved = resolve_correction(args.built, args.round, args.task)
-    except (OSError, ValueError) as exc:
-        refuse(str(exc))
-    stable_ref = f"{resolved['ref_root']}/task-{args.task}"
+    canonical_ref_root = (
+        f"refs/bwr/{WORKSPACE.name}/{args.built}/correction-{args.round}"
+    )
+    stable_ref = f"{canonical_ref_root}/task-{args.task}"
     stable_result = run(
         "git", "-C", str(REPO), "rev-parse", "--verify", f"{stable_ref}^{{commit}}",
         check=False,
     )
     stable = stable_result.stdout.strip() if stable_result.returncode == 0 else None
     marker_path = WORKSPACE / "attempt-in-flight"
+    recovery_token = None
+    if marker_path.exists() and stable is not None:
+        active_recoveries = progress.CORRECTION_SUCCESS_RECOVERIES.get()
+        recovery_token = progress.CORRECTION_SUCCESS_RECOVERIES.set((
+            *active_recoveries, {
+                "built": args.built, "round": args.round, "task": args.task,
+                "commit": stable, "resolved": {"ref_root": canonical_ref_root},
+            },
+        ))
+    try:
+        resolved = resolve_correction(args.built, args.round, args.task)
+    except (OSError, ValueError) as exc:
+        refuse(str(exc))
+    finally:
+        if recovery_token is not None:
+            progress.CORRECTION_SUCCESS_RECOVERIES.reset(recovery_token)
+    if resolved.get("ref_root") != canonical_ref_root:
+        refuse("the resolved Correction Round changed its canonical stable ref root")
 
     if not marker_path.exists():
         if stable is None:
@@ -198,7 +224,8 @@ def close_owned(args, lease, operation):
         reported = git_output("rev-parse", "--verify", f"{args.commit}^{{commit}}")
         if reported != stable:
             refuse("the stable correction task ref never retargets")
-        validate_recorded_success(
+        with_resolved_work_unit(
+            resolved, validate_recorded_success,
             progress.journal_entries(), args.built, args.round, args.task, stable, args.gate,
         )
         print(f"correction-task-{args.task} {stable} (already recorded)")
@@ -208,14 +235,31 @@ def close_owned(args, lease, operation):
     attempt = marker.get("attempt") if isinstance(marker, dict) else None
     if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
         refuse("the correction attempt marker has no positive attempt identity")
-    identity = progress.active_attempt_identity({
-        "lot": args.built, "correction": args.round, "task": args.task, "attempt": attempt,
-    }, "the correction attempt success", include_completion=True)
-    entries = progress.journal_entries()
-    account = progress.correction_attempt_succeeded_account(
-        entries, len(entries), identity, args.commit, args.gate,
-        "the correction attempt success",
-    )
+    recovery_token = None
+    if stable is not None:
+        active_recoveries = progress.CORRECTION_SUCCESS_RECOVERIES.get()
+        recovery_token = progress.CORRECTION_SUCCESS_RECOVERIES.set((
+            *active_recoveries, {
+                "built": args.built, "round": args.round, "task": args.task,
+                "commit": stable, "resolved": resolved,
+            },
+        ))
+    try:
+        identity = with_resolved_work_unit(
+            resolved, progress.active_attempt_identity, {
+                "lot": args.built, "correction": args.round, "task": args.task,
+                "attempt": attempt,
+            }, "the correction attempt success", include_completion=True,
+        )
+        entries = progress.journal_entries()
+        account = with_resolved_work_unit(
+            resolved, progress.correction_attempt_succeeded_account,
+            entries, len(entries), identity, args.commit, args.gate,
+            "the correction attempt success",
+        )
+    finally:
+        if recovery_token is not None:
+            progress.CORRECTION_SUCCESS_RECOVERIES.reset(recovery_token)
 
     if stable is None:
         commit = authenticate_candidate(resolved, identity, args.commit, args.gate)
@@ -232,9 +276,13 @@ def close_owned(args, lease, operation):
         if reported != stable:
             refuse("the stable correction task ref never retargets")
         account["sha"] = stable
+        verdict_index, _logical = progress.correction_success_code_logical(
+            entries, len(entries), identity, "the correction attempt success recovery",
+        )
         gate_result = run(
-            "bash", str(HERE / "gate-check.sh"), "require-task", args.gate, args.built,
-            str(args.task), str(attempt), stable, str(args.round), check=False,
+            "bash", str(HERE / "gate-check.sh"), "require-task-history", args.gate,
+            args.built, str(args.task), str(attempt), stable,
+            progress.journal_line_proof(verdict_index), str(args.round), check=False,
         )
         if gate_result.returncode != 0:
             refuse("the stable correction task ref has no matching final gate")
@@ -244,20 +292,38 @@ def close_owned(args, lease, operation):
     if len(matches) > 1:
         refuse("the correction task has duplicate success terminals")
     if matches:
-        progress.validate_attempt_succeeded_entry(entries, matches[0][0], matches[0][1])
+        with_resolved_work_unit(
+            resolved, progress.validate_attempt_succeeded_entry,
+            entries, matches[0][0], matches[0][1],
+        )
     else:
-        append_success(account, args.task, lease, operation)
+        active_recoveries = progress.CORRECTION_SUCCESS_RECOVERIES.get()
+        recovery_token = progress.CORRECTION_SUCCESS_RECOVERIES.set((
+            *active_recoveries, {
+                "built": args.built, "round": args.round, "task": args.task,
+                "commit": stable, "resolved": resolved,
+            },
+        ))
+        try:
+            with_resolved_work_unit(
+                resolved, append_success, account, args.task, lease, operation,
+            )
+        finally:
+            progress.CORRECTION_SUCCESS_RECOVERIES.reset(recovery_token)
     remove_exact_marker(marker_path, marker_payload)
     print(f"correction-task-{args.task} {stable}")
 
 
 def close(args):
     operation = operation_identity(args)
+    cache_token = progress.CORRECTION_CONTRACT_STATE_CACHE.set({})
     try:
         with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
             close_owned(args, lease, operation)
     except (OSError, ValueError) as exc:
         refuse(str(exc))
+    finally:
+        progress.CORRECTION_CONTRACT_STATE_CACHE.reset(cache_token)
 
 
 def main():

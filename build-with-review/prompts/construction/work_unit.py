@@ -93,10 +93,23 @@ def correction_opening(entries, built, round_number):
     return index, normalized
 
 
-def resolve_correction(built, round_number, task=None):
+def resolve_correction(
+        built, round_number, task=None, *, allow_active_amendment=False,
+        include_rewind_recoveries=False,
+):
     unit = normalize_work_unit({"kind": "correction", "built": built, "round": round_number})
     entries = progress.journal_entries()
     correction_opening(entries, built, round_number)
+    owner = progress.current_correction_amendment_owner(
+        entries, len(entries), built, round_number, "the resolved Correction Round",
+    )
+    if allow_active_amendment:
+        if owner is None:
+            raise ValueError("the Correction return has no active AMENDMENT owner")
+    elif owner is not None:
+        raise ValueError(
+            "the resolved Correction Round follows an unconsumed Correction AMENDMENT"
+        )
     state = progress.current_correction_contract_state(
         entries, len(entries), built, round_number, "the resolved Correction Round",
     )
@@ -114,10 +127,19 @@ def resolve_correction(built, round_number, task=None):
         raise ValueError("the current Correction Round artifact changes its latest authority")
     selected = None
     if task is not None:
-        if isinstance(task, bool) or not isinstance(task, int) or task < 1 \
-                or task > len(artifact["tasks"]):
+        if isinstance(task, bool) or not isinstance(task, int) or task < 1:
             raise ValueError("the Correction Round task does not exist")
-        selected = artifact["tasks"][task - 1]
+        selected = next(
+            (candidate for candidate in artifact["tasks"] if candidate["task"] == task),
+            None,
+        )
+        if selected is None:
+            raise ValueError("the Correction Round task does not exist")
+    task_numbers = [candidate["task"] for candidate in artifact["tasks"]]
+    if artifact["task_projection"] is not None:
+        task_numbers.extend(artifact["task_projection"]["preserved"])
+        task_numbers.extend(artifact["task_projection"]["removed"])
+    task_count = max(task_numbers, default=0)
     ref_root = f"refs/bwr/{WORKSPACE.name}/{built}/correction-{round_number}"
     tree_authority = {
         "rewind": state.get("rewind_proof"),
@@ -130,7 +152,7 @@ def resolve_correction(built, round_number, task=None):
         "contract_authority": authority_sha256,
         "tree_authority": tree_authority,
     }
-    return {
+    result = {
         "schema": 1,
         "unit": unit,
         "readable": readable_work_unit(unit),
@@ -148,7 +170,7 @@ def resolve_correction(built, round_number, task=None):
         "report_root": f"reports/construction/{built}/correction-{round_number}",
         "ref_root": ref_root,
         "task_manifest_sha256": artifact["manifest_sha256"],
-        "task_count": len(artifact["tasks"]),
+        "task_count": task_count,
         "controller_sha256": artifact["controller_sha256"],
         "artifact_sha256": artifact["artifact_sha256"],
         "task": selected,
@@ -163,6 +185,13 @@ def resolve_correction(built, round_number, task=None):
             "source_reviewed_commit": artifact["identity"]["source_reviewed_commit"],
         },
     }
+    if include_rewind_recoveries:
+        result["_rewind_success_recoveries"] = \
+            progress.correction_rewind_history_recoveries(
+                entries, len(entries), "the resolved Correction Round rewind history",
+                validated_units={(built, round_number)},
+            )
+    return result
 
 
 def main():
@@ -172,11 +201,15 @@ def main():
     parser.add_argument("round", type=int)
     parser.add_argument("task", type=int, nargs="?")
     args = parser.parse_args()
+    cache_token = progress.CORRECTION_CONTRACT_STATE_CACHE.set({})
     try:
-        resolved = resolve_correction(args.built, args.round, args.task)
-    except (OSError, ValueError) as exc:
-        print(f"**work unit ERROR** · {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        try:
+            resolved = resolve_correction(args.built, args.round, args.task)
+        except (OSError, ValueError) as exc:
+            print(f"**work unit ERROR** · {exc}", file=sys.stderr)
+            raise SystemExit(1)
+    finally:
+        progress.CORRECTION_CONTRACT_STATE_CACHE.reset(cache_token)
     print(json.dumps(resolved, sort_keys=True, separators=(",", ":")))
 
 

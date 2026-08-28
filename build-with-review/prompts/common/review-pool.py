@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Read the exact current SPEC or PRODUCT REVIEW reviewer pool."""
 
+import hashlib
 import json
 import os
+import subprocess
 import sys
+
+from correction_authority import product_pass_generation_account
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +39,7 @@ def read_entries():
     if not os.path.isfile(JOURNAL) or os.path.islink(JOURNAL):
         fail("progress.jsonl is absent or aliased")
     entries = []
+    proofs = []
     with open(JOURNAL, "rb") as source:
         for number, raw in enumerate(source, 1):
             if not raw.endswith(b"\n"):
@@ -46,7 +51,8 @@ def read_entries():
             if not isinstance(entry, dict):
                 fail(f"progress.jsonl line {number} is not an object")
             entries.append(entry)
-    return entries
+            proofs.append(f"{number - 1}:{hashlib.sha256(raw[:-1]).hexdigest()}")
+    return entries, proofs
 
 
 def exact_cap(entries):
@@ -59,7 +65,7 @@ def exact_cap(entries):
     return cap
 
 
-def current_generation(entries, mode):
+def current_generation(entries, proofs, mode):
     if mode == "spec":
         openings = [(index, entry) for index, entry in enumerate(entries)
                     if entry.get("kind") == "round.opened"]
@@ -74,7 +80,7 @@ def current_generation(entries, mode):
                 or len(mandates) != len(set(mandates)) \
                 or any(mandate not in SPEC_MANDATES for mandate in mandates):
             fail("the current SPEC round has a malformed assignment set")
-        return index, tuple(mandates), {"round": round_number}, f"round-{round_number}"
+        return index, tuple(mandates), {"round": round_number}, f"round-{round_number}", None
 
     openings = [(index, entry) for index, entry in enumerate(entries)
                 if entry.get("kind") == "pass.opened"]
@@ -86,7 +92,37 @@ def current_generation(entries, mode):
     built = data(opening).get("built")
     if not isinstance(built, str) or not built:
         fail("the current PRODUCT REVIEW pass has no built lot")
-    return index, PRODUCT_MANDATES, {"lot": built}, built
+    opening_data = data(opening)
+    product_generation = {
+        "proof": proofs[index], "opening": opening_data, "accounts": {},
+    }
+    if opening_data.get("schema") == 2:
+        progress = os.path.join(SCRIPT_DIR, "progress.py")
+        if not os.path.isfile(progress) or os.path.islink(progress):
+            fail("the current PRODUCT REVIEW pass has no real generation projector")
+        for mandate in PRODUCT_MANDATES:
+            projected = subprocess.run(
+                [sys.executable, progress, "product-pass-generation", mandate],
+                cwd=WORKSPACE, capture_output=True, text=True,
+            )
+            if projected.returncode != 0:
+                fail(
+                    f"the current PRODUCT REVIEW pass failed its {mandate} generation projection: "
+                    f"{projected.stderr.strip() or projected.stdout.strip()}"
+                )
+            try:
+                account = json.loads(projected.stdout)
+                expected = product_pass_generation_account(proofs[index], opening_data, mandate)
+            except (ValueError, json.JSONDecodeError) as exc:
+                fail(f"the current PRODUCT REVIEW pass has malformed generation authority: {exc}")
+            if account != expected:
+                fail(f"the current PRODUCT REVIEW pass changes its {mandate} generation account")
+            product_generation["accounts"][mandate] = account
+        account = product_generation["accounts"]["unlooked"]
+        name = f"{built}-c{account['position']}-p{account['pass']}"
+    else:
+        name = built
+    return index, PRODUCT_MANDATES, {"lot": built}, name, product_generation
 
 
 def same_generation(entry, mode, generation):
@@ -95,7 +131,7 @@ def same_generation(entry, mode, generation):
     return all(entry.get(key) == value for key, value in generation.items())
 
 
-def session_records(entries, opening_index, mode, mandates, generation):
+def session_records(entries, opening_index, mode, mandates, generation, product_generation=None):
     records = {}
     for index, entry in enumerate(entries[opening_index + 1:], opening_index + 1):
         if entry.get("event") != "session-started" \
@@ -105,6 +141,14 @@ def session_records(entries, opening_index, mode, mandates, generation):
         mandate = entry.get("mandate")
         if not isinstance(session, str) or not session or mandate not in mandates:
             fail("a current reviewer session has malformed identity")
+        if mode == "product-review":
+            opening_data = product_generation["opening"]
+            if opening_data.get("schema") == 2:
+                account = product_generation["accounts"].get(mandate)
+                if data(entry) != account:
+                    fail(f"the {mandate} reviewer start changes its Product pass generation")
+            elif data(entry):
+                fail(f"the ordinary {mandate} reviewer start adds pass-generation authority")
         if session in records:
             fail(f"reviewer session {session} has duplicate starts")
         records[session] = {
@@ -175,8 +219,18 @@ def receipt_owner(records, mandate, receipt_index, *, forbid_later=True):
     return candidates[0]
 
 
-def exact_product_identity(receipt):
+def exact_product_identity(receipt, generation):
     receipt_data = data(receipt)
+    opening_data = generation["opening"]
+    mandate = receipt.get("mandate")
+    if opening_data.get("schema") == 2:
+        account = generation["accounts"].get(mandate)
+        if any(receipt_data.get(key) != value for key, value in account.items()):
+            fail("a PRODUCT REVIEW receipt changes its pass generation")
+        identity = {**account, "report_sha256": receipt_data.get("report_sha256")}
+        if not isinstance(identity["report_sha256"], str) or not identity["report_sha256"]:
+            fail("a PRODUCT REVIEW receipt has malformed verifier identity")
+        return identity
     identity = {key: receipt_data.get(key)
                 for key in ("pass_commit", "pass_gate", "report_sha256")}
     if any(not isinstance(value, str) or not value for value in identity.values()):
@@ -254,7 +308,7 @@ def spec_state(entries, opening_index, mandates, records, generation):
     return states, continuations, []
 
 
-def product_state(entries, opening_index, mandates, records):
+def product_state(entries, opening_index, mandates, records, generation):
     for mandate in mandates:
         if len(active_for(records, mandate)) > 1:
             fail(f"duplicate active reviewer for {mandate}")
@@ -286,7 +340,7 @@ def product_state(entries, opening_index, mandates, records):
             continue
 
         owner = receipt_owner(records, mandate, receipt_index, forbid_later=False)
-        identity = exact_product_identity(receipt)
+        identity = exact_product_identity(receipt, generation)
         verifier = product_verifier_state(entries, receipt_index, mandate, identity)
         retirement = owner["retirement"]
         if retirement is not None and retirement[1] != "done" and verifier != "complete":
@@ -367,17 +421,21 @@ def main():
     if len(sys.argv) != 2 or sys.argv[1] not in {"spec", "product-review"}:
         fail("usage: review-pool.py spec | product-review")
     mode = sys.argv[1]
-    entries = read_entries()
+    entries, proofs = read_entries()
     cap = exact_cap(entries)
-    opening_index, mandates, generation, name = current_generation(entries, mode)
-    records = session_records(entries, opening_index, mode, mandates, generation)
+    opening_index, mandates, generation, name, product_generation = current_generation(
+        entries, proofs, mode,
+    )
+    records = session_records(
+        entries, opening_index, mode, mandates, generation, product_generation,
+    )
     if mode == "spec":
         states, continuations, unsettled = spec_state(
             entries, opening_index, mandates, records, generation,
         )
     else:
         states, continuations, unsettled = product_state(
-            entries, opening_index, mandates, records,
+            entries, opening_index, mandates, records, product_generation,
         )
     render(mode, name, cap, mandates, states, continuations, unsettled)
 

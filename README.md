@@ -15,7 +15,7 @@ The workflow uses three main modes and one temporary mode:
 
 1. **SPEC** defines product behaviour and divides the feature into ordered lots. Independent mandates review the specification before construction begins.
 2. **CONSTRUCTION** creates a plan for one lot, validates its completeness, and implements it as sequential tasks. Each task passes design review, code review, and the project's complete verification gate before acceptance.
-3. **PRODUCT REVIEW** examines the working product through independent lenses. Confirmed findings become a new sub-lot and return to construction. A clean pass delivers the lot.
+3. **PRODUCT REVIEW** examines the working product through independent lenses. The complete actionable set selects one exclusive construction route. A bounded implementation correction opens a Correction Round on the built unit. A structural correction opens a sub-lot. A clean pass delivers the lot.
 4. **AMENDMENT** handles an answered product decision that changes already-built behaviour. It verifies the change and its reach, updates the specification, and returns control to the interrupted mode.
 
 SPEC mode starts from the [Superpowers `brainstorming` skill](https://github.com/obra/superpowers/blob/main/skills/brainstorming/SKILL.md) for product discovery and design dialogue.
@@ -23,14 +23,15 @@ This currently requires Superpowers to be installed and available as a skill for
 Build With Review then applies its own specification structure and review system.
 (This dependency may change. A future version may integrate only the brainstorming mechanisms that Build With Review needs.)
 
-This cycle continues until every lot is built and a complete product-review pass finds no remaining issue.
+This cycle continues through the selected correction route until every lot is built and a complete product-review pass finds no remaining issue.
 
 ```text
 SPEC -> CONSTRUCTION -> PRODUCT REVIEW
             ^                 |
-            | confirmed       | clean pass
-            | findings        v
-            +----------- new sub-lot / delivered lot
+            | bounded implementation correction -> Correction Round on the built unit
+            | structural correction -> sub-lot
+            | clean pass -> delivered lot
+            +----------------+
 
 Any mode -> AMENDMENT -> interrupted mode
 ```

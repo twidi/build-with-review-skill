@@ -13,6 +13,8 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE / "prompts" / "common" / "review-pool.py"
+CORRECTION_AUTHORITY_SOURCE = HERE / "prompts" / "common" / "correction_authority.py"
+FINAL_CHECKER_SOURCE = HERE / "prompts" / "common" / "final_checker_obligations.py"
 
 
 class ReviewPoolTest(unittest.TestCase):
@@ -24,6 +26,10 @@ class ReviewPoolTest(unittest.TestCase):
         self.script = self.common / "review-pool.py"
         if SOURCE.exists():
             shutil.copyfile(SOURCE, self.script)
+        if CORRECTION_AUTHORITY_SOURCE.exists():
+            shutil.copyfile(CORRECTION_AUTHORITY_SOURCE, self.common / "correction_authority.py")
+        if FINAL_CHECKER_SOURCE.exists():
+            shutil.copyfile(FINAL_CHECKER_SOURCE, self.common / "final_checker_obligations.py")
         self.entries = [
             {"event": "note", "kind": "run.started", "data": {"cap": 3}},
         ]

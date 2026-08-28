@@ -27,6 +27,8 @@ happen. `notes` prints the notes back, and writes nothing.
 The rules for calling this script are in progress-rules.md, next to it.
 """
 import argparse
+import copy
+import contextvars
 import fcntl
 import hashlib
 import importlib.util
@@ -58,22 +60,40 @@ from correction_authority import (
     EMPTY_FINAL_CHECKER_SET_SHA256,
     CorrectionAuthorityLease,
     WorkspaceFileAnchor,
+    content_object_path,
     empty_retry_transition,
     generation_sha256,
     normalize_allocation,
     normalize_controller_successor,
+    product_pass_generation_account,
     product_confirmed_path,
     product_report_path,
     publish_content_object,
     validate_content_object,
 )
+from correction_lifecycle import (
+    AmendmentFacts as CorrectionAmendmentFacts,
+    EntryFacts as CorrectionEntryFacts,
+    ObligationFacts as CorrectionObligationFacts,
+    TaskFacts as CorrectionTaskFacts,
+    TerminalFacts as CorrectionTerminalFacts,
+    admit_amendment as admit_correction_amendment,
+    admit_entry as admit_correction_entry,
+    admit_obligation as admit_correction_obligation,
+    admit_task as admit_correction_task,
+    admit_terminal as admit_correction_terminal,
+    complete_task_count as complete_correction_task_count,
+)
 from final_checker_obligations import (
+    consumer_requirement_for_member as final_checker_consumer_requirement,
     empty_set as empty_final_checker_set,
+    escalation_item_for_member as final_checker_escalation_item,
     materialize_transition as materialize_final_checker_transition,
     set_sha256 as final_checker_set_sha256,
     source_account as final_checker_source_account,
     validate_transition as validate_final_checker_transition,
 )
+from journal_context import CONTEXT_FIELDS
 
 # The two closed vocabularies. An unknown name is refused: a vocabulary that
 # is not enforced is not a vocabulary, and a dashboard cannot count what it
@@ -98,7 +118,8 @@ NOTE_KINDS = {
     "design.review.blocked",
     "code.review.resolved", "code.review.blocked",
     "correction.round.allocated", "correction.round.allocation.superseded",
-    "correction.round.opened", "correction.round.revised", "correction.round.built",
+    "correction.round.opened", "correction.round.revised", "correction.round.rebased",
+    "correction.round.built", "correction.round.resolved", "correction.round.escalated",
     "final-checker.contract-mapped",
 }
 SUBAGENT_KINDS = {
@@ -114,7 +135,28 @@ BATCH_ROUTES = {"closed", "implementation", "sublot", "spec-in-place", "amendmen
 BATCH_CLOSE_OUTCOMES = {"no-correction", "correction", "sublot"}
 DIRECT_AUTHORITY_KINDS = {"ruling.ready", "decision.conflict.ready"}
 PRODUCT_REVIEW_MANDATES = ("unlooked", "user", "meaning", "quality", "coverage")
-AMENDMENT_ORIGINS = {"construction", "product-review"}
+AMENDMENT_ORIGINS = {"construction", "product-review", "correction-round"}
+CORRECTION_SUCCESS_VALIDATIONS = contextvars.ContextVar(
+    "correction_success_validations", default=(),
+)
+CORRECTION_SUCCESS_RECOVERIES = contextvars.ContextVar(
+    "correction_success_recoveries", default=(),
+)
+CORRECTION_REWIND_SUCCESS_RECOVERIES = contextvars.ContextVar(
+    "correction_rewind_success_recoveries", default=(),
+)
+CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION = contextvars.ContextVar(
+    "correction_verdict_history_rewind_projection", default=False,
+)
+CORRECTION_CONTRACT_STATE_CACHE = contextvars.ContextVar(
+    "correction_contract_state_cache", default=None,
+)
+CORRECTION_RESOLVED_WORK_UNITS = contextvars.ContextVar(
+    "correction_resolved_work_units", default=(),
+)
+CORRECTION_AMENDMENT_OWNER_PROJECTION = contextvars.ContextVar(
+    "correction_amendment_owner_projection", default=False,
+)
 AMENDMENT_SECTIONS = (
     "Order and return", "Decisions", "Why", "What it changes",
     "What it preserves", "Where it was raised",
@@ -143,9 +185,8 @@ SPEC_MANDATES = set(SPEC_LATER_MANDATES) | {"scoped"}
 SPEC_FINDING_CLASSES = ("CRITICAL", "IMPORTANT", "MINOR", "DECISION")
 SPEC_STATUS_LINE = re.compile(r"^(?:\*\*|__)?Status(?:\*\*|__)?\s*:", re.IGNORECASE)
 
-# The seven context fields a line may carry. `feature`, `schema` and `status`
-# stay out: they describe the run or the moment, never the event's subject.
-CONTEXT_FIELDS = ("mode", "lot", "correction", "task", "attempt", "round", "mandate", "job")
+# `feature`, `schema` and `status` stay out of the canonical context. They
+# describe the run or the moment, never the event's subject.
 # Canonical key order of a line, after ts/by/event — so the file reads the
 # same by hand from the first line to the last.
 LINE_FIELDS = ("session", "status", "kind") + CONTEXT_FIELDS + ("archived", "hidden", "text", "data")
@@ -191,7 +232,10 @@ CORRECTION_AUTHORITY_NOTE_KINDS = {
     "correction.round.allocation.superseded",
     "correction.round.opened",
     "correction.round.revised",
+    "correction.round.rebased",
     "correction.round.built",
+    "correction.round.resolved",
+    "correction.round.escalated",
     "final-checker.contract-mapped",
     "decision.batch.supplemented",
     "decision.conflict.opened",
@@ -230,6 +274,13 @@ HELPER_OWNED_CORRECTION_NOTE_MARKERS = {
     "aborted": {"correction-attempt-stop-in-progress"},
     "correction.round.opened": {"correction-round-open-in-progress"},
     "correction.round.revised": {"correction-round-revision-in-progress"},
+    "correction.round.rebased": {"correction-amendment-return-in-progress"},
+    "correction.round.resolved": {"correction-amendment-return-in-progress"},
+    "correction.round.escalated": {
+        "correction-amendment-return-in-progress",
+        "correction-round-escalation-in-progress",
+        "correction-rewind-in-progress",
+    },
     "correction.round.built": {"correction-round-built-in-progress"},
     "final-checker.contract-mapped": {"final-checker-contract-map-in-progress"},
     "correction.round.allocation.superseded": {
@@ -241,6 +292,21 @@ HELPER_OWNED_CORRECTION_NOTE_MARKERS["correction.round.revised"].add(
     "final-checker-contract-map-in-progress"
 )
 CORRECTION_VOID_MARKER = "correction-round-void-in-progress"
+CORRECTION_PENDING_OWNER_COMMANDS = {
+    "correction-allocation-supersede-in-progress": "correction-round-supersede.sh",
+    "correction-round-open-in-progress": "correction-round-open.sh",
+    "correction-round-built-in-progress": "correction-round-built.sh",
+    "correction-round-revision-in-progress": "correction-round-revise.sh",
+    "correction-amendment-return-in-progress": "correction-round-rebase.sh",
+    "correction-round-escalation-in-progress": "correction-round-escalate.sh",
+    "correction-attempt-failure-in-progress": "attempt-failed.sh --correction",
+    "correction-rewind-in-progress": "rewind.sh --correction",
+    "correction-attempt-stop-in-progress": "stop.sh <pause|abort> --correction",
+    "final-checker-contract-map-in-progress": "final-checker-contract-map.sh",
+    CORRECTION_VOID_MARKER: "correction-round-void.sh",
+    "correction-product-authority-in-progress": "correction-product-authority.sh",
+    "correction-terminal-restore-in-progress": "correction-round-restore.sh",
+}
 
 
 def fail(what, detail=None, journaled=False):
@@ -1690,6 +1756,9 @@ def construction_run_and_plan(entries, before, lot, subject):
         fail(f"{subject} has no published plan for {lot}")
     plan_index, plan = plans[-1]
     plan_data = note_data(plan)
+    if plan_data.get("schema") == 2 and plan_data.get("origin") == "correction-round":
+        validate_correction_escalation_plan_written_entry(entries, plan_index, plan)
+        return starts[0], (plan_index, plan)
     if plan.get("event") != "note" or plan.get("mode") != "construction" \
             or plan.get("job") != "controller" \
             or not isinstance(plan_data.get("tasks"), int) \
@@ -1768,6 +1837,234 @@ def validate_construction_amendment_source(entries, before, source, subject):
     return source
 
 
+CORRECTION_AMENDMENT_OPENING_KEYS = {
+    "schema", "built", "correction", "correction_authority",
+    "correction_execution_authority_sha256", "return_task", "retry_transition",
+}
+
+
+def correction_amendment_opening_account(
+        entries, before, amendment, built, correction, subject, *, live=False,
+):
+    """Freeze one active Correction Round and suspend its complete retry set."""
+    if not construction_positive_integer(amendment) \
+            or not isinstance(built, str) or not re.fullmatch(
+                r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built,
+            ) or not construction_positive_integer(correction):
+        fail(f"{subject} has a malformed Correction Round return identity")
+    state = current_correction_contract_state(entries, before, built, correction, subject)
+    if any(
+        entry.get("kind") in {
+            "correction.round.built", "correction.round.resolved",
+            "correction.round.escalated",
+        }
+        and note_data(entry).get("built") == built
+        and note_data(entry).get("round") == correction
+        for entry in entries[state["opening_index"] + 1:before]
+    ):
+        fail(f"{subject} follows a terminal Correction Round")
+    require_no_current_correction_stop(entries, before, built, correction, subject)
+    if live:
+        for marker in (
+            "attempt-in-flight", "gate-check-in-progress",
+            "correction-artifact-in-progress",
+            "correction-attempt-failure-in-progress",
+            "correction-attempt-stop-in-progress",
+            "correction-product-authority-in-progress",
+            "correction-round-built-in-progress",
+            "correction-round-revision-in-progress",
+            "correction-rewind-in-progress",
+            "final-checker-contract-map-in-progress",
+            "correction-amendment-return-in-progress",
+            "correction-round-escalation-in-progress",
+        ):
+            if os.path.lexists(os.path.join(WORKSPACE, marker)):
+                fail(f"{subject} crosses the live {marker} owner")
+
+    accepted = accepted_correction_task_entries_at_prefix(
+        entries, before, built, correction, state["opening_index"],
+    )
+    accepted_tasks = [task for task, _index, _data in accepted]
+    task_numbers = [task["task"] for task in state["artifact"]["tasks"]]
+    task_count = correction_lifecycle_task_count(state["artifact"], subject)
+    missing = [task for task in task_numbers if task not in accepted_tasks]
+    if not missing:
+        fail(f"{subject} has no suspended or unopened Correction task")
+    return_task = missing[0]
+    if accepted_tasks != list(range(1, return_task)):
+        fail(f"{subject} does not follow one exact accepted Correction task prefix")
+
+    current = outstanding_final_checker_set(entries, before, built, correction, subject)
+    assignment = {
+        "unit": {"kind": "amendment", "number": amendment},
+        "task": None,
+        "phase": "publish-post-amendment-return",
+        "owner": "amendment-return",
+    }
+    transition, _output = materialize_final_checker_transition(
+        current,
+        additions=[],
+        dispositions=[{
+            "obligation_id": member["source"]["obligation_id"],
+            "outcome": "carried",
+            "assignment": assignment,
+            "evidence": None,
+        } for member in current["entries"]],
+        transfer_kind="amendment-opened",
+    )
+    admit_correction_amendment(CorrectionAmendmentFacts(
+        opening_present=True,
+        active_owner=None,
+        accepted_tasks=len(accepted_tasks),
+        task_count=task_count,
+        return_task=return_task,
+        terminal=None,
+    ), "open")
+    return {
+        "schema": 2,
+        "built": built,
+        "correction": correction,
+        "correction_authority": state["proof"],
+        "correction_execution_authority_sha256": state[
+            "execution_authority_sha256"
+        ],
+        "return_task": return_task,
+        "retry_transition": transition,
+    }
+
+
+def current_correction_amendment_owner(entries, before, built, correction, subject):
+    """Project one unconsumed Correction-origin AMENDMENT owner at a prefix."""
+    token = CORRECTION_AMENDMENT_OWNER_PROJECTION.set(True)
+    try:
+        active = None
+        for index, entry in enumerate(entries[:before]):
+            data = note_data(entry)
+            if entry.get("kind") == "amendment.opened" \
+                    and data.get("origin") == "correction-round" \
+                    and data.get("built") == built and data.get("correction") == correction:
+                if active is not None:
+                    fail(f"{subject} has overlapping Correction AMENDMENT owners")
+                validate_amendment_opening_entry(entries, index, entry)
+                active = {
+                    "schema": 1,
+                    "unit": {"kind": "correction", "built": built, "round": correction},
+                    "amendment": data["amendment"],
+                    "opening": journal_line_proof(index),
+                    "opening_index": index,
+                    "correction_authority": data["correction_authority"],
+                    "correction_execution_authority_sha256": data[
+                        "correction_execution_authority_sha256"
+                    ],
+                    "return_task": data["return_task"],
+                    "retry_transition": data["retry_transition"],
+                    "commit": None,
+                }
+                continue
+            return_event = data.get("built") == built and data.get("round") == correction \
+                and (
+                    entry.get("kind") in {
+                        "correction.round.rebased", "correction.round.resolved",
+                    }
+                    or entry.get("kind") == "correction.round.escalated"
+                    and data.get("producer") == "post-amendment-return"
+                )
+            if active is None:
+                if return_event:
+                    fail(f"{subject} has a Correction AMENDMENT return without its owner")
+                continue
+            if entry.get("kind") == "amendment.committed" \
+                    and data.get("amendment") == active["amendment"]:
+                if active["commit"] is not None:
+                    fail(f"{subject} has duplicate Correction AMENDMENT commits")
+                validate_amendment_commit_entry(entries, index, entry)
+                active["commit"] = journal_line_proof(index)
+                continue
+            same_unit = entry.get("lot") == built and entry.get("correction") == correction
+            correction_unit = data.get("unit") == {
+                "kind": "correction", "built": built, "round": correction,
+            }
+            forbidden = (
+                entry.get("kind") in {
+                    "correction.round.revised", "correction.round.built",
+                    "final-checker.contract-mapped", "attempt.failed", "attempt.succeeded",
+                }
+                and (same_unit or data.get("built") == built and data.get("round") == correction)
+            ) or (
+                entry.get("kind") in {"paused", "aborted"}
+                and same_unit and isinstance(data.get("attempt"), int)
+            ) or (
+                entry.get("kind") == "rewind.done" and correction_unit
+                and data.get("cause", {}).get("kind") != "amendment-rebase"
+            ) or (
+                entry.get("kind") == "correction.round.escalated"
+                and data.get("built") == built and data.get("round") == correction
+                and data.get("producer") != "post-amendment-return"
+            ) or (
+                entry.get("event") == "subagent-started"
+                and (
+                    entry.get("kind") in {"design-checker", "code-checker"}
+                    or entry.get("kind") == "gate-runner"
+                    and data.get("scope") != "correction-baseline"
+                )
+                and (same_unit or data.get("correction") == correction
+                     and data.get("lot") == built)
+            )
+            if forbidden:
+                fail(
+                    f"{subject}'s active Correction AMENDMENT contains a foreign mutation",
+                    f"journal line {index + 1}",
+                )
+            if not return_event:
+                continue
+            if entry.get("kind") == "correction.round.rebased":
+                validate_correction_round_rebased_entry(entries, index, entry)
+            elif entry.get("kind") == "correction.round.resolved":
+                validate_correction_round_resolved_entry(entries, index, entry)
+            elif entry.get("kind") == "correction.round.escalated" \
+                    and data.get("producer") == "post-amendment-return":
+                validate_correction_round_escalated_entry(entries, index, entry)
+            else:
+                continue
+            if active["commit"] is None:
+                fail(f"{subject}'s Correction AMENDMENT return precedes its commit")
+            active = None
+        return active
+    finally:
+        CORRECTION_AMENDMENT_OWNER_PROJECTION.reset(token)
+
+
+def active_correction_amendment_owner(entries, before, subject):
+    """Return the one active Correction-origin AMENDMENT across all rounds."""
+    units = sorted({
+        (data.get("built"), data.get("correction"))
+        for entry in entries[:before]
+        if entry.get("kind") == "amendment.opened"
+        and (data := note_data(entry)).get("origin") == "correction-round"
+        and isinstance(data.get("built"), str)
+        and construction_positive_integer(data.get("correction"))
+    })
+    owners = [
+        owner for built, correction in units
+        if (owner := current_correction_amendment_owner(
+            entries, before, built, correction, subject,
+        )) is not None
+    ]
+    if len(owners) > 1:
+        fail(f"{subject} has several active Correction AMENDMENT owners")
+    return owners[0] if owners else None
+
+
+def require_no_active_correction_amendment(
+        entries, before, built, correction, subject,
+):
+    owner = current_correction_amendment_owner(
+        entries, before, built, correction, subject,
+    )
+    if owner is not None:
+        fail(f"{subject} follows an unconsumed Correction AMENDMENT", owner["opening"])
+
+
 def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
     data = note_data(entry)
     number = data.get("amendment")
@@ -1785,6 +2082,16 @@ def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
         fail("an amendment opening does not freeze its exact order and identity")
     if "batch" in data and "ruling" in data:
         fail("an amendment opening cannot belong to both a batch and a direct ruling")
+
+    if not CORRECTION_AMENDMENT_OWNER_PROJECTION.get():
+        active_owner = active_correction_amendment_owner(
+            entries, index, "an amendment opening",
+        )
+        if active_owner is not None:
+            fail(
+                "an amendment opening follows an unconsumed Correction AMENDMENT",
+                active_owner["opening"],
+            )
 
     if prior:
         previous_index, previous = prior[-1]
@@ -1856,7 +2163,7 @@ def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
             if supersession is not None \
                     and note_data(supersession[1]).get("outcome") != "reclassify":
                 fail("a product-review amendment cannot consume a structural supersession")
-    else:
+    elif origin == "construction":
         if "built" in data:
             fail("a construction amendment opening may not claim a product-review built lot")
         readiness = [(candidate_index, candidate) for candidate_index, candidate in enumerate(
@@ -1880,6 +2187,17 @@ def validate_amendment_opening_entry(entries, index, entry, *, historical=True):
         ) if candidate.get("kind") in {"pass.opened", "pass.closed"}]
         if pass_events and pass_events[-1][1].get("kind") == "pass.opened":
             fail("a construction amendment opening cannot bypass the current product-review pass")
+    else:
+        if "construction_source" in data or "pass_opening" in data \
+                or "correction_allocation" in data or "correction_supersession" in data:
+            fail("a Correction Round amendment opening claims another origin's authority")
+        expected = correction_amendment_opening_account(
+            entries, index, number, data.get("built"), data.get("correction"),
+            "a Correction Round amendment opening",
+        )
+        if any(data.get(key) != value for key, value in expected.items()):
+            fail("a Correction Round amendment opening changes its frozen return authority",
+                 expected)
     return data
 
 
@@ -1900,6 +2218,14 @@ def normalize_amendment_opened(entries, data, text, context):
         candidate_data["construction_source"] = current_construction_amendment_source(
             entries, context, "a construction-only amendment opening",
         )
+    if candidate_data.get("origin") == "correction-round":
+        if any(key in candidate_data for key in CORRECTION_AMENDMENT_OPENING_KEYS):
+            fail("a Correction Round amendment cannot supply its derived return authority")
+        candidate_data.update(correction_amendment_opening_account(
+            entries, len(entries), candidate_data.get("amendment"),
+            context.get("lot"), context.get("correction"),
+            "a Correction Round amendment opening", live=True,
+        ))
     candidate = {"event": "note", "kind": "amendment.opened",
                  "data": candidate_data, "text": text}
     candidate_data["opening_sha256"] = amendment_opening_digest(candidate)
@@ -2035,17 +2361,20 @@ def markdown_structure_lines(text):
     fence_character = None
     fence_length = 0
     for line in lines:
-        stripped = line.lstrip()
         if fence_character is None:
-            opening = re.match(r"(`{3,}|~{3,})(?:[^`~].*)?$", stripped)
-            if opening:
+            opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", line)
+            if opening and (opening.group(1)[0] != "`" or "`" not in opening.group(2)):
                 fence_character = opening.group(1)[0]
                 fence_length = len(opening.group(1))
                 visible.append(None)
             else:
                 visible.append(line)
             continue
-        if re.fullmatch(re.escape(fence_character) + "{" + str(fence_length) + r",}\s*", stripped):
+        if re.fullmatch(
+            r" {0,3}" + re.escape(fence_character)
+            + "{" + str(fence_length) + r",}[ \t]*",
+            line,
+        ):
             fence_character = None
             fence_length = 0
         visible.append(None)
@@ -2827,7 +3156,8 @@ def active_attempt_identity(
             fail(f"{subject}'s correction attempt identity is malformed", exc)
         required = {
             "schema", "unit", "unit_authority_sha256", "tree_authority", "task", "attempt",
-            "attempt_predecessor", "document", "retry", "design_proof_authority",
+            "attempt_predecessor", "prior_attempt", "document", "retry",
+            "design_proof_authority",
             "outstanding_final_checker_set_sha256", "assigned_final_checker_obligations",
         }
         unit = marker.get("unit") if isinstance(marker, dict) else None
@@ -2851,21 +3181,87 @@ def active_attempt_identity(
                 ) \
                 or not isinstance(marker.get("assigned_final_checker_obligations"), list):
             fail(f"{subject} does not match the exact correction attempt-in-flight identity")
-        resolver = subprocess.run(
-            [sys.executable, os.path.join(WORKSPACE, "prompts", "construction", "work_unit.py"),
-             "resolve-correction", lot, str(correction), str(task)],
-            capture_output=True, text=True,
-        )
-        if resolver.returncode != 0:
-            fail(f"{subject} cannot resolve its current Correction Round authority",
-                 resolver.stderr or resolver.stdout)
-        try:
-            resolved = json.loads(resolver.stdout)
-        except ValueError:
-            fail(f"{subject}'s Correction Round resolver returned malformed JSON")
+        if not CORRECTION_REWIND_SUCCESS_RECOVERIES.get() \
+                and not CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.get():
+            history = journal_entries()
+            has_rewind = any(
+                entry.get("kind") == "rewind.done"
+                and note_data(entry).get("unit") == {
+                    "kind": "correction", "built": lot, "round": correction,
+                }
+                for entry in history
+            )
+            if has_rewind:
+                projection = correction_rewind_history_projection(
+                    history, len(history), f"{subject}'s Correction rewind history",
+                )
+                return projection.run(
+                    active_attempt_identity, context, subject,
+                    allow_closer=allow_closer, include_completion=include_completion,
+                )
+        recoveries = [
+            recovery for recovery in CORRECTION_SUCCESS_RECOVERIES.get()
+            if isinstance(recovery, dict)
+            and recovery.get("built") == lot
+            and recovery.get("round") == correction
+            and recovery.get("task") == task
+        ]
+        if recoveries:
+            recovery = recoveries[-1]
+            resolved = recovery.get("resolved")
+            if not isinstance(resolved, dict):
+                fail(f"{subject}'s live correction success recovery is malformed")
+            stable = subprocess.run(
+                [
+                    "git", "-C", REPO, "rev-parse", "--verify",
+                    f"{resolved.get('ref_root')}/task-{task}^{{commit}}",
+                ],
+                capture_output=True, text=True,
+            )
+            if stable.returncode != 0 or stable.stdout.strip() != recovery.get("commit"):
+                fail(f"{subject}'s live correction success recovery changed its stable ref")
+        else:
+            resolved = next((
+                account for account in reversed(CORRECTION_RESOLVED_WORK_UNITS.get())
+                if isinstance(account, dict)
+                and account.get("unit") == {
+                    "kind": "correction", "built": lot, "round": correction,
+                }
+                and isinstance(account.get("task"), dict)
+                and account["task"].get("task") == task
+            ), None)
+            if resolved is None:
+                resolver = subprocess.run(
+                    [sys.executable, os.path.join(
+                        WORKSPACE, "prompts", "construction", "work_unit.py",
+                    ), "resolve-correction", lot, str(correction), str(task)],
+                    capture_output=True, text=True,
+                )
+                if resolver.returncode != 0:
+                    fail(f"{subject} cannot resolve its current Correction Round authority",
+                         resolver.stderr or resolver.stdout)
+                try:
+                    resolved = json.loads(resolver.stdout)
+                except ValueError:
+                    fail(f"{subject}'s Correction Round resolver returned malformed JSON")
         document = marker.get("document")
         current_task = resolved.get("task") or {}
         current_entries = journal_entries()
+        current_starts = [
+            entry for entry in current_entries
+            if entry.get("event") == "session-started"
+            and entry.get("mode") == "construction"
+            and entry.get("job") == "implementer"
+            and entry.get("lot") == lot and entry.get("correction") == correction
+            and entry.get("task") == task and entry.get("attempt") == attempt_number
+        ]
+        if current_starts:
+            expected_prior = correction_attempt_terminal_prior_account(
+                current_entries, len(current_entries), lot, correction, task,
+                attempt_number, subject,
+            )
+            if marker.get("prior_attempt") != expected_prior:
+                fail(f"{subject}'s correction attempt sequence authority changed")
         current_set = outstanding_final_checker_set(
             current_entries, len(current_entries), lot, correction, subject,
         )
@@ -2939,11 +3335,13 @@ def active_attempt_identity(
             "unit_authority_sha256": marker["unit_authority_sha256"],
             "execution_authority_sha256": execution_authority_sha256,
             "attempt_predecessor": attempt_predecessor,
+            "prior_attempt": marker["prior_attempt"],
             "plan_manifest": document["manifest_sha256"],
             "plan_tasks": resolved["task_count"],
             "plan_ownership_sha256": document["controller_sha256"],
             "contract_sha256": document["task_contract_sha256"],
-            "retry": None,
+            "retry": marker["prior_attempt"].get("paused")
+            if isinstance(marker.get("prior_attempt"), dict) else None,
         }
         if include_completion:
             identity.update({
@@ -2968,23 +3366,471 @@ def active_attempt_identity(
             or match is None:
         fail(f"{subject} does not match the exact attempt-in-flight identity")
     retry = None if match.group(5) == "-" else match.group(5)
-    return {
+    identity = {
         "lot": lot, "task": task, "attempt": attempt_number,
         "plan_manifest": match.group(1), "plan_tasks": int(match.group(2)),
         "plan_ownership_sha256": match.group(3),
         "contract_sha256": match.group(4),
         "retry": retry,
     }
+    current_entries = journal_entries()
+    if correction_escalation_plan_origin(current_entries, lot):
+        identity["escalation_baseline"] = \
+            current_correction_escalation_baseline_account(
+                current_entries, len(current_entries), lot, subject,
+            )
+    return identity
 
 
-def diagnostic_attempt_identity(entries, context, subject):
+def git_commit_and_tree(name, subject):
+    cache = CORRECTION_CONTRACT_STATE_CACHE.get()
+    key = ("git-commit-and-tree", name)
+    if cache is not None and key in cache:
+        return cache[key]
+    commit = subprocess.run(
+        ["git", "-C", REPO, "rev-parse", "--verify", f"{name}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        fail(f"{subject} has no exact commit", commit.stderr)
+    sha = commit.stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", REPO, "rev-parse", "--verify", f"{sha}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    if tree.returncode != 0:
+        fail(f"{subject} has no exact tree", tree.stderr)
+    result = sha, tree.stdout.strip()
+    if cache is not None:
+        cache[key] = result
+        cache[("git-object-name", name)] = sha
+        cache[("git-object-name", sha)] = sha
+    return result
+
+
+def construction_session_start_account(context, session, subject):
+    if not isinstance(session, str) or not session:
+        fail(f"{subject} has no exact physical implementer owner")
+    identity = active_attempt_identity(context, subject)
+    if "correction" in identity:
+        base_name = identity["attempt_predecessor"]["commit"]
+    else:
+        base_name = f"refs/bwr/{Path(WORKSPACE).name}/{identity['lot']}/attempt-base"
+    base, tree = git_commit_and_tree(base_name, subject)
+    identity_sha256 = sha256_bytes(json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    account = {
+        "schema": 1,
+        "session": session,
+        "attempt_identity": identity,
+        "attempt_identity_sha256": identity_sha256,
+        "attempt_base": base,
+        "attempt_base_tree": tree,
+    }
+    account["authority_sha256"] = sha256_bytes(json.dumps(
+        account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    return account
+
+
+def construction_escalation_session_start_identity(
+        entries, index, context, baseline, retry, subject,
+):
+    plan_index, _plan = journal_entry_from_proof(
+        entries, baseline.get("plan"), f"{subject}'s escalation plan",
+    )
+    if plan_index >= index:
+        fail(f"{subject}'s escalation plan does not precede the implementer start")
+    plan_account = correction_escalation_completeness_plan_account(
+        entries, plan_index, context["lot"], subject,
+    )
+    if plan_account["commit"] != baseline.get("commit"):
+        fail(f"{subject}'s escalation plan and baseline use different commits")
+    manifest = plan_task_manifest_account(
+        "".join(f"{heading}\n" for heading in plan_account["task_manifest"]).encode(),
+        f"{subject}'s escalation task manifest",
+    )
+    task_state = committed_plan_task_state(
+        context["lot"], context["task"], baseline["commit"], subject,
+    )
+    return {
+        "lot": context["lot"], "task": context["task"],
+        "attempt": context["attempt"],
+        "plan_manifest": manifest["manifest_sha"],
+        "plan_tasks": manifest["tasks"],
+        "plan_ownership_sha256": task_state["plan_ownership_sha256"],
+        "contract_sha256": task_state["contract_sha256"],
+        "retry": retry,
+        "escalation_baseline": baseline,
+    }
+
+
+def validate_construction_session_start(
+        entry, subject, *, entries=None, index=None, require_account=False,
+        validate_sequence=True,
+):
+    context = {key: entry.get(key) for key in ("lot", "correction", "task", "attempt")}
+    if entry.get("event") != "session-started" \
+            or entry.get("mode") != "construction" \
+            or entry.get("job") != "implementer" \
+            or not isinstance(entry.get("session"), str) or not entry["session"] \
+            or not isinstance(context["lot"], str) \
+            or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", context["lot"]) \
+            or not construction_positive_integer(context["task"]) \
+            or not construction_positive_integer(context["attempt"]):
+        fail(f"{subject} has malformed implementer launch identity")
+    data = entry.get("data")
+    if data is None and not require_account:
+        return context
+    required = {
+        "schema", "session", "attempt_identity", "attempt_identity_sha256",
+        "attempt_base", "attempt_base_tree", "authority_sha256",
+    }
+    identity = data.get("attempt_identity") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 1 \
+            or not isinstance(identity, dict):
+        fail(f"{subject} has malformed frozen attempt authority")
+    prior_attempt = identity.get("prior_attempt")
+    if entries is not None and index is not None \
+            and construction_positive_integer(context.get("correction")) \
+            and isinstance(prior_attempt, dict) \
+            and prior_attempt.get("rewind") is not None \
+            and not CORRECTION_REWIND_SUCCESS_RECOVERIES.get() \
+            and not CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.get():
+        projection = correction_rewind_history_projection(
+            entries, len(entries), f"{subject}'s Correction rewind history",
+        )
+        return projection.run(
+            validate_construction_session_start, entry, subject,
+            entries=entries, index=index, require_account=require_account,
+            validate_sequence=validate_sequence,
+        )
+    ordinary_required = {
+        "lot", "task", "attempt", "plan_manifest", "plan_tasks",
+        "plan_ownership_sha256", "contract_sha256", "retry",
+    }
+    correction_required = ordinary_required | {
+        "correction", "unit", "unit_authority_sha256",
+        "execution_authority_sha256", "attempt_predecessor", "prior_attempt",
+    }
+    identity_keys = set(identity)
+    ordinary = identity_keys == ordinary_required \
+        or identity_keys == ordinary_required | {"escalation_baseline"}
+    correction = identity_keys == correction_required
+    escalation = ordinary and "escalation_baseline" in identity
+    expected_context = {key: context[key] for key in ("lot", "task", "attempt")}
+    if not ordinary and not correction \
+            or {key: identity.get(key) for key in expected_context} != expected_context \
+            or correction and identity.get("correction") != context.get("correction") \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(identity.get("plan_manifest"))) \
+            or not construction_positive_integer(identity.get("plan_tasks")) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(identity.get("plan_ownership_sha256"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(identity.get("contract_sha256"))) \
+            or identity.get("retry") is not None \
+            and not re.fullmatch(r"[0-9]+:[0-9a-f]{64}", str(identity.get("retry"))):
+        fail(f"{subject} has malformed frozen attempt identity")
+    if escalation:
+        expected_escalation_context = {
+            "mode": "construction", "lot": context["lot"],
+            "task": context["task"], "attempt": context["attempt"],
+            "job": "implementer",
+        }
+        actual_escalation_context = {
+            key: entry[key] for key in CONTEXT_FIELDS if key in entry
+        }
+        if actual_escalation_context != expected_escalation_context:
+            fail(f"{subject} has a changed escalation implementer context", {
+                "expected": expected_escalation_context,
+                "actual": actual_escalation_context,
+            })
+    if correction:
+        unit = identity.get("unit")
+        if unit != {
+            "kind": "correction", "built": context["lot"],
+            "round": context.get("correction"),
+        } or not re.fullmatch(
+            r"[0-9a-f]{64}", str(identity.get("unit_authority_sha256")),
+        ) or not re.fullmatch(
+            r"[0-9a-f]{64}", str(identity.get("execution_authority_sha256")),
+        ) or not isinstance(identity.get("attempt_predecessor"), dict):
+            fail(f"{subject} has malformed frozen Correction attempt identity")
+    identity_digest = sha256_bytes(json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    account = {key: value for key, value in data.items() if key != "authority_sha256"}
+    authority_digest = sha256_bytes(json.dumps(
+        account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    commit, tree = git_commit_and_tree(data.get("attempt_base"), subject)
+    if data.get("session") != entry.get("session") \
+            or data.get("attempt_identity_sha256") != identity_digest \
+            or data.get("authority_sha256") != authority_digest \
+            or commit != data.get("attempt_base") \
+            or tree != data.get("attempt_base_tree"):
+        fail(f"{subject} changed its frozen attempt authority")
+    if entries is not None and index is not None:
+        if correction:
+            require_no_current_correction_stop(
+                entries, index, context["lot"], context["correction"], subject,
+            )
+        expected_prior = None
+        if correction and validate_sequence:
+            expected_prior = correction_attempt_sequence_account(
+                entries, index, context["lot"], context["correction"],
+                context["task"], context["attempt"], subject,
+            )
+        if correction:
+            prior = expected_prior if expected_prior is not None else prior_attempt
+            expected_retry = prior.get("paused") if isinstance(prior, dict) else None
+        else:
+            expected_retry = outstanding_retry_proof(entries[:index], context["lot"])
+        if identity.get("retry") != expected_retry:
+            fail(f"{subject} changed its outstanding retry authority")
+        escalation_origin = correction_escalation_plan_origin(
+            entries[:index], context["lot"],
+        )
+        if escalation_origin != ("escalation_baseline" in identity):
+            fail(f"{subject} changed its escalation baseline presence")
+        if escalation_origin:
+            expected_baseline = current_correction_escalation_baseline_account(
+                entries, index, context["lot"], subject,
+            )
+            if identity["escalation_baseline"] != expected_baseline:
+                fail(f"{subject} changed its escalation baseline authority")
+            if data["attempt_base"] != expected_baseline["commit"]:
+                fail(f"{subject} changed its escalation attempt-base authority")
+            expected_identity = construction_escalation_session_start_identity(
+                entries, index, context, expected_baseline,
+                outstanding_retry_proof(entries[:index], context["lot"]), subject,
+            )
+            if identity != expected_identity:
+                fail(f"{subject} changed its complete escalation attempt identity")
+        if correction and data["attempt_base"] \
+                != identity["attempt_predecessor"].get("commit"):
+            fail(f"{subject} changed its Correction attempt-base authority")
+        if correction and validate_sequence:
+            if identity["prior_attempt"] != expected_prior:
+                fail(f"{subject} changed its prior Correction attempt authority")
+    return context
+
+
+def correction_diagnostic_manifest_relative(built, correction, task, attempt):
+    return (
+        f"reports/construction/{built}/correction-{correction}/"
+        f"task-{task}-attempt-{attempt}-diagnostic.json"
+    )
+
+
+def correction_diagnostic_failure_account(
+        entries, before, built, correction, task, attempt, subject,
+):
+    if not isinstance(built, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built,
+    ) or not construction_positive_integer(correction) \
+            or not construction_positive_integer(task) \
+            or not construction_positive_integer(attempt):
+        fail(f"{subject} has malformed Correction diagnostic identity")
+    failures = [
+        (index, entry) for index, entry in enumerate(entries[:before])
+        if entry.get("event") == "note" and entry.get("kind") == "attempt.failed"
+        and entry.get("lot") == built and entry.get("correction") == correction
+        and entry.get("task") == task and note_data(entry).get("attempt") == attempt
+    ]
+    if len(failures) != 1:
+        fail(f"{subject} has no one exact Correction attempt failure")
+    failure_index, failure = failures[0]
+    validate_attempt_failed_entry(entries, failure_index, failure)
+    failure_data = note_data(failure)
+    unit = {"kind": "correction", "built": built, "round": correction}
+    if failure_data.get("schema") != 2 or failure_data.get("unit") != unit:
+        fail(f"{subject} has another failure owner")
+    ref_root = f"refs/bwr/{Path(WORKSPACE).name}/{built}/correction-{correction}"
+    try_ref = f"{ref_root}/task-{task}-try-{attempt}"
+    candidate = subprocess.run(
+        ["git", "-C", REPO, "rev-parse", "--verify", f"{try_ref}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    if candidate.returncode == 0:
+        try_commit = candidate.stdout.strip()
+        tree = subprocess.run(
+            ["git", "-C", REPO, "rev-parse", "--verify", f"{try_commit}^{{tree}}"],
+            capture_output=True, text=True,
+        )
+        if tree.returncode != 0:
+            fail(f"{subject}'s preserved candidate has no exact tree", tree.stderr)
+        try_tree = tree.stdout.strip()
+        worktree = os.path.join(
+            REPO, ".superpowers", "bwr", "tmp",
+            f"bwr-{Path(WORKSPACE).name}-{built}-correction-{correction}-"
+            f"task-{task}-try-{attempt}",
+        )
+    else:
+        try_commit = try_tree = worktree = None
+    account = {
+        "schema": 2,
+        "unit": unit,
+        "failure": journal_line_proof(failure_index),
+        "failure_authority_sha256": sha256_bytes(json.dumps(
+            failure_data, sort_keys=True, separators=(",", ":"),
+        ).encode()),
+        "task": task,
+        "attempt": attempt,
+        "try_ref": try_ref,
+        "try_commit": try_commit,
+        "try_tree": try_tree,
+        "worktree": worktree,
+    }
+    account["authority_sha256"] = sha256_bytes(json.dumps(
+        account, sort_keys=True, separators=(",", ":"),
+    ).encode())
+    return account
+
+
+def correction_diagnostic_manifest_account(
+        entries, before, built, correction, task, attempt, subject, *, physical=False,
+):
+    expected = correction_diagnostic_failure_account(
+        entries, before, built, correction, task, attempt, subject,
+    )
+    relative = correction_diagnostic_manifest_relative(
+        built, correction, task, attempt,
+    )
+    path = exact_real_file(WORKSPACE, relative, f"{subject}'s manifest")
+    try:
+        payload = Path(path).read_bytes()
+        manifest = json.loads(payload)
+    except (UnicodeError, ValueError) as exc:
+        fail(f"{subject}'s manifest is malformed", exc)
+    if payload != json.dumps(
+        manifest, sort_keys=True, separators=(",", ":"),
+    ).encode() + b"\n" or manifest != expected:
+        fail(f"{subject}'s manifest changes its exact failure authority")
+    if physical and expected["worktree"] is not None:
+        checkout = subprocess.run(
+            ["git", "-C", expected["worktree"], "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        registrations = subprocess.run(
+            ["git", "-C", REPO, "worktree", "list", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        registered = registrations.returncode == 0 and any(
+            line == f"worktree {expected['worktree']}"
+            for line in registrations.stdout.splitlines()
+        )
+        if checkout.returncode != 0 or checkout.stdout.strip() != expected["try_commit"] \
+                or not registered:
+            fail(f"{subject} has no exact diagnostic worktree")
+    return relative, sha256_bytes(payload), expected
+
+
+def correction_diagnostic_manifest_identity(entries, manifest, subject, *, physical=False):
+    match = re.fullmatch(
+        r"reports/construction/(lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?)/"
+        r"correction-([1-9][0-9]*)/task-([1-9][0-9]*)-"
+        r"attempt-([1-9][0-9]*)-diagnostic\.json",
+        str(manifest),
+    )
+    if not match:
+        fail(f"{subject} has a non-canonical Correction diagnostic manifest path")
+    built, correction, task, attempt = (
+        match.group(1), int(match.group(2)), int(match.group(3)), int(match.group(4)),
+    )
+    relative, digest, account = correction_diagnostic_manifest_account(
+        entries, len(entries), built, correction, task, attempt, subject,
+        physical=physical,
+    )
+    if relative != manifest:
+        fail(f"{subject} changes its canonical manifest path")
+    return digest, account
+
+
+def publish_correction_diagnostic_manifest(entries, built, correction, task, attempt):
+    subject = "the Correction diagnostic checkout"
+    account = correction_diagnostic_failure_account(
+        entries, len(entries), built, correction, task, attempt, subject,
+    )
+    if account["worktree"] is not None:
+        checkout = subprocess.run(
+            ["git", "-C", account["worktree"], "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        registrations = subprocess.run(
+            ["git", "-C", REPO, "worktree", "list", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        registered = registrations.returncode == 0 and any(
+            line == f"worktree {account['worktree']}"
+            for line in registrations.stdout.splitlines()
+        )
+        if checkout.returncode != 0 or checkout.stdout.strip() != account["try_commit"] \
+                or not registered:
+            fail(f"{subject} has no exact registered checkout")
+    relative = correction_diagnostic_manifest_relative(
+        built, correction, task, attempt,
+    )
+    parent = Path(WORKSPACE)
+    for part in PurePosixPath(relative).parent.parts:
+        parent = parent / part
+        if parent.is_symlink():
+            fail(f"{subject}'s manifest parent is a symlink", str(parent))
+        if parent.exists() and not parent.is_dir():
+            fail(f"{subject}'s manifest parent is not a directory", str(parent))
+        parent.mkdir(exist_ok=True)
+    payload = json.dumps(account, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    target = Path(WORKSPACE) / relative
+    if target.exists() or target.is_symlink():
+        with WorkspaceFileAnchor(WORKSPACE, relative, subject) as anchored:
+            if anchored.read_regular() != payload:
+                fail(f"{subject}'s retained manifest changed")
+    else:
+        with WorkspaceFileAnchor(WORKSPACE, relative, subject) as anchored:
+            anchored.publish(payload)
+    correction_diagnostic_manifest_account(
+        entries, len(entries), built, correction, task, attempt, subject, physical=True,
+    )
+    return relative, account
+
+
+def diagnostic_attempt_identity(entries, context, subject, *, physical=False):
     lot, task = context.get("lot"), context.get("task")
     if not isinstance(lot, str) or not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", lot) \
             or not construction_positive_integer(task):
         fail(f"{subject} has no exact construction lot and task context")
+    correction = context.get("correction")
+    if correction is not None:
+        attempt = context.get("attempt")
+        if not construction_positive_integer(correction) \
+                or not construction_positive_integer(attempt):
+            matching = [
+                entry for entry in entries if entry.get("event") == "note"
+                and entry.get("kind") == "attempt.failed"
+                and entry.get("lot") == lot and entry.get("correction") == correction
+                and entry.get("task") == task
+            ]
+            if not matching:
+                fail(f"{subject} has no current failed Correction attempt")
+            attempt = note_data(matching[-1]).get("attempt")
+        relative, manifest_sha256, account = correction_diagnostic_manifest_account(
+            entries, len(entries), lot, correction, task, attempt, subject,
+            physical=physical,
+        )
+        if physical and os.path.lexists(os.path.join(WORKSPACE, "attempt-in-flight")):
+            fail(f"{subject} cannot cross a later active attempt owner")
+        return {
+            "lot": lot, "correction": correction, "task": task, "attempt": attempt,
+            "unit": account["unit"], "failure": account["failure"],
+            "failure_authority_sha256": account["failure_authority_sha256"],
+            "try_ref": account["try_ref"], "try_commit": account["try_commit"],
+            "try_tree": account["try_tree"], "worktree": account["worktree"],
+            "manifest": relative, "manifest_sha256": manifest_sha256,
+            "diagnostic_authority_sha256": account["authority_sha256"],
+        }
     failures = [entry for entry in entries if entry.get("event") == "note"
                 and entry.get("kind") == "attempt.failed"
-                and entry.get("lot") == lot and entry.get("task") == task]
+                and entry.get("lot") == lot and entry.get("task") == task
+                and entry.get("correction") is None]
     if not failures:
         fail(f"{subject} has no current failed attempt")
     failure = failures[-1]
@@ -2996,7 +3842,9 @@ def diagnostic_attempt_identity(entries, context, subject):
     return {"lot": lot, "task": task, "attempt": attempt_number}
 
 
-def construction_logical_identity(entries, context, check, round_number, subject):
+def construction_logical_identity(
+        entries, context, check, round_number, subject, *, physical_diagnostic=False,
+):
     if check in CONSTRUCTION_CHECKERS:
         round_limit = CONSTRUCTION_CHECKER_ROUNDS[check]
         if not construction_positive_integer(round_number) or round_number > round_limit:
@@ -3012,7 +3860,12 @@ def construction_logical_identity(entries, context, check, round_number, subject
     if check == "diagnostic":
         if round_number is not None:
             fail(f"{subject} does not take a logical round")
-        return {"check": check, **diagnostic_attempt_identity(entries, context, subject)}
+        return {
+            "check": check,
+            **diagnostic_attempt_identity(
+                entries, context, subject, physical=physical_diagnostic,
+            ),
+        }
     fail(f"{subject} has an unknown construction check", check)
 
 
@@ -3108,6 +3961,19 @@ def construction_frozen_logical(entries, before, base, subject):
     if expected_base != base:
         fail(f"{subject}'s frozen logical identity contradicts its attempt")
     return logical
+
+
+def validate_correction_escalation_logical_baseline(entries, before, logical, subject):
+    if not correction_escalation_plan_origin(entries[:before], logical["lot"]):
+        if "escalation_baseline" in logical:
+            fail(f"{subject} carries foreign Correction escalation baseline authority")
+        return False
+    expected = current_correction_escalation_baseline_account(
+        entries, before, logical["lot"], subject,
+    )
+    if logical.get("escalation_baseline") != expected:
+        fail(f"{subject} changes its clean C2 baseline authority")
+    return True
 
 
 def validate_current_construction_generation(logical, subject):
@@ -3215,7 +4081,9 @@ def code_design_proof_authority(entries, before, identity, generation, subject):
         state = current_correction_contract_state(
             entries, before, identity["lot"], identity["correction"], subject,
         )
-        task_state = state["artifact"]["tasks"][identity["task"] - 1]
+        task_state = correction_artifact_task(
+            state["artifact"], identity["task"], subject,
+        )
         current = outstanding_final_checker_set(
             entries, before, identity["lot"], identity["correction"], subject,
         )
@@ -3441,11 +4309,16 @@ def validate_code_generation_history(entries, before, logical, subject):
     if logical.get("correction") is not None:
         expected_keys |= {
             "correction", "unit", "unit_authority_sha256", "execution_authority_sha256",
-            "attempt_predecessor",
+            "attempt_predecessor", "prior_attempt",
             "design_proof_authority", "outstanding_final_checker_set_sha256",
             "assigned_final_checker_obligations", "design_contract_sha256",
             "consumer_account_sha256",
         }
+    escalation_origin = validate_correction_escalation_logical_baseline(
+        entries, start_index, logical, subject,
+    )
+    if escalation_origin:
+        expected_keys.add("escalation_baseline")
     if set(logical) != expected_keys \
             or any(not re.fullmatch(r"[0-9a-f]{64}", logical.get(key, ""))
                    for key in ("plan_ownership_sha256", "contract_sha256", "design_sha256",
@@ -3479,6 +4352,12 @@ def validate_code_generation_history(entries, before, logical, subject):
         )
         if logical.get("attempt_predecessor") != expected_predecessor:
             fail(f"{subject} changes its frozen attempt predecessor")
+        expected_prior = correction_attempt_terminal_prior_account(
+            entries, start_index, logical["lot"], logical["correction"],
+            logical["task"], logical["attempt"], subject,
+        )
+        if logical.get("prior_attempt") != expected_prior:
+            fail(f"{subject} changes its frozen prior attempt authority")
         if logical.get("design_proof_authority") != expected_design_proof:
             fail(f"{subject} changes its exact current Design-proof authority")
     prior = [(index, entry) for index, entry in code_verdicts(
@@ -3514,6 +4393,8 @@ def validate_code_generation_history(entries, before, logical, subject):
             fail(f"{subject}'s code-review manifest is malformed", exc)
         if manifest_document.get("attempt_predecessor") \
                 != logical["attempt_predecessor"] \
+                or manifest_document.get("prior_attempt") \
+                != logical["prior_attempt"] \
                 or manifest_document.get("base") \
                 != logical["attempt_predecessor"]["commit"]:
             fail(f"{subject}'s code-review manifest changes its frozen predecessor")
@@ -3548,11 +4429,16 @@ def validate_design_generation_history(entries, before, logical, subject):
     if logical.get("correction") is not None:
         expected_keys |= {
             "correction", "unit", "unit_authority_sha256", "execution_authority_sha256",
-            "attempt_predecessor",
+            "attempt_predecessor", "prior_attempt",
             "design_proof_authority", "outstanding_final_checker_set_sha256",
             "assigned_final_checker_obligations", "design_contract_sha256",
             "consumer_account_sha256",
         }
+    escalation_origin = validate_correction_escalation_logical_baseline(
+        entries, start_index, logical, subject,
+    )
+    if escalation_origin:
+        expected_keys.add("escalation_baseline")
     if set(logical) != expected_keys or any(
         not re.fullmatch(r"[0-9a-f]{64}", logical.get(key, ""))
         for key in (
@@ -3595,12 +4481,19 @@ def validate_design_generation_history(entries, before, logical, subject):
         )
         if logical.get("attempt_predecessor") != expected_predecessor:
             fail(f"{subject} changes its frozen attempt predecessor")
+        expected_prior = correction_attempt_terminal_prior_account(
+            entries, start_index, logical["lot"], logical["correction"],
+            logical["task"], logical["attempt"], subject,
+        )
+        if logical.get("prior_attempt") != expected_prior:
+            fail(f"{subject} changes its frozen prior attempt authority")
         expected_manifest.update({
             "correction": logical["correction"],
             "unit": logical["unit"],
             "unit_authority_sha256": logical["unit_authority_sha256"],
             "execution_authority_sha256": logical["execution_authority_sha256"],
             "attempt_predecessor": logical["attempt_predecessor"],
+            "prior_attempt": logical["prior_attempt"],
             "final_checker_set_sha256": logical[
                 "outstanding_final_checker_set_sha256"
             ],
@@ -3624,6 +4517,71 @@ def validate_design_generation_history(entries, before, logical, subject):
     expected_previous = design_previous_batch(entries[:start_index], logical, subject)
     if manifest.get("previous") != expected_previous:
         fail(f"{subject}'s design manifest changes its prior findings account")
+
+
+def construction_checker_manifest_generation(entries, manifest, subject):
+    if not isinstance(manifest, str) or not manifest:
+        fail(f"{subject} has no exact checker manifest path")
+    matches = [
+        (index, entry) for index, entry in enumerate(entries)
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") in {"design-checker", "code-checker"}
+        and note_data(entry).get("manifest") == manifest
+    ]
+    if len(matches) != 1:
+        fail(f"{subject} has no one exact checker opening")
+    opening_index, opening = matches[0]
+    opening_data = note_data(opening)
+    base = {
+        "check": "design" if opening.get("kind") == "design-checker" else "code",
+        **{key: opening_data.get(key) for key in ("lot", "task", "attempt", "round")},
+    }
+    if opening_data.get("correction") is not None:
+        base["correction"] = opening_data["correction"]
+    logical = construction_frozen_logical(entries, opening_index + 1, base, subject)
+    if logical.get("manifest") != manifest:
+        fail(f"{subject} changes its exact checker manifest")
+    if opening.get("kind") == "design-checker":
+        validate_design_generation_history(entries, len(entries), logical, subject)
+    else:
+        validate_code_generation_history(entries, len(entries), logical, subject)
+    return opening_index, logical
+
+
+def correction_checker_source_account(entries, manifest, subject):
+    opening_index, logical = construction_checker_manifest_generation(
+        entries, manifest, subject,
+    )
+    correction = logical.get("correction")
+    if not construction_positive_integer(correction) or logical.get("unit") != {
+        "kind": "correction", "built": logical.get("lot"), "round": correction,
+    }:
+        fail(f"{subject} does not belong to a Correction task")
+    state = current_correction_contract_state(
+        entries, opening_index, logical["lot"], correction, subject,
+    )
+    task = correction_artifact_task(state["artifact"], logical["task"], subject)
+    confirmed = correction_escalation_confirmed_account(
+        entries, opening_index, state, subject,
+    )
+    covers = task.get("covers")
+    if not isinstance(covers, list) or not covers \
+            or any(finding not in confirmed for finding in covers):
+        fail(f"{subject}'s task does not map to its exact confirmed findings")
+    return {
+        "schema": 1,
+        "unit": logical["unit"],
+        "unit_authority_sha256": logical["unit_authority_sha256"],
+        "manifest": manifest,
+        "manifest_sha256": logical["manifest_sha256"],
+        "source_findings": {
+            "path": state["artifact"]["source_findings_path"],
+            "sha256": state["artifact"]["source_findings_sha256"],
+        },
+        "covers": [
+            {"id": finding, **confirmed[finding]} for finding in covers
+        ],
+    }
 
 
 def construction_event_matches(entry, logical, event):
@@ -3775,10 +4733,11 @@ def construction_domain_spends(entries, before, logical):
     return spends
 
 
-def construction_task_diagnostic_spends(entries, before, lot, task):
+def construction_task_diagnostic_spends(entries, before, lot, task, correction=None):
     return [entry for entry in entries[:before] if entry.get("event") == "note"
             and entry.get("kind") == "bound.spent"
             and entry.get("lot") == lot and entry.get("task") == task
+            and entry.get("correction") == correction
             and entry.get("text") == "diagnostic ran - once per task"]
 
 
@@ -3802,12 +4761,14 @@ def normalize_construction_started(entries, data, context, check, round_number):
     validate_construction_verdict_history(entries)
     logical = construction_logical_identity(
         entries, context, check, round_number, f"a {check} physical checker opening",
+        physical_diagnostic=True,
     )
     if construction_consumed(entries, len(entries), logical):
         fail(f"the {check} logical result was already consumed")
     if check == "diagnostic":
         task_spends = construction_task_diagnostic_spends(
             entries, len(entries), logical["lot"], logical["task"],
+            logical.get("correction"),
         )
         exact_spends = construction_domain_spends(entries, len(entries), logical)
         if task_spends and task_spends != exact_spends:
@@ -3890,7 +4851,8 @@ def normalize_construction_spend(entries, data, text, context, check, round_numb
     logical = construction_logical_identity(
         entries, context, check, round_number, f"a {check} logical spend",
     )
-    if check in CONSTRUCTION_CHECKERS:
+    if check in CONSTRUCTION_CHECKERS or check == "diagnostic" \
+            and logical.get("correction") is not None:
         logical = construction_frozen_logical(
             entries, len(entries), logical, f"the {check} logical spend",
         )
@@ -3900,6 +4862,7 @@ def normalize_construction_spend(entries, data, text, context, check, round_numb
         })
     if check == "diagnostic" and construction_task_diagnostic_spends(
         entries, len(entries), logical["lot"], logical["task"],
+        logical.get("correction"),
     ):
         fail("the task-level logical diagnostic spend already exists")
     if construction_domain_spends(entries, len(entries), logical):
@@ -3917,11 +4880,13 @@ def normalize_construction_ended(entries, data, context, check, round_number):
     logical = construction_logical_identity(
         entries, context, check, round_number, f"a {check} physical result",
     )
-    if check in CONSTRUCTION_CHECKERS:
+    if check in CONSTRUCTION_CHECKERS or check == "diagnostic" \
+            and logical.get("correction") is not None:
         logical = construction_frozen_logical(
             entries, len(entries), logical, f"the {check} physical result",
         )
-        validate_current_construction_generation(logical, f"the {check} physical result")
+        if check in CONSTRUCTION_CHECKERS:
+            validate_current_construction_generation(logical, f"the {check} physical result")
     if len(construction_domain_spends(entries, len(entries), logical)) != 1:
         fail(f"a {check} physical result has no one exact logical spend")
     paired = construction_physical_calls(
@@ -3996,11 +4961,13 @@ def normalize_construction_verdict(entries, data, text, context, check, round_nu
     logical = construction_logical_identity(
         entries, context, check, round_number, f"a {check} consumed verdict",
     )
-    if check in CONSTRUCTION_CHECKERS:
+    if check in CONSTRUCTION_CHECKERS or check == "diagnostic" \
+            and logical.get("correction") is not None:
         logical = construction_frozen_logical(
             entries, len(entries), logical, f"the {check} consumed verdict",
         )
-        validate_current_construction_generation(logical, f"the {check} consumed verdict")
+        if check in CONSTRUCTION_CHECKERS:
+            validate_current_construction_generation(logical, f"the {check} consumed verdict")
     if construction_consumed(entries, len(entries), logical):
         fail(f"the {check} logical result was already consumed")
     if len(construction_domain_spends(entries, len(entries), logical)) != 1:
@@ -4017,7 +4984,7 @@ def normalize_construction_verdict(entries, data, text, context, check, round_nu
     return expected
 
 
-def validate_construction_verdict_entry(entries, index, entry):
+def _validate_construction_verdict_entry(entries, index, entry):
     data = note_data(entry)
     check = data.get("check")
     if check not in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
@@ -4041,7 +5008,8 @@ def validate_construction_verdict_entry(entries, index, entry):
         fail("a durable construction verdict changes its journal context identity")
     logical = construction_frozen_logical(
         entries, index, base, "a durable construction verdict",
-    ) if check in CONSTRUCTION_CHECKERS else base
+    ) if check in CONSTRUCTION_CHECKERS or check == "diagnostic" \
+        and base.get("correction") is not None else base
     if check == "design":
         validate_design_generation_history(
             entries, index, logical, "a durable construction verdict",
@@ -4050,6 +5018,24 @@ def validate_construction_verdict_entry(entries, index, entry):
         validate_code_generation_history(
             entries, index, logical, "a durable construction verdict",
         )
+    elif check == "diagnostic" and logical.get("correction") is not None:
+        manifest_sha256, account = correction_diagnostic_manifest_identity(
+            entries[:index], logical.get("manifest"),
+            "a durable Correction diagnostic verdict",
+        )
+        expected = {
+            "lot": account["unit"]["built"],
+            "correction": account["unit"]["round"],
+            "task": account["task"], "attempt": account["attempt"],
+            "unit": account["unit"], "failure": account["failure"],
+            "failure_authority_sha256": account["failure_authority_sha256"],
+            "try_ref": account["try_ref"], "try_commit": account["try_commit"],
+            "try_tree": account["try_tree"], "worktree": account["worktree"],
+            "manifest": logical["manifest"], "manifest_sha256": manifest_sha256,
+            "diagnostic_authority_sha256": account["authority_sha256"],
+        }
+        if {key: logical.get(key) for key in expected} != expected:
+            fail("a durable Correction diagnostic verdict changes its frozen manifest")
     spends = construction_domain_spends(entries, index, logical)
     if len(spends) != 1:
         fail("a durable construction verdict has no one exact logical spend")
@@ -4086,9 +5072,30 @@ def validate_construction_verdict_entry(entries, index, entry):
     else:
         prior_task_spends = construction_task_diagnostic_spends(
             entries, index, logical["lot"], logical["task"],
+            logical.get("correction"),
         )
         if len(prior_task_spends) != 1:
             fail("a durable diagnostic verdict does not consume the task's one logical spend")
+
+
+def validate_construction_verdict_entry(entries, index, entry):
+    cache = CORRECTION_CONTRACT_STATE_CACHE.get()
+    key = correction_projection_cache_key(
+        "construction-verdict", entries, len(entries), index,
+    ) if cache is not None else None
+    if key is not None and cache.get(key) is True:
+        return
+    pending = key is not None and cache.get(key) is _CORRECTION_CONTRACT_STATE_PENDING
+    if key is not None and not pending:
+        cache[key] = _CORRECTION_CONTRACT_STATE_PENDING
+    try:
+        _validate_construction_verdict_entry(entries, index, entry)
+    except BaseException:
+        if key is not None and not pending:
+            cache.pop(key, None)
+        raise
+    if key is not None:
+        cache[key] = True
 
 
 def code_resolution_text_items(text, subject, statuses):
@@ -4634,12 +5641,15 @@ def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=
     if data.get("schema") == 2 or entry.get("correction") is not None:
         required = {
             "schema", "unit", "unit_authority_sha256", "execution_authority_sha256",
-            "attempt", "sha", "preserved_ref", "design_proof_authority",
+            "prior_attempt", "attempt", "sha", "preserved_ref", "design_proof_authority",
             "final_checker_set_sha256", "final_checker_assignments",
             "spares", "spare_snapshot",
         }
         correction = entry.get("correction")
         unit = {"kind": "correction", "built": entry.get("lot"), "round": correction}
+        require_no_active_correction_amendment(
+            entries, before, entry.get("lot"), correction, subject,
+        )
         if set(data) != required or data.get("schema") != 2 or data.get("unit") != unit \
                 or not construction_positive_integer(correction) \
                 or not construction_positive_integer(entry.get("task")) \
@@ -4672,7 +5682,9 @@ def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=
         current = outstanding_final_checker_set(
             entries, before, entry.get("lot"), correction, subject,
         )
-        task_state = state["artifact"]["tasks"][entry["task"] - 1]
+        task_state = correction_artifact_task(
+            state["artifact"], entry["task"], subject,
+        )
         assigned = assigned_final_checker_obligations(
             current, unit, entry["task"], task_state, subject,
         )
@@ -4688,6 +5700,12 @@ def expected_attempt_stop_data(entries, before, entry, subject, inherited_retry=
                 or data.get("final_checker_assignments") != assigned \
                 or data.get("design_proof_authority") != design_proof_authority:
             fail(f"{subject} changes its Correction Round execution authority")
+        expected_prior = correction_attempt_terminal_prior_account(
+            entries, before, entry["lot"], correction, entry["task"],
+            data["attempt"], subject,
+        )
+        if data.get("prior_attempt") != expected_prior:
+            fail(f"{subject} changes its prior Correction attempt authority")
         preserved_ref = data.get("preserved_ref")
         if preserved_ref is not None:
             expected_prefix = (
@@ -4980,6 +5998,27 @@ def normalize_correction_resume(entries, data, context):
         entries + [candidate], len(entries), candidate, stop,
         "the Correction Round resume",
     )
+    if construction_positive_integer(stopped.get("attempt")) \
+            and construction_positive_integer(stop_entry.get("task")):
+        state = current_correction_contract_state(
+            entries, len(entries), unit["built"], unit["round"],
+            "the Correction Round resume lifecycle",
+        )
+        task_count = correction_lifecycle_task_count(
+            state["artifact"], "the Correction Round resume lifecycle",
+        )
+        admit_correction_task(CorrectionTaskFacts(
+            opening_present=True,
+            active_owner="stop",
+            accepted_tasks=stop_entry["task"] - 1,
+            task_count=task_count,
+            task=stop_entry["task"],
+            attempt=stopped["attempt"],
+            expected_attempt=stopped["attempt"],
+            retry_available=False,
+            retry_used=False,
+            terminal=None,
+        ), "resume")
     return expected
 
 
@@ -5001,8 +6040,17 @@ def accepted_stop_from_proof(entries, proof, subject):
     expected = expected_attempt_stop_data(entries, index, entry, subject)
     reviews = [name for name in ("design_review", "code_review")
                if isinstance(expected.get(name), dict)]
+    correction_attempt_pause = entry.get("kind") == "paused" \
+        and expected.get("schema") == 2 \
+        and isinstance(expected.get("unit"), dict) \
+        and expected["unit"].get("kind") == "correction" \
+        and construction_positive_integer(expected.get("attempt"))
     if note_data(entry) != expected \
-            or len(reviews) != 1 and not (not reviews and expected.get("retry") is not None):
+            or len(reviews) != 1 and not (
+                not reviews and (
+                    expected.get("retry") is not None or correction_attempt_pause
+                )
+            ):
         fail(f"{subject} does not identify one checker correction obligation")
     return index, entry, {
         key: expected[key] for key in ("design_review", "code_review", "retry")
@@ -5020,11 +6068,21 @@ def accepted_retry_from_proof(entries, proof, subject):
 
 
 def outstanding_retry_proof(entries, lot):
-    terminals = [(index, entry) for index, entry in enumerate(entries)
-                 if entry.get("event") == "note" and entry.get("lot") == lot
-                 and entry.get("kind") in {
-                     "attempt.failed", "attempt.succeeded", "paused", "aborted",
-                 }]
+    terminals = []
+    for index, entry in enumerate(entries):
+        data = note_data(entry)
+        if entry.get("event") != "note" or entry.get("lot") != lot \
+                or entry.get("kind") not in {
+                    "attempt.failed", "attempt.succeeded", "paused", "aborted",
+                }:
+            continue
+        unit = data.get("unit")
+        bare_correction_stop = entry.get("kind") in {"paused", "aborted"} \
+            and data.get("schema") == 2 \
+            and isinstance(unit, dict) and unit.get("kind") == "correction" \
+            and "attempt" not in data
+        if not bare_correction_stop:
+            terminals.append((index, entry))
     if not terminals:
         return None
     index, terminal = terminals[-1]
@@ -5037,6 +6095,11 @@ def outstanding_retry_proof(entries, lot):
         )
         if data != expected:
             fail("the durable stopped attempt changed its retry obligation", expected)
+        if terminal.get("kind") == "paused" and data.get("schema") == 2 \
+                and isinstance(data.get("unit"), dict) \
+                and data["unit"].get("kind") == "correction" \
+                and construction_positive_integer(data.get("attempt")):
+            return journal_line_proof(index)
     if isinstance(data.get("code_review"), dict) or isinstance(data.get("design_review"), dict):
         proof = journal_line_proof(index)
         accepted_retry_from_proof(entries, proof, "the outstanding retry obligation")
@@ -5830,6 +6893,20 @@ def correction_retry_transition_kind(entry):
         return "contract-mapped", data.get("retry_transition")
     if kind == "correction.round.revised":
         return "contract-map-document", data.get("retry_transition")
+    if kind in {"correction.round.rebased", "correction.round.resolved"}:
+        return "amendment-return", data.get("retry_transition")
+    if kind == "correction.round.escalated":
+        transfer = {
+            "ordinary": "ordinary-escalation",
+            "post-amendment-return": "amendment-return",
+            "retained-authority-rewind": "retained-authority-escalation",
+        }.get(data.get("producer"))
+        if transfer is not None:
+            return transfer, data.get("retry_transition")
+    if kind == "amendment.opened" and data.get("origin") == "correction-round":
+        return "amendment-opened", data.get("retry_transition")
+    if kind == "sublot.allocated" and data.get("origin") == "correction-round":
+        return "sublot-allocation", data.get("retry_transition")
     return None, None
 
 
@@ -5862,6 +6939,21 @@ def validate_final_checker_transition_producer(entries, index, entry, subject):
             validate_final_checker_contract_mapped_entry(entries, index, entry)
         elif entry.get("kind") == "correction.round.revised":
             validate_correction_round_revision_entry(entries, index, entry)
+        elif entry.get("kind") == "correction.round.rebased":
+            validate_correction_round_rebased_entry(entries, index, entry)
+        elif entry.get("kind") == "correction.round.resolved":
+            validate_correction_round_resolved_entry(entries, index, entry)
+        elif entry.get("kind") == "correction.round.escalated":
+            validate_correction_round_escalated_entry(entries, index, entry)
+        elif entry.get("kind") == "amendment.opened" \
+                and note_data(entry).get("origin") == "correction-round":
+            validate_amendment_opening_entry(entries, index, entry)
+        elif entry.get("kind") == "sublot.allocated" \
+                and note_data(entry).get("origin") == "correction-round":
+            validate_sublot_allocation(
+                entries[:index], note_data(entry), entry.get("text"),
+                "a durable Correction escalation sub-lot allocation",
+            )
         else:
             fail(f"{subject} has an unsupported final-checker producer")
     finally:
@@ -5880,10 +6972,16 @@ def outstanding_final_checker_set(entries, before, built, correction, subject):
             if entry.get("lot") != built or entry.get("correction") != correction:
                 continue
             transfer_kind, transition = correction_retry_transition_kind(entry)
-            if entry.get("kind") not in {
+            producer = entry.get("kind") in {
                 "attempt.failed", "attempt.succeeded", "final-checker.contract-mapped",
-                "correction.round.revised",
-            }:
+                "correction.round.revised", "correction.round.rebased",
+                "correction.round.resolved",
+                "correction.round.escalated",
+            } or entry.get("kind") == "amendment.opened" \
+                and note_data(entry).get("origin") == "correction-round" \
+                or entry.get("kind") == "sublot.allocated" \
+                and note_data(entry).get("origin") == "correction-round"
+            if not producer:
                 continue
             validate_final_checker_transition_producer(entries, index, entry, subject)
             if transition is None:
@@ -5924,14 +7022,31 @@ def assigned_final_checker_obligations(current, unit, task, task_state, subject)
     return assigned
 
 
+def correction_artifact_task(artifact, task, subject):
+    matches = [candidate for candidate in artifact["tasks"] if candidate["task"] == task]
+    if len(matches) != 1:
+        fail(f"{subject} has no one exact active Correction Round task {task}")
+    return matches[0]
+
+
+def correction_lifecycle_task_count(artifact, subject):
+    projection = artifact.get("task_projection")
+    preserved = projection.get("preserved", []) if projection is not None else []
+    projected = [item.get("task") for item in artifact.get("tasks", [])]
+    try:
+        return complete_correction_task_count(preserved, projected)
+    except ValueError as exc:
+        fail(f"{subject} has no exact current Correction task identity set", exc)
+
+
 def correction_revision_retry_transition(entries, before, state, artifact, subject):
     """Preserve one complete set while a bounded revision updates task contracts."""
     current = outstanding_final_checker_set(
         entries, before, state["built"], state["round"], subject,
     )
     unit = {"kind": "correction", "built": state["built"], "round": state["round"]}
-    prior_tasks = state["artifact"]["tasks"]
-    next_tasks = artifact["tasks"]
+    prior_tasks = {item["task"]: item for item in state["artifact"]["tasks"]}
+    next_tasks = {item["task"]: item for item in artifact["tasks"]}
     dispositions = []
     for member in current["entries"]:
         source = member["source"]
@@ -5942,12 +7057,12 @@ def correction_revision_retry_transition(entries, before, state, artifact, subje
         if assignment["owner"] == "task":
             if assignment["unit"] == unit:
                 task = assignment["task"]
-                if task > len(prior_tasks) or task > len(next_tasks) \
+                if task not in prior_tasks or task not in next_tasks \
                         or assignment["phase"] != source["required_consumer_phase"] \
                         or assignment["task_contract_sha256"] \
-                        != prior_tasks[task - 1]["task_contract_sha256"]:
+                        != prior_tasks[task]["task_contract_sha256"]:
                     fail(f"{subject} changes an existing task assignment")
-                assignment["task_contract_sha256"] = next_tasks[task - 1][
+                assignment["task_contract_sha256"] = next_tasks[task][
                     "task_contract_sha256"
                 ]
             outcome = "deferred"
@@ -5964,6 +7079,63 @@ def correction_revision_retry_transition(entries, before, state, artifact, subje
         transfer_kind="contract-map-document",
     )
     return transition
+
+
+def correction_revision_blocker_account(entries, before, built, correction, subject):
+    """Select the one unconsumed C3.9b producer for a bounded revision."""
+    consumed = {
+        note_data(entry).get("blocker", {}).get("failure")
+        for entry in entries[:before]
+        if entry.get("kind") == "correction.round.revised"
+        and note_data(entry).get("schema") == 1
+        and note_data(entry).get("built") == built
+        and note_data(entry).get("round") == correction
+        and isinstance(note_data(entry).get("blocker"), dict)
+    }
+    candidates = []
+    for index, entry in enumerate(entries[:before]):
+        data = note_data(entry)
+        if entry.get("kind") != "attempt.failed" \
+                or entry.get("lot") != built \
+                or entry.get("correction") != correction \
+                or data.get("schema") != 2 \
+                or data.get("classification") != "C3.9b":
+            continue
+        validate_attempt_failed_entry(entries, index, entry)
+        obligation = data.get("checker_obligation")
+        blocker_reviews = [
+            review for checker in ("design", "code")
+            if isinstance(obligation, dict)
+            and isinstance((review := obligation.get(f"{checker}_review")), dict)
+            and isinstance(review.get("contract_blocked"), list)
+            and review["contract_blocked"]
+        ]
+        if len(blocker_reviews) != 1:
+            fail(f"{subject} has no exact controller-owned C3.9b blocker")
+        proof = journal_line_proof(index)
+        if proof in consumed:
+            continue
+        task = entry.get("task")
+        attempt = data.get("attempt")
+        account = correction_attempt_retry_account(
+            entries, before, built, correction, task, attempt, subject,
+        )
+        if account.get("failure") != proof \
+                or account.get("classification") != "C3.9b" \
+                or any(
+                    later.get("event") == "session-started"
+                    and later.get("mode") == "construction"
+                    and later.get("job") == "implementer"
+                    and later.get("lot") == built
+                    and later.get("correction") == correction
+                    and later.get("task") == task
+                    for later in entries[index + 1:before]
+                ):
+            fail(f"{subject} does not consume the current C3.9b blocker")
+        candidates.append(account)
+    if len(candidates) != 1:
+        fail(f"{subject} has no one exact unconsumed C3.9b blocker")
+    return candidates[0]
 
 
 def final_checker_map_operation(identity, source):
@@ -6007,7 +7179,58 @@ def correction_final_checker_source(identity, report):
     })
 
 
-def correction_attempt_failed_account(entries, before, identity, base, report):
+def correction_pre_map_document_account(
+        entries, before, identity, source, subject, *, require_workspace_bytes,
+):
+    proof_index, verdict = journal_entry_from_proof(
+        entries, source.get("source_proof"), f"{subject}'s accepted checker verdict",
+    )
+    verdict_data = note_data(verdict)
+    if proof_index >= before or verdict.get("kind") != "verdict.consumed" \
+            or verdict.get("lot") != identity["lot"] \
+            or verdict.get("correction") != identity["correction"] \
+            or verdict.get("task") != identity["task"] \
+            or verdict.get("attempt") != identity["attempt"] \
+            or verdict_data.get("check") != source.get("checker"):
+        fail(f"{subject} has no exact accepted checker generation")
+    validate_construction_verdict_entry(entries, proof_index, verdict)
+    manifest = verdict_data.get("manifest")
+    _opening_index, logical = construction_checker_manifest_generation(
+        entries[:before], manifest, subject,
+    )
+    manifest_path = exact_real_file(
+        WORKSPACE, manifest, f"{subject}'s accepted checker manifest",
+    )
+    try:
+        manifest_document = json.loads(Path(manifest_path).read_bytes())
+    except (UnicodeError, ValueError) as exc:
+        fail(f"{subject}'s accepted checker manifest is malformed", exc)
+    state = current_correction_contract_state(
+        entries, before, identity["lot"], identity["correction"], subject,
+    )
+    path = state["path"]
+    digest = manifest_document.get("plan_sha256") \
+        if isinstance(manifest_document, dict) else None
+    if not isinstance(manifest_document, dict) \
+            or logical.get("manifest") != manifest \
+            or manifest_document.get("plan") != path \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+        fail(f"{subject}'s accepted checker manifest changes its pre-map document")
+    account = {"schema": 1, "path": path, "sha256": digest}
+    if require_workspace_bytes:
+        document_path = exact_real_file(WORKSPACE, path, f"{subject}'s pre-map document")
+        if sha256_bytes(Path(document_path).read_bytes()) != digest:
+            fail(f"{subject}'s workspace document changed after its accepted checker generation")
+    return account
+
+
+def correction_attempt_failed_account(
+        entries, before, identity, base, report, *, require_workspace_document=False,
+):
+    require_no_active_correction_amendment(
+        entries, before, identity["lot"], identity["correction"],
+        "the correction attempt failure",
+    )
     current = outstanding_final_checker_set(
         entries, before, identity["lot"], identity["correction"],
         "the correction attempt failure",
@@ -6050,15 +7273,25 @@ def correction_attempt_failed_account(entries, before, identity, base, report):
         },
         "evidence": None,
     } for entry in current["entries"]]
-    transition, _ = materialize_final_checker_transition(
+    transition, output = materialize_final_checker_transition(
         current, additions=additions, dispositions=dispositions,
         transfer_kind="final-checker-source",
     )
-    return {
+    if source is not None:
+        admit_correction_obligation(CorrectionObligationFacts(
+            opening_present=True,
+            active_owner="task",
+            producer_owner="task",
+            outstanding_before=len(current["entries"]),
+            outstanding_after=len(output["entries"]),
+            terminal=None,
+        ), "produce")
+    account = {
         "schema": 2,
         "unit": identity["unit"],
         "unit_authority_sha256": identity["unit_authority_sha256"],
         "execution_authority_sha256": identity["execution_authority_sha256"],
+        "prior_attempt": identity["prior_attempt"],
         **base,
         "checker_obligation": report,
         "design_proof_authority": design_proof_authority,
@@ -6067,6 +7300,12 @@ def correction_attempt_failed_account(entries, before, identity, base, report):
         "final_checker_transition": transition,
         "final_checker_output_set_sha256": transition["output_sha256"],
     }
+    if source is not None:
+        account["pre_map_document"] = correction_pre_map_document_account(
+            entries, before, identity, source, "the correction attempt failure",
+            require_workspace_bytes=require_workspace_document,
+        )
+    return account
 
 
 def correction_success_code_logical(entries, before, identity, subject):
@@ -6140,6 +7379,9 @@ def final_checker_consumption_manifest(
 
 
 def correction_attempt_succeeded_account(entries, before, identity, commit, gate, subject):
+    require_no_active_correction_amendment(
+        entries, before, identity["lot"], identity["correction"], subject,
+    )
     if not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)) \
             or not re.fullmatch(r"[0-9a-f]{64}", str(gate)):
         fail(f"{subject} has malformed commit or gate identity")
@@ -6171,7 +7413,9 @@ def correction_attempt_succeeded_account(entries, before, identity, commit, gate
     state = current_correction_contract_state(
         entries, before, identity["lot"], identity["correction"], subject,
     )
-    task_state = state["artifact"]["tasks"][identity["task"] - 1]
+    task_state = correction_artifact_task(
+        state["artifact"], identity["task"], subject,
+    )
     assigned = assigned_final_checker_obligations(
         current, identity["unit"], identity["task"], task_state, subject,
     )
@@ -6222,15 +7466,25 @@ def correction_attempt_succeeded_account(entries, before, identity, commit, gate
             "assignment": assignment,
             "evidence": None,
         })
-    transition, _output = materialize_final_checker_transition(
+    transition, output = materialize_final_checker_transition(
         current, additions=[], dispositions=dispositions, transfer_kind="retry-consumed",
     )
+    if assigned:
+        admit_correction_obligation(CorrectionObligationFacts(
+            opening_present=True,
+            active_owner="task",
+            producer_owner=None,
+            outstanding_before=len(current["entries"]),
+            outstanding_after=len(output["entries"]),
+            terminal=None,
+        ), "consume")
     return {
         "schema": 2,
         "unit": identity["unit"],
         "unit_authority_sha256": identity["unit_authority_sha256"],
         "execution_authority_sha256": identity["execution_authority_sha256"],
         "attempt_predecessor": predecessor,
+        "prior_attempt": identity["prior_attempt"],
         "attempt": identity["attempt"],
         "sha": commit,
         "gate": gate,
@@ -6263,9 +7517,22 @@ def normalize_attempt_failed(entries, data, context):
     if identity.get("correction") is not None:
         expected = correction_attempt_failed_account(
             entries, len(entries), identity, base, report,
+            require_workspace_document=True,
         )
         if data != expected:
             fail("attempt.failed changes its exact Correction Round failure account", expected)
+        admit_correction_task(CorrectionTaskFacts(
+            opening_present=True,
+            active_owner="task",
+            accepted_tasks=identity["task"] - 1,
+            task_count=identity["plan_tasks"],
+            task=identity["task"],
+            attempt=identity["attempt"],
+            expected_attempt=identity["attempt"],
+            retry_available=identity["prior_attempt"] is not None,
+            retry_used=False,
+            terminal=None,
+        ), "fail")
         return expected
     expected = {**base, **(report or {})}
     if identity.get("retry"):
@@ -6306,6 +7573,18 @@ def normalize_attempt_succeeded(entries, data, context):
             "data": expected,
         }
         validate_attempt_succeeded_entry(entries + [candidate], len(entries), candidate)
+        admit_correction_task(CorrectionTaskFacts(
+            opening_present=True,
+            active_owner="task",
+            accepted_tasks=identity["task"] - 1,
+            task_count=identity["plan_tasks"],
+            task=identity["task"],
+            attempt=identity["attempt"],
+            expected_attempt=identity["attempt"],
+            retry_available=identity["prior_attempt"] is not None,
+            retry_used=False,
+            terminal=None,
+        ), "succeed")
         return expected
     expected = {
         "attempt": identity["attempt"], "lot": identity["lot"],
@@ -6339,6 +7618,7 @@ def normalize_attempt_stop(entries, kind, data, context):
             "unit": identity["unit"],
             "unit_authority_sha256": identity["unit_authority_sha256"],
             "execution_authority_sha256": identity["execution_authority_sha256"],
+            "prior_attempt": identity["prior_attempt"],
             "attempt": identity["attempt"],
             "sha": data.get("sha"),
             "preserved_ref": data.get("preserved_ref"),
@@ -6359,6 +7639,18 @@ def normalize_attempt_stop(entries, kind, data, context):
             entries + [candidate], len(entries), candidate,
             f"the {kind} correction attempt stop",
         )
+        admit_correction_task(CorrectionTaskFacts(
+            opening_present=True,
+            active_owner="task",
+            accepted_tasks=identity["task"] - 1,
+            task_count=identity["plan_tasks"],
+            task=identity["task"],
+            attempt=identity["attempt"],
+            expected_attempt=identity["attempt"],
+            retry_available=identity["prior_attempt"] is not None,
+            retry_used=False,
+            terminal=None,
+        ), "pause")
         return expected
     base = {"sha": data.get("sha"), "attempt": identity["attempt"]}
     if data != base:
@@ -6380,11 +7672,14 @@ def validate_attempt_failed_entry(entries, index, entry):
         unit = {"kind": "correction", "built": entry.get("lot"), "round": correction}
         required = {
             "schema", "unit", "unit_authority_sha256", "execution_authority_sha256",
-            "attempt", "classification", "checker_obligation", "design_proof_authority",
+            "prior_attempt", "attempt", "classification", "checker_obligation",
+            "design_proof_authority",
             "final_checker_input_set_sha256", "final_checker_assignments",
             "final_checker_transition", "final_checker_output_set_sha256",
         }
-        if set(data) != required or data.get("schema") != 2 or data.get("unit") != unit \
+        allowed_fields = (required, required | {"pre_map_document"})
+        if set(data) not in allowed_fields or data.get("schema") != 2 \
+                or data.get("unit") != unit \
                 or not construction_positive_integer(correction) \
                 or not construction_positive_integer(entry.get("task")) \
                 or not construction_positive_integer(data.get("attempt")) \
@@ -6416,7 +7711,9 @@ def validate_attempt_failed_entry(entries, index, entry):
             entries, index, entry["lot"], correction,
             "the durable correction attempt failure",
         )
-        task_state = state["artifact"]["tasks"][entry["task"] - 1]
+        task_state = correction_artifact_task(
+            state["artifact"], entry["task"], "the durable correction attempt failure",
+        )
         assigned = sorted(
             member["source"]["obligation_id"] for member in current["entries"]
             if member["assignment"]["owner"] == "task"
@@ -6428,6 +7725,10 @@ def validate_attempt_failed_entry(entries, index, entry):
             "unit": unit,
             "unit_authority_sha256": data["unit_authority_sha256"],
             "execution_authority_sha256": data["execution_authority_sha256"],
+            "prior_attempt": correction_attempt_terminal_prior_account(
+                entries, index, entry["lot"], correction, entry["task"],
+                data["attempt"], "the durable correction attempt failure",
+            ),
             "contract_sha256": task_state["task_contract_sha256"],
             "design_proof_authority": data["design_proof_authority"],
             "outstanding_final_checker_set_sha256": final_checker_set_sha256(current),
@@ -6461,12 +7762,12 @@ def validate_attempt_failed_entry(entries, index, entry):
         fail("a durable attempt.failed changes or drops its checker obligation", expected)
 
 
-def validate_attempt_succeeded_entry(entries, index, entry):
+def _validate_attempt_succeeded_entry(entries, index, entry):
     data = note_data(entry)
     if data.get("schema") == 2 or entry.get("correction") is not None:
         expected_keys = {
             "schema", "unit", "unit_authority_sha256", "execution_authority_sha256",
-            "attempt_predecessor", "attempt", "sha", "gate", "retry",
+            "attempt_predecessor", "prior_attempt", "attempt", "sha", "gate", "retry",
             "design_proof_authority",
             "final_checker_input_set_sha256", "final_checker_assignments",
             "final_checker_transition", "final_checker_output_set_sha256",
@@ -6501,7 +7802,9 @@ def validate_attempt_succeeded_entry(entries, index, entry):
             entries, index, entry["lot"], correction,
             "the durable correction attempt success",
         )
-        task_state = state["artifact"]["tasks"][entry["task"] - 1]
+        task_state = correction_artifact_task(
+            state["artifact"], entry["task"], "the durable correction attempt success",
+        )
         assigned = assigned_final_checker_obligations(
             current, unit, entry["task"], task_state,
             "the durable correction attempt success",
@@ -6512,6 +7815,10 @@ def validate_attempt_succeeded_entry(entries, index, entry):
             "unit_authority_sha256": state["authority_sha256"],
             "execution_authority_sha256": state["execution_authority_sha256"],
             "attempt_predecessor": data["attempt_predecessor"],
+            "prior_attempt": correction_attempt_terminal_prior_account(
+                entries, index, entry["lot"], correction, entry["task"],
+                data["attempt"], "the durable correction attempt success",
+            ),
             "outstanding_final_checker_set_sha256": final_checker_set_sha256(current),
             "assigned_final_checker_obligations": assigned,
         }
@@ -6558,7 +7865,60 @@ def validate_attempt_succeeded_entry(entries, index, entry):
             fail("attempt.succeeded did not give every retry obligation to its checker")
 
 
-def validate_construction_verdict_history(entries):
+def validate_attempt_succeeded_entry(entries, index, entry):
+    data = note_data(entry)
+    if data.get("schema") != 2 and entry.get("correction") is None:
+        return _validate_attempt_succeeded_entry(entries, index, entry)
+    cache = CORRECTION_CONTRACT_STATE_CACHE.get()
+    cache_key = correction_projection_cache_key(
+        "attempt-succeeded", entries, len(entries), index,
+    ) if cache is not None else None
+    if cache_key is not None and cache.get(cache_key) is True:
+        return
+    pending = cache_key is not None \
+        and cache.get(cache_key) is _CORRECTION_CONTRACT_STATE_PENDING
+    if cache_key is not None and not pending:
+        cache[cache_key] = _CORRECTION_CONTRACT_STATE_PENDING
+    identity = (
+        entry.get("lot"), entry.get("correction"), entry.get("task"), index,
+        data.get("sha"),
+    )
+    active = CORRECTION_SUCCESS_VALIDATIONS.get()
+    if identity in active:
+        return _validate_attempt_succeeded_entry(entries, index, entry)
+    token = CORRECTION_SUCCESS_VALIDATIONS.set((*active, identity))
+    try:
+        if not CORRECTION_REWIND_SUCCESS_RECOVERIES.get() \
+                and not CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.get() \
+                and any(
+                    candidate.get("kind") == "rewind.done"
+                    and note_data(candidate).get("unit") == {
+                        "kind": "correction", "built": entry.get("lot"),
+                        "round": entry.get("correction"),
+                    }
+                    for candidate in entries[:index]
+                ):
+            projection = correction_rewind_history_projection(
+                entries, len(entries),
+                "the durable correction attempt success's rewind history",
+            )
+            result = projection.run(
+                _validate_attempt_succeeded_entry, entries, index, entry,
+            )
+        else:
+            result = _validate_attempt_succeeded_entry(entries, index, entry)
+    except BaseException:
+        if cache_key is not None and not pending:
+            cache.pop(cache_key, None)
+        raise
+    finally:
+        CORRECTION_SUCCESS_VALIDATIONS.reset(token)
+    if cache_key is not None:
+        cache[cache_key] = True
+    return result
+
+
+def validate_construction_verdict_entries(entries):
     for index, entry in enumerate(entries):
         if entry.get("event") != "note" or entry.get("kind") != "verdict.consumed":
             continue
@@ -6592,6 +7952,81 @@ def validate_construction_verdict_history(entries):
     current_correction_stop_state(
         entries, len(entries), "the durable Correction Round stop history",
     )
+
+
+def correction_rewind_history_recoveries(
+        entries, before, subject, *, validated_units=(),
+):
+    units = sorted({
+        (data["unit"]["built"], data["unit"]["round"])
+        for entry in entries[:before]
+        if entry.get("kind") == "rewind.done"
+        and isinstance((data := note_data(entry)), dict)
+        and data.get("schema") == 2
+        and isinstance(data.get("unit"), dict)
+        and data["unit"].get("kind") == "correction"
+        and isinstance(data["unit"].get("built"), str)
+        and construction_positive_integer(data["unit"].get("round"))
+    })
+    recoveries = []
+    for entry in entries[:before]:
+        data = note_data(entry)
+        unit = data.get("unit") if isinstance(data, dict) else None
+        if entry.get("kind") != "rewind.done" or data.get("schema") != 2 \
+                or not isinstance(unit, dict) or unit.get("kind") != "correction" \
+                or not isinstance(data.get("moved"), list):
+            continue
+        for member in data["moved"]:
+            if not isinstance(member, dict):
+                continue
+            recoveries.append({
+                "built": unit.get("built"), "round": unit.get("round"),
+                "task": member.get("task"), "commit": member.get("commit"),
+                "from": member.get("from"), "to": member.get("to"),
+                "source_commit": None,
+            })
+    current = CORRECTION_REWIND_SUCCESS_RECOVERIES.get()
+    token = CORRECTION_REWIND_SUCCESS_RECOVERIES.set((*current, *recoveries))
+    try:
+        for built, correction in units:
+            if (built, correction) in validated_units:
+                continue
+            current_correction_contract_state(
+                entries, before, built, correction, subject,
+            )
+    finally:
+        CORRECTION_REWIND_SUCCESS_RECOVERIES.reset(token)
+    for recovery in recoveries:
+        source = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{recovery.get('from')}^{{commit}}"], capture_output=True, text=True,
+        )
+        recovery["source_commit"] = source.stdout.strip() \
+            if source.returncode == 0 else None
+        recovery["validated"] = True
+    return tuple(recoveries)
+
+
+def correction_rewind_history_projection(entries, before, subject):
+    projection = contextvars.copy_context()
+    projection.run(CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.set, True)
+    recoveries = projection.run(
+        correction_rewind_history_recoveries, entries, before, subject,
+    )
+    current = CORRECTION_REWIND_SUCCESS_RECOVERIES.get()
+    projection.run(
+        CORRECTION_REWIND_SUCCESS_RECOVERIES.set, (*current, *recoveries),
+    )
+    return projection
+
+
+def validate_construction_verdict_history(entries):
+    if CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.get():
+        return validate_construction_verdict_entries(entries)
+    projection = correction_rewind_history_projection(
+        entries, len(entries), "the durable Construction verdict history",
+    )
+    return projection.run(validate_construction_verdict_entries, entries)
 
 
 def normalize_consolidation_started(entries, data, round_number):
@@ -7227,11 +8662,20 @@ def exact_pass_gate_result(entries, before, data, subject):
     if len(matches) != 1:
         fail(f"{subject} has no one exact durable gate result")
     result = note_data(matches[0])
-    expected = {
-        "scope": data["source_scope"], "owner": data["source_owner"],
-        "lot": data["source_lot"], "task": data["source_task"],
-        "attempt": data["source_attempt"],
-    }
+    terminal_kind = data.get("correction_terminal_kind")
+    if terminal_kind == "amendment-resolved":
+        expected = {
+            "scope": "correction-baseline", "lot": data["built"],
+            "correction": data["source_round"], "task": 0, "attempt": 0,
+        }
+    else:
+        expected = {
+            "scope": data["source_scope"], "owner": data["source_owner"],
+            "lot": data["source_lot"], "task": data["source_task"],
+            "attempt": data["source_attempt"],
+        }
+        if terminal_kind == "built":
+            expected["correction"] = data["source_round"]
     if any(result.get(key) != value for key, value in expected.items()) \
             or result.get("green") is not True or result.get("surface") != "unchanged":
         fail(f"{subject}'s durable gate result changes its source identity", result)
@@ -7246,15 +8690,19 @@ def exact_pass_gate_result(entries, before, data, subject):
         )
         if commit_tree.returncode != 0 or result.get("tree") != commit_tree.stdout.strip():
             fail(f"{subject}'s task gate checked another candidate tree")
-        successes = [entry for entry in entries[:before]
+        successes = [(index, entry) for index, entry in enumerate(entries[:before])
                      if entry.get("kind") == "attempt.succeeded"
                      and entry.get("lot") == data["source_lot"]
                      and entry.get("task") == data["source_task"]
                      and note_data(entry).get("attempt") == data["source_attempt"]
                      and note_data(entry).get("gate") == data["gate"]
-                     and note_data(entry).get("sha") == data["commit"]]
+                     and note_data(entry).get("sha") == data["commit"]
+                     and (terminal_kind != "built"
+                          or entry.get("correction") == data["source_round"])]
         if len(successes) != 1:
             fail(f"{subject} has no exact accepted task success")
+        if terminal_kind == "built":
+            validate_attempt_succeeded_entry(entries, successes[0][0], successes[0][1])
     return result
 
 
@@ -7280,6 +8728,200 @@ def pass_generation_before(entries, opening_index, subject):
         data["source_owner"], data["gate"], subject,
     )
     return account["position"], generation
+
+
+def correction_review_generation_account(entries, terminal_index, terminal, subject):
+    """Derive one exact Correction Round generation from its terminal prefix."""
+    data = note_data(terminal)
+    built, correction = data.get("built"), data.get("round")
+    if terminal.get("kind") == "correction.round.built":
+        validate_correction_round_built_entry(entries, terminal_index, terminal)
+        terminal_kind = "built"
+    elif terminal.get("kind") == "correction.round.resolved":
+        validate_correction_round_resolved_entry(entries, terminal_index, terminal)
+        terminal_kind = "amendment-resolved"
+    else:
+        fail(f"{subject} has no supported Correction Round terminal")
+    state = current_correction_contract_state(
+        entries, terminal_index, built, correction, subject,
+    )
+    opening = state["opening"]
+    if opening.get("round") != correction \
+            or opening.get("parent_generation_sha256") is None:
+        fail(f"{subject} changes its Correction Round opening generation")
+    authorities = []
+    for index, entry in enumerate(
+        entries[state["opening_index"] + 1:terminal_index], state["opening_index"] + 1,
+    ):
+        candidate = note_data(entry)
+        if candidate.get("built") != built and not (
+            entry.get("kind") == "rewind.done"
+            and candidate.get("unit") == {
+                "kind": "correction", "built": built, "round": correction,
+            }
+        ):
+            continue
+        if entry.get("kind") == "correction.round.revised" \
+                and candidate.get("round") == correction:
+            authorities.append({"kind": "revision", "proof": journal_line_proof(index)})
+        elif entry.get("kind") == "correction.round.rebased" \
+                and candidate.get("round") == correction:
+            authorities.append({"kind": "rebase", "proof": journal_line_proof(index)})
+        elif entry.get("kind") == "rewind.done" \
+                and candidate.get("unit") == {
+                    "kind": "correction", "built": built, "round": correction,
+                }:
+            authorities.append({"kind": "rewind", "proof": journal_line_proof(index)})
+
+    active = accepted_correction_task_entries_at_prefix(
+        entries, terminal_index, built, correction, state["opening_index"],
+    )
+    if terminal_kind == "built":
+        expected_tasks = list(range(1, data["tasks"] + 1))
+    else:
+        expected_tasks = data["accepted_contributions"]
+    if [task for task, _index, _success in active] != expected_tasks:
+        fail(f"{subject} changes its terminal accepted-contribution prefix")
+    tasks = [{
+        "task": task,
+        "attempt": success["attempt"],
+        "commit": success["sha"],
+        "gate": success["gate"],
+        "success": journal_line_proof(index),
+    } for task, index, success in active]
+    current_set = outstanding_final_checker_set(
+        entries, terminal_index + 1, built, correction, subject,
+    )
+    current_set_sha256 = final_checker_set_sha256(current_set)
+    if current_set != empty_final_checker_set():
+        fail(f"{subject} has outstanding final-checker obligations")
+    terminal_payload = {key: value for key, value in data.items()
+                        if key != "generation_sha256"}
+    terminal_sha256 = hashlib.sha256(json.dumps(
+        terminal_payload, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    account = {
+        "schema": 1,
+        "kind": "correction",
+        "built": built,
+        "position": correction,
+        "parent": {
+            "position": correction - 1,
+            "generation_sha256": opening["parent_generation_sha256"],
+            "commit": opening["base_commit"],
+        },
+        "opening": journal_line_proof(state["opening_index"]),
+        "authorities": authorities,
+        "artifact": {
+            "workspace": opening["artifact"],
+            "repository": opening["artifact"],
+            "controller_sha256": state["controller_sha256"],
+            "final_sha256": data["artifact_sha256"],
+            "final_object": data["artifact_object"],
+        },
+        "tasks": tasks,
+        "terminal": {"kind": terminal_kind, "sha256": terminal_sha256},
+        "commit": data["commit"],
+        "gate": data["gate"],
+        "final_checker_set_sha256": current_set_sha256,
+    }
+    try:
+        generation = generation_sha256(account)
+    except ValueError as exc:
+        fail(f"{subject} has a malformed Correction review generation", exc)
+    return account, generation
+
+
+def correction_terminal_artifact_account(entries, before, built, correction, subject):
+    """Authenticate one built/resolved terminal and its final immutable artifact."""
+    if not isinstance(built, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built,
+    ) or not construction_positive_integer(correction):
+        fail(f"{subject} has a malformed Correction Round identity")
+    terminals = [(index, entry) for index, entry in enumerate(entries[:before])
+                 if entry.get("kind") in {
+                     "correction.round.built", "correction.round.resolved",
+                 }
+                 and note_data(entry).get("built") == built
+                 and note_data(entry).get("round") == correction]
+    if len(terminals) != 1:
+        fail(f"{subject} has no one exact built or resolved terminal")
+    terminal_index, terminal = terminals[0]
+    review, generation = correction_review_generation_account(
+        entries, terminal_index, terminal, subject,
+    )
+    terminal_proof = journal_line_proof(terminal_index)
+    successors = [(index, entry) for index, entry in enumerate(
+        entries[terminal_index + 1:before], terminal_index + 1,
+    ) if entry.get("kind") == "pass.opened" and (
+        note_data(entry).get("correction_terminal") == terminal_proof
+        or note_data(entry).get("built") == built
+        and note_data(entry).get("position") == correction
+    )]
+    if successors:
+        if len(successors) != 1:
+            fail(f"{subject} has an ambiguous Product successor")
+        validate_pass_opening_history(
+            entries, successors[0][0], f"{subject}'s existing Product successor",
+        )
+        fail(f"{subject} follows an existing Product successor")
+    artifact = review["artifact"]
+    try:
+        object_path = validate_content_object(
+            WORKSPACE, built, artifact["final_sha256"], ".md",
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable final artifact", exc)
+    if str(object_path.relative_to(WORKSPACE)) != artifact["final_object"]:
+        fail(f"{subject} changes its immutable final artifact path")
+    account = {
+        "schema": 1,
+        "built": built,
+        "round": correction,
+        "terminal_kind": terminal.get("kind"),
+        "terminal": terminal_proof,
+        "generation_sha256": generation,
+        "artifact": {
+            "path": artifact["workspace"],
+            "sha256": artifact["final_sha256"],
+            "object": artifact["final_object"],
+        },
+    }
+    account["authority_sha256"] = hashlib.sha256(json.dumps(
+        account, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    return account
+
+
+def correction_terminal_artifact_bytes(account, subject):
+    artifact = account.get("artifact") if isinstance(account, dict) else None
+    if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256", "object"}:
+        fail(f"{subject} has a malformed final artifact account")
+    try:
+        object_path = validate_content_object(
+            WORKSPACE, account.get("built"), artifact.get("sha256"), ".md",
+        )
+        payload = object_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable final artifact", exc)
+    if str(object_path.relative_to(WORKSPACE)) != artifact.get("object"):
+        fail(f"{subject} changes its immutable final artifact path")
+    return payload
+
+
+def require_canonical_correction_terminal_artifact(account, subject):
+    payload = correction_terminal_artifact_bytes(account, subject)
+    artifact = account["artifact"]
+    try:
+        with WorkspaceFileAnchor(
+            Path(WORKSPACE), artifact["path"], f"{subject}'s canonical artifact",
+        ) as target:
+            current = target.read_regular()
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact canonical final artifact", exc)
+    if current != payload:
+        fail(f"{subject} has changed canonical final artifact bytes")
+    return payload
 
 
 def validate_baseline_pass_successor(entries, before, built, commit, owner, gate, subject):
@@ -7361,38 +9003,1542 @@ def validate_baseline_pass_successor(entries, before, built, commit, owner, gate
     return account, generation_sha256(account)
 
 
-def plan_task_manifest(payload, subject):
+def structural_plan_task_projection(payload, subject):
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         fail(f"{subject} is not valid UTF-8", exc)
-    headings = []
-    ordinals = []
+    physical, visible = markdown_structure_lines(text)
+    starts = []
     malformed = []
     pattern = re.compile(r"^## Task ([1-9][0-9]*) - .+$")
-    for line in text.splitlines():
-        if not line.startswith("## Task "):
+    for index, line in enumerate(visible):
+        if line is None:
             continue
         match = pattern.fullmatch(line)
-        if not match:
+        if match:
+            starts.append((index, int(match.group(1))))
+        elif line.lstrip().startswith("## Task "):
             malformed.append(line)
-            continue
-        headings.append(line)
-        ordinals.append(int(match.group(1)))
+    ordinals = [ordinal for _index, ordinal in starts]
     if malformed or ordinals != list(range(1, len(ordinals) + 1)) or not ordinals:
         fail(f"{subject} has no exact sequential `## Task N - title` manifest",
              {"ordinals": ordinals, "malformed": malformed})
-    return headings
+    return physical, visible, starts
+
+
+def plan_task_manifest(payload, subject):
+    physical, _visible, starts = structural_plan_task_projection(payload, subject)
+    return [physical[index] for index, _ordinal in starts]
+
+
+def plan_task_manifest_account(payload, subject):
+    manifest = plan_task_manifest(payload, subject)
+    serialized = "".join(f"{heading}\n" for heading in manifest)
+    identity = subprocess.run(
+        ["git", "-C", project_root(), "hash-object", "--stdin"],
+        input=serialized, capture_output=True, text=True,
+    )
+    digest = identity.stdout.strip()
+    if identity.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", digest):
+        fail(f"{subject} cannot derive its exact task manifest identity", identity.stderr)
+    return {"tasks": len(manifest), "manifest_sha": digest, "headings": manifest}
+
+
+def committed_plan_task_state(lot, task, commit, subject):
+    result = subprocess.run(
+        [sys.executable, CONSTRUCTION_REVIEW, "committed-plan-state",
+         lot, str(task), commit],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        fail(f"{subject} has no exact committed task contract", result.stderr or result.stdout)
+    try:
+        state = json.loads(result.stdout)
+    except ValueError:
+        fail(f"{subject}'s committed task projector returned malformed JSON")
+    required = {
+        "plan", "plan_sha256", "plan_projection_sha256", "plan_ownership_sha256",
+        "contract_sha256", "design_sha256", "disagreement_sha256",
+    }
+    if not isinstance(state, dict) or set(state) != required \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(state.get("contract_sha256"))):
+        fail(f"{subject}'s committed task projector has malformed authority")
+    return state
+
+
+def escalation_plan_task_accounts(payload, lot, commit, subject):
+    physical, visible, starts = structural_plan_task_projection(payload, subject)
+    accounts = []
+    for position, (start, task) in enumerate(starts):
+        end = starts[position + 1][0] if position + 1 < len(starts) else len(physical)
+        contract_end = next((
+            index for index in range(start + 1, end)
+            if visible[index] is not None and visible[index].startswith("### ")
+        ), end)
+        logical = [
+            visible[index] for index in range(start + 1, contract_end)
+            if visible[index] is not None and visible[index].strip()
+        ]
+        field_positions = {
+            field: [index for index, line in enumerate(logical)
+                    if line.startswith(f"{field}:")]
+            for field in ("Covers", "Depends on", "Consumes final-checker obligations")
+        }
+        if any(len(positions) != 1 for positions in field_positions.values()):
+            fail(f"{subject} Task {task} has no exact consumer field account")
+        covers = field_positions["Covers"][0]
+        depends = field_positions["Depends on"][0]
+        consumes = field_positions["Consumes final-checker obligations"][0]
+        if (covers, depends, consumes) != (0, 1, 2):
+            fail(
+                f"{subject} Task {task} does not place its consumer field after Depends on",
+            )
+        covers_value = logical[covers].removeprefix("Covers:").strip()
+        cover_ids = covers_value.split(", ")
+        if covers_value != ", ".join(cover_ids) \
+                or any(not re.fullmatch(r"F[1-9][0-9]*", item) for item in cover_ids) \
+                or cover_ids != sorted(set(cover_ids), key=lambda item: int(item[1:])):
+            fail(f"{subject} Task {task} has malformed escalation item coverage")
+        depends_value = logical[depends].removeprefix("Depends on:").strip()
+        if depends_value == "-":
+            dependency_ids = []
+        else:
+            dependency_values = depends_value.split(", ")
+            if depends_value != ", ".join(dependency_values) \
+                    or any(not re.fullmatch(r"[1-9][0-9]*", item)
+                           for item in dependency_values):
+                fail(f"{subject} Task {task} has a malformed dependency list")
+            dependency_ids = [int(item) for item in dependency_values]
+            if dependency_ids != sorted(set(dependency_ids)) \
+                    or any(item >= task for item in dependency_ids):
+                fail(f"{subject} Task {task} has a non-canonical dependency list")
+        value = logical[consumes].removeprefix(
+            "Consumes final-checker obligations:",
+        ).strip()
+        if value == "-":
+            obligation_ids = []
+        else:
+            obligation_ids = value.split(", ")
+            if value != ", ".join(obligation_ids) \
+                    or obligation_ids != sorted(set(obligation_ids)) \
+                    or any(not re.fullmatch(r"[0-9a-f]{64}", item)
+                           for item in obligation_ids):
+                fail(f"{subject} Task {task} has a malformed obligation list")
+        if commit is None:
+            result = subprocess.run(
+                [sys.executable, CONSTRUCTION_REVIEW, "plan-state", lot, str(task)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                fail(f"{subject} has no exact workspace task contract",
+                     result.stderr or result.stdout)
+            try:
+                state = json.loads(result.stdout)
+            except ValueError:
+                fail(f"{subject}'s workspace task projector returned malformed JSON")
+            if not re.fullmatch(r"[0-9a-f]{64}", str(state.get("contract_sha256"))) \
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(state.get("design_sha256"))) \
+                    or state.get("disagreement_sha256") is not None \
+                    and not re.fullmatch(
+                        r"[0-9a-f]{64}", str(state.get("disagreement_sha256")),
+                    ):
+                fail(f"{subject}'s workspace task projector has malformed authority")
+        else:
+            state = committed_plan_task_state(lot, task, commit, subject)
+        accounts.append({
+            "task": task,
+            "covers": cover_ids,
+            "depends_on": dependency_ids,
+            "obligation_ids": obligation_ids,
+            "task_contract_sha256": state["contract_sha256"],
+            "design_sha256": state["design_sha256"],
+            "disagreement_sha256": state["disagreement_sha256"],
+        })
+    return accounts
+
+
+def correction_escalation_plan_item_coverage(task_accounts, terminal_data, subject):
+    items = terminal_data.get("items") if isinstance(terminal_data, dict) else None
+    item_ids = [item.get("id") for item in items] if isinstance(items, list) else None
+    expected = [f"F{ordinal}" for ordinal in range(1, len(items) + 1)] \
+        if isinstance(items, list) else None
+    if item_ids != expected or not expected:
+        fail(f"{subject} has no exact escalation item source account")
+    allowed = set(expected)
+    covered = set()
+    for task in task_accounts:
+        task_items = task.get("covers") if isinstance(task, dict) else None
+        if not isinstance(task_items, list) or any(item not in allowed for item in task_items):
+            fail(f"{subject} maps a foreign escalation item")
+        covered.update(task_items)
+    if covered != allowed:
+        fail(
+            f"{subject} does not cover every escalation item",
+            {"missing": sorted(allowed - covered, key=lambda item: int(item[1:]))},
+        )
+    return expected
+
+
+CORRECTION_ESCALATION_PLAN_KEYS = {
+    "schema", "origin", "tasks", "op", "source", "opening", "commit",
+    "plan", "plan_sha256", "preflight_sha256", "map_predecessor",
+    "final_checker_consumer_map", "retry_transition",
+}
+
+
+def correction_escalation_artifact_identity(data, subject):
+    if data.get("producer") != "retained-authority-rewind":
+        artifact = data.get("artifact")
+    else:
+        blocker = data.get("blocker")
+        artifact = blocker.get("artifact") if isinstance(blocker, dict) else None
+    if not isinstance(artifact, str) or not artifact:
+        fail(f"{subject} has no exact escalation artifact identity")
+    return artifact
+
+
+def correction_escalation_blocker_identity(item, subject):
+    blocker = item.get("blocker")
+    if isinstance(blocker, str) and blocker:
+        return blocker
+    if isinstance(blocker, dict) and set(blocker) == {"artifact", "sha256", "object"} \
+            and re.fullmatch(r"[0-9a-f]{64}", str(blocker.get("sha256"))):
+        return blocker["sha256"]
+    fail(f"{subject} has no exact escalation blocker identity")
+
+
+CORRECTION_ESCALATION_COMPLETENESS_AUTHORITY_KEYS = {
+    "schema", "owner", "plan", "plan_authority_sha256", "commit",
+    "plan_sha256", "retry_set_sha256",
+}
+CORRECTION_ESCALATION_COMPLETENESS_PUBLICATION_KEYS = {
+    "workspace_path", "committed_path", "task_manifest", "semantic_totals",
+}
+CORRECTION_ESCALATION_COMPLETENESS_KEYS = (
+    CORRECTION_ESCALATION_COMPLETENESS_AUTHORITY_KEYS
+    | CORRECTION_ESCALATION_COMPLETENESS_PUBLICATION_KEYS
+)
+CORRECTION_ESCALATION_C2_RESULT_KEYS = {
+    "decisions", "tasks", "deps", "constraints", "parent",
+}
+
+
+def correction_escalation_completeness_result_account(
+        data, subject, *, expected_totals=None,
+):
+    if data == {"unusable": "lost"}:
+        return {"kind": "unusable", "clean": None}
+    if not isinstance(data, dict) or set(data) != CORRECTION_ESCALATION_C2_RESULT_KEYS:
+        fail(f"{subject} has no exact C2 result shape")
+    if expected_totals is not None and (
+        not isinstance(expected_totals, dict)
+        or set(expected_totals) != {"decisions", "tasks", "deps"}
+        or any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+               for value in expected_totals.values())
+    ):
+        fail(f"{subject} has malformed frozen C2 totals")
+    fractions = []
+    for key in ("decisions", "tasks", "deps"):
+        match = re.fullmatch(r"(0|[1-9][0-9]*)/(0|[1-9][0-9]*)", str(data[key]))
+        if match is None or int(match.group(1)) > int(match.group(2)):
+            fail(f"{subject} has malformed {key} evidence")
+        fraction = (int(match.group(1)), int(match.group(2)))
+        if expected_totals is not None and fraction[1] != expected_totals[key]:
+            fail(
+                f"{subject}'s {key} total contradicts its frozen plan semantics",
+                {"expected": expected_totals[key], "actual": fraction[1]},
+            )
+        fractions.append(fraction)
+    if data["constraints"] != "ok" \
+            and not re.fullmatch(r"[1-9][0-9]* broken", str(data["constraints"])):
+        fail(f"{subject} has malformed constraint evidence")
+    if data["parent"] != "ok" \
+            and not re.fullmatch(r"[1-9][0-9]* broken", str(data["parent"])):
+        fail(f"{subject} has malformed parent evidence")
+    return {
+        "kind": "result",
+        "clean": all(done == total for done, total in fractions)
+        and data["constraints"] == "ok" and data["parent"] == "ok",
+    }
+
+
+def correction_escalation_completeness_terminal_account(data, plan_account, subject):
+    if not isinstance(data, dict) \
+            or any(data.get(key) != value for key, value in plan_account.items()):
+        fail(f"{subject} changes its frozen plan account")
+    result = {key: value for key, value in data.items()
+              if key not in CORRECTION_ESCALATION_COMPLETENESS_KEYS}
+    return correction_escalation_completeness_result_account(
+        result, subject, expected_totals=plan_account.get("semantic_totals"),
+    )
+
+
+def correction_escalation_completeness_semantics(
+        entries, plan_index, lot, payload, data, subject,
+):
+    source = correction_escalation_sublot_account(entries, plan_index, lot, subject)
+    task_accounts = escalation_plan_task_accounts(
+        payload, lot, data["commit"], f"{subject}'s committed plan",
+    )
+    decisions = correction_escalation_plan_item_coverage(
+        task_accounts, source["terminal_data"], subject,
+    )
+    return {
+        "decisions": len(decisions),
+        "tasks": len(task_accounts),
+        "deps": sum(len(task["depends_on"]) for task in task_accounts),
+    }
+
+
+def correction_escalation_completeness_plan_account(
+        entries, plan_index, lot, subject, *, frozen=None, live=False,
+):
+    if not isinstance(plan_index, int) or plan_index < 0 or plan_index >= len(entries):
+        fail(f"{subject} has no exact current plan publication")
+    entry = entries[plan_index]
+    data = note_data(entry)
+    transition = data.get("retry_transition")
+    relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
+    workspace_relative = PurePosixPath("plans", f"{lot}-plan.md")
+    if entry.get("event") != "note" or entry.get("kind") != "plan.written" \
+            or entry.get("mode") != "construction" or entry.get("job") != "controller" \
+            or entry.get("lot") != lot or data.get("schema") != 2 \
+            or data.get("origin") != "correction-round" \
+            or not isinstance(transition, dict) \
+            or data.get("plan") != relative \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("commit"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("plan_sha256"))) \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(transition.get("output_sha256"))):
+        fail(f"{subject} has no exact schema-2 Correction escalation plan")
+    payload = committed_regular_payload(data["commit"], relative, subject)
+    if sha256_bytes(payload) != data["plan_sha256"]:
+        fail(f"{subject}'s committed plan digest is not exact")
+    account = {
+        "schema": 1,
+        "owner": "correction-escalation-plan",
+        "plan": journal_line_proof(plan_index),
+        "plan_authority_sha256": hashlib.sha256(json.dumps(
+            data, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest(),
+        "commit": data["commit"],
+        "plan_sha256": data["plan_sha256"],
+        "retry_set_sha256": transition["output_sha256"],
+        "workspace_path": workspace_relative.as_posix(),
+        "committed_path": relative,
+        "task_manifest": plan_task_manifest(payload, f"{subject}'s committed plan"),
+        "semantic_totals": correction_escalation_completeness_semantics(
+            entries, plan_index, lot, payload, data, subject,
+        ),
+    }
+    if live:
+        path = real_workspace_file(workspace_relative, f"{subject}'s workspace plan")
+        try:
+            workspace_payload = Path(path).read_bytes()
+        except OSError as exc:
+            fail(f"{subject}'s workspace plan is unreadable", exc)
+        if workspace_payload != payload:
+            fail(f"{subject}'s workspace plan differs from its current publication")
+    if frozen is not None and (
+        not isinstance(frozen, dict)
+        or any(frozen.get(key) != value for key, value in account.items())
+    ):
+        fail(f"{subject} changes its frozen C2 plan authority")
+    return account
+
+
+def current_correction_escalation_completeness_account(
+        entries, before, lot, subject, *, source=None, live=True,
+):
+    source = source or correction_escalation_sublot_account(entries, before, lot, subject)
+    plans = [(index, entry) for index, entry in enumerate(entries[:before])
+             if index > source["opening_index"]
+             and entry.get("kind") == "plan.written" and entry.get("lot") == lot]
+    if not plans:
+        fail(f"{subject} has no current schema-2 plan generation")
+    outstanding_correction_escalation_sublot_set(
+        entries, before, lot, subject, source=source,
+    )
+    plan_index, _ = plans[-1]
+    return correction_escalation_completeness_plan_account(
+        entries, plan_index, lot, subject, live=live,
+    )
+
+
+def correction_escalation_c2_bracket(
+        entries, after, before, lot, subject, *, allow_absent=False,
+):
+    terminals = []
+    for index, entry in enumerate(entries[after + 1:before], after + 1):
+        if entry.get("event") != "subagent-ended" \
+                or entry.get("kind") != "completeness" or entry.get("lot") != lot \
+                or entry.get("mode") != "construction" \
+                or entry.get("job") != "controller" \
+                or any(entry.get(key) is not None for key in (
+                    "correction", "task", "attempt", "round", "mandate",
+                )):
+            continue
+        terminal_data = note_data(entry)
+        plan_account = correction_escalation_completeness_plan_account(
+            entries, after, lot, subject, frozen=terminal_data,
+        )
+        result = correction_escalation_completeness_terminal_account(
+            terminal_data, plan_account, f"{subject}'s C2 terminal",
+        )
+        if result["kind"] == "result":
+            terminals.append((index, entry, result, plan_account))
+    if not terminals and allow_absent:
+        return None
+    if len(terminals) != 1:
+        fail(f"{subject} has no one exact C2 result for its current plan",
+             f"found {len(terminals)}")
+    terminal_index, terminal, result, plan_account = terminals[0]
+    data = note_data(terminal)
+    starts = [(index, candidate) for index, candidate in open_subagent_brackets(
+        entries[:terminal_index],
+    ) if index > after and candidate.get("event") == "subagent-started"
+        and candidate.get("kind") == "completeness"
+        and candidate.get("lot") == lot
+        and candidate.get("mode") == "construction"
+        and candidate.get("job") == "controller"
+        and all(candidate.get(key) is None for key in (
+            "correction", "task", "attempt", "round", "mandate",
+        ))
+        and note_data(candidate) == plan_account
+        and subagent_terminal_matches(candidate, terminal)]
+    if len(starts) != 1:
+        fail(f"{subject}'s C2 re-cut has no one exact physical checker opening")
+    correction_escalation_require_quiescent(
+        entries, starts[0][0], lot, f"{subject}'s C2 opening", live=False,
+    )
+    open_subagent_brackets(entries[:terminal_index + 1])
+    return {
+        "opening": journal_line_proof(starts[0][0]),
+        "terminal": journal_line_proof(terminal_index),
+        "clean": result["clean"],
+        "plan_account": plan_account,
+    }
+
+
+def correction_escalation_incomplete_c2_bracket(
+        entries, after, before, lot, subject, *, required=True,
+):
+    account = correction_escalation_c2_bracket(
+        entries, after, before, lot, subject, allow_absent=not required,
+    )
+    if account is None:
+        return None
+    if account["clean"]:
+        if not required:
+            return None
+        fail(f"{subject}'s C2 result does not authorize another plan generation")
+    return {key: account[key] for key in ("opening", "terminal")}
+
+
+def correction_escalation_clean_c2_account(entries, before, lot, subject):
+    source = correction_escalation_sublot_account(entries, before, lot, subject)
+    plans = [(index, entry) for index, entry in enumerate(entries[:before])
+             if index > source["opening_index"]
+             and entry.get("kind") == "plan.written" and entry.get("lot") == lot]
+    if not plans:
+        fail(f"{subject} has no current Correction escalation plan")
+    plan_index, plan = plans[-1]
+    validate_correction_escalation_plan_written_entry(entries, plan_index, plan, source=source)
+    c2 = correction_escalation_c2_bracket(entries, plan_index, before, lot, subject)
+    if not c2["clean"]:
+        fail(f"{subject} has no clean C2 result for its current plan")
+    account = {
+        "schema": 1,
+        "owner": "correction-escalation-clean-c2",
+        "plan": journal_line_proof(plan_index),
+        "plan_account": c2["plan_account"],
+        "opening": c2["opening"],
+        "terminal": c2["terminal"],
+    }
+    account["authority_sha256"] = sha256_bytes(json.dumps(
+        account, sort_keys=True, separators=(",", ":"),
+    ).encode())
+    return account
+
+
+def correction_escalation_open_c2(entries, before, lot):
+    return [(index, opening) for index, opening in open_subagent_brackets(entries[:before])
+            if opening.get("kind") == "completeness" and opening.get("lot") == lot
+            and isinstance(note_data(opening), dict)
+            and note_data(opening).get("owner") == "correction-escalation-plan"]
+
+
+def require_no_open_correction_escalation_c2(entries, before, lot, subject):
+    open_calls = correction_escalation_open_c2(entries, before, lot)
+    if open_calls:
+        fail(f"{subject} follows an open Correction escalation C2 owner")
+
+
+def require_no_unresolved_bare_stop(subject):
+    marker = os.path.join(WORKSPACE, "bare-stop-in-progress")
+    if not os.path.lexists(marker):
+        return
+    script = os.path.join(WORKSPACE, "prompts", "common", "bare-stop.sh")
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; bare_stop_refuse_unfinished "$2"',
+         "correction-escalation-stop-check", script, WORKSPACE],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        fail(f"{subject} follows an unresolved run stop", result.stderr or result.stdout)
+
+
+def correction_escalation_attempt_terminal(
+        entries, before, lot, start_index, start, subject,
+):
+    validate_construction_session_start(
+        start, f"{subject}'s Construction implementer start",
+        entries=entries, index=start_index, require_account=True,
+    )
+    task, attempt_number = start.get("task"), start.get("attempt")
+    if not construction_positive_integer(task) \
+            or not construction_positive_integer(attempt_number):
+        fail(f"{subject} has a malformed Construction attempt owner")
+    terminals = [(index, entry) for index, entry in enumerate(
+        entries[start_index + 1:before], start_index + 1,
+    ) if entry.get("event") == "note"
+        and entry.get("kind") in {
+            "attempt.failed", "attempt.succeeded", "paused", "aborted",
+        }
+        and entry.get("lot") == lot and entry.get("task") == task
+        and note_data(entry).get("attempt") == attempt_number]
+    if len(terminals) > 1:
+        fail(f"{subject} follows duplicate terminals for one Construction attempt")
+    if not terminals:
+        fail(f"{subject} follows an open Construction attempt")
+    terminal_index, terminal = terminals[0]
+    if terminal["kind"] == "attempt.failed":
+        validate_attempt_failed_entry(entries, terminal_index, terminal)
+    elif terminal["kind"] == "attempt.succeeded":
+        validate_attempt_succeeded_entry(entries, terminal_index, terminal)
+    else:
+        expected = expected_attempt_stop_data(
+            entries, terminal_index, terminal,
+            f"{subject}'s Construction attempt stop",
+        )
+        if note_data(terminal) != expected:
+            fail(f"{subject} follows a changed Construction attempt stop", expected)
+    retirement_status = {
+        "attempt.succeeded": "done",
+        "paused": "cancelled",
+        "aborted": "cancelled",
+    }.get(terminal["kind"], "failed")
+    if terminal["kind"] == "attempt.failed" and any(
+        isinstance(note_data(terminal).get(review), dict)
+        and "blocked" in note_data(terminal)[review]
+        for review in ("design_review", "code_review")
+    ):
+        retirement_status = "superseded"
+    retirements = [(index, entry) for index, entry in enumerate(
+        entries[terminal_index + 1:before], terminal_index + 1,
+    ) if entry.get("event") == "session-retired"
+        and entry.get("session") == start.get("session")]
+    if len(retirements) != 1:
+        fail(f"{subject} has no one exact Construction implementer retirement")
+    retirement_index, retirement = retirements[0]
+    expected_context = {
+        "mode": "construction", "lot": lot, "task": task,
+        "attempt": attempt_number, "job": "implementer",
+    }
+    actual_context = {
+        key: retirement[key] for key in CONTEXT_FIELDS if key in retirement
+    }
+    if not isinstance(start.get("session"), str) or not start["session"] \
+            or actual_context != expected_context \
+            or retirement.get("status") != retirement_status \
+            or retirement.get("archived") is not True \
+            or retirement.get("hidden") is not True:
+        fail(f"{subject} has a changed Construction implementer retirement", {
+            "session": start.get("session"), "status": retirement_status,
+            "context": expected_context, "archived": True, "hidden": True,
+        })
+    return terminal_index, terminal, retirement_index, retirement
+
+
+def correction_escalation_require_quiescent(entries, before, lot, subject, *, live):
+    if live and os.path.lexists(os.path.join(WORKSPACE, "attempt-in-flight")):
+        fail(f"{subject} follows a live Construction attempt")
+    if live and os.path.lexists(GATE_MARKER):
+        fail(f"{subject} follows a live gate owner")
+    open_calls = [entry for _, entry in open_subagent_brackets(entries[:before])
+                  if entry.get("lot") == lot and entry.get("kind") in {
+                      "design-checker", "code-checker", "gate-runner",
+                  }]
+    if open_calls:
+        fail(f"{subject} follows an open Construction checker or gate")
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "session-started"
+              and entry.get("mode") == "construction"
+              and entry.get("job") == "implementer" and entry.get("lot") == lot]
+    for start_index, start in starts:
+        correction_escalation_attempt_terminal(
+            entries, before, lot, start_index, start, subject,
+        )
+    if live:
+        require_no_unresolved_bare_stop(subject)
+
+
+def correction_escalation_c2_opening_admission(entries, before, lot, subject):
+    require_no_open_correction_escalation_c2(entries, before, lot, subject)
+    correction_escalation_require_quiescent(
+        entries, before, lot, subject, live=True,
+    )
+
+
+def correction_escalation_baseline_result_account(
+        entries, before, lot, operation, commit, subject,
+):
+    clean_c2 = correction_escalation_clean_c2_account(entries, before, lot, subject)
+    if clean_c2["plan_account"]["commit"] != commit:
+        fail(f"{subject} does not follow the exact current plan commit")
+    owner = f"plan/{lot}/{commit}"
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "subagent-started"
+              and entry.get("kind") == "gate-runner"
+              and note_data(entry).get("op") == operation]
+    terminals = [(index, entry) for index, entry in enumerate(entries[:before])
+                 if entry.get("event") == "subagent-ended"
+                 and entry.get("kind") == "gate-runner"
+                 and note_data(entry).get("op") == operation]
+    usable = [(index, entry) for index, entry in terminals
+              if "unusable" not in note_data(entry)]
+    if len(starts) not in {1, 2} or len(usable) != 1 \
+            or len(terminals) != len(starts):
+        fail(f"{subject} has no one exact completed baseline physical bracket")
+    terminal_index, terminal = usable[0]
+    data = note_data(terminal)
+    result_keys = {"green", "surface", "report", "report_sha256", "commands"}
+    opening_data = {key: value for key, value in data.items() if key not in result_keys}
+    identity_keys = {
+        "op", "scope", "owner", "lot", "task", "attempt", "head", "base",
+        "tree", "gate", "code",
+    } | ({"execution"} if "execution" in opening_data else set())
+    unusable = [(index, entry) for index, entry in terminals
+                if "unusable" in note_data(entry)]
+    if data.get("scope") != "baseline" or data.get("owner") != owner \
+            or data.get("lot") != "-" or data.get("task") != 0 \
+            or data.get("attempt") != 0 or data.get("head") != commit \
+            or data.get("green") is not True or data.get("surface") != "unchanged" \
+            or set(opening_data) != identity_keys \
+            or not isinstance(data.get("report"), str) or not data["report"] \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("report_sha256"))) \
+            or not construction_positive_integer(data.get("commands")) \
+            or any(note_data(start) != opening_data for _index, start in starts) \
+            or any(set(note_data(entry)) != identity_keys | {"unusable"}
+                   or note_data(entry).get("unusable") not in CONSTRUCTION_UNUSABLE_RESULTS
+                   or any(note_data(entry).get(key) != value
+                          for key, value in opening_data.items())
+                   for _index, entry in unusable) \
+            or len(unusable) != len(starts) - 1 \
+            or any(index >= terminal_index for index, _entry in unusable) \
+            or terminal_index != terminals[-1][0] \
+            or not subagent_terminal_matches(starts[-1][1], terminal) \
+            or terminal_index <= int(clean_c2["terminal"].split(":", 1)[0]):
+        fail(f"{subject} changes its clean C2 baseline authority")
+    open_subagent_brackets(entries[:terminal_index + 1])
+    account = {
+        "schema": 1,
+        "owner": "correction-escalation-baseline",
+        "plan": clean_c2["plan"],
+        "c2_opening": clean_c2["opening"],
+        "c2_terminal": clean_c2["terminal"],
+        "c2_authority_sha256": clean_c2["authority_sha256"],
+        "gate_opening": journal_line_proof(starts[-1][0]),
+        "gate_terminal": journal_line_proof(terminal_index),
+        "operation": operation,
+        "commit": commit,
+    }
+    account["authority_sha256"] = sha256_bytes(json.dumps(
+        account, sort_keys=True, separators=(",", ":"),
+    ).encode())
+    return account
+
+
+def current_correction_escalation_baseline_account(entries, before, lot, subject):
+    clean_c2 = correction_escalation_clean_c2_account(entries, before, lot, subject)
+    commit = clean_c2["plan_account"]["commit"]
+    owner = f"plan/{lot}/{commit}"
+    operations = []
+    for entry in entries[:before]:
+        if entry.get("event") != "subagent-ended" or entry.get("kind") != "gate-runner":
+            continue
+        data = note_data(entry)
+        if data.get("scope") == "baseline" and data.get("owner") == owner \
+                and data.get("head") == commit and data.get("green") is True \
+                and data.get("surface") == "unchanged":
+            operations.append(data.get("op"))
+    if len(operations) != 1 or not re.fullmatch(r"[0-9a-f]{64}", str(operations[0])):
+        fail(f"{subject} has no one exact clean C2.7 baseline for its current plan")
+    return correction_escalation_baseline_result_account(
+        entries, before, lot, operations[0], commit, subject,
+    )
+
+
+CORRECTION_ESCALATION_REWIND_KEYS = {
+    "schema", "producer", "classification", "plan", "failure", "first", "last", "op",
+    "base", "moved", "pre_reset_commit", "replayed", "reland", "result_commit",
+    "result_tree",
+}
+
+
+def correction_escalation_rewind_marker(path, lot, first, last, subject):
+    try:
+        metadata = os.lstat(path)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            fail(f"{subject}'s rewind owner is not one real file")
+        raw = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        fail(f"{subject}'s rewind owner is unavailable", exc)
+    lines = raw.splitlines()
+    if not lines or lines[0] != f"{lot} {first} {last}":
+        fail(f"{subject}'s rewind owner has another task range")
+    single = {}
+    replayed = []
+    moved = []
+    reland = {}
+    for line in lines[1:]:
+        fields = line.split(" ")
+        key = fields[0]
+        if key in {"scope", "op", "base", "head"} and len(fields) == 2:
+            if key in single:
+                fail(f"{subject}'s rewind owner repeats {key}")
+            single[key] = fields[1]
+        elif key == "replay" and len(fields) == 2:
+            replayed.append(fields[1])
+        elif key == "move" and len(fields) == 4:
+            try:
+                task = int(fields[1])
+            except ValueError:
+                fail(f"{subject}'s rewind owner has a malformed moved task")
+            moved.append({"task": task, "commit": fields[2], "to": fields[3]})
+        elif key in {
+            "reland-pending", "reland-parent", "reland-tree", "reland-subject",
+            "reland-count",
+        } and len(fields) == 2:
+            if key in reland:
+                fail(f"{subject}'s rewind owner repeats {key}")
+            reland[key] = fields[1]
+        else:
+            fail(f"{subject}'s rewind owner has a malformed field", line)
+    if set(single) != {"scope", "op", "base", "head"} \
+            or single["scope"] != "correction-escalation" \
+            or not single["op"] \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", single["base"]) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", single["head"]) \
+            or len(replayed) != len(set(replayed)) \
+            or any(not re.fullmatch(r"[0-9a-f]{40,64}", commit)
+                   for commit in replayed) \
+            or [item["task"] for item in moved] \
+            != sorted(set(item["task"] for item in moved)) \
+            or any(not first <= item["task"] <= last
+                   or not re.fullmatch(r"[0-9a-f]{40,64}", item["commit"])
+                   or not item["to"] for item in moved) \
+            or reland and set(reland) != {
+                "reland-pending", "reland-parent", "reland-tree", "reland-subject",
+                "reland-count",
+            } or reland and (
+                reland.get("reland-pending") != single.get("op")
+                or reland.get("reland-parent") != single.get("base")
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(reland.get("reland-tree")))
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(reland.get("reland-subject")))
+                or not re.fullmatch(r"[1-9][0-9]*", str(reland.get("reland-count")))
+            ):
+        fail(f"{subject}'s rewind owner is malformed")
+    return {
+        "op": single["op"], "base": single["base"],
+        "pre_reset_commit": single["head"], "moved": moved,
+        "replayed": replayed, "reland": reland,
+    }
+
+
+def correction_escalation_rewind_ref(name):
+    result = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{name}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def correction_escalation_rewind_event(
+        entries, lot, first, last, marker, subject, *, pre_mutation,
+):
+    source = correction_escalation_sublot_account(entries, len(entries), lot, subject)
+    plans = [(index, entry) for index, entry in enumerate(
+        entries[source["opening_index"] + 1:], source["opening_index"] + 1,
+    ) if entry.get("kind") == "plan.written" and entry.get("lot") == lot]
+    if not plans:
+        fail(f"{subject} has no published escalation plan")
+    plan_index, plan = plans[-1]
+    plan_data = note_data(plan)
+    if plan_data.get("schema") != 2 or plan_data.get("origin") != "correction-round" \
+            or plan_data.get("tasks") != last:
+        fail(f"{subject} changes its current escalation plan task range")
+    failures = [(index, entry) for index, entry in enumerate(
+        entries[plan_index + 1:], plan_index + 1,
+    ) if entry.get("kind") == "attempt.failed" and entry.get("lot") == lot
+        and note_data(entry).get("classification") in {"C3.9c", "C3.9d"}]
+    if len(failures) != 1:
+        fail(f"{subject} has no one exact current C3.9c or C3.9d failure")
+    failure_index, failure = failures[0]
+    if not first <= failure.get("task", 0) <= last:
+        fail(f"{subject}'s Construction failure is outside its affected suffix")
+    validate_attempt_failed_entry(entries, failure_index, failure)
+    if any(candidate.get("kind") in {
+        "attempt.failed", "attempt.succeeded", "plan.written", "rewind.done",
+        "paused", "aborted",
+    } and candidate.get("lot") == lot
+           for candidate in entries[failure_index + 1:]):
+        fail(f"{subject}'s Construction failure is no longer current")
+    starts = [(start_index, candidate) for start_index, candidate in enumerate(
+        entries[source["opening_index"] + 1:], source["opening_index"] + 1,
+    ) if candidate.get("event") == "session-started"
+        and candidate.get("mode") == "construction"
+        and candidate.get("job") == "implementer"
+        and candidate.get("lot") == lot]
+    for start_index, start in starts:
+        terminals = [candidate for candidate in entries[start_index + 1:]
+                     if candidate.get("event") == "note"
+                     and candidate.get("kind") in {
+                         "attempt.failed", "attempt.succeeded", "paused", "aborted",
+                     }
+                     and candidate.get("lot") == lot
+                     and candidate.get("task") == start.get("task")
+                     and note_data(candidate).get("attempt") == start.get("attempt")]
+        if len(terminals) != 1:
+            fail(f"{subject} crosses an open or duplicate Construction attempt")
+    if any(candidate.get("lot") == lot and candidate.get("kind") in {
+        "completeness", "design-checker", "code-checker",
+    } for _opening_index, candidate in open_subagent_brackets(entries)):
+        fail(f"{subject} crosses an open Construction checker")
+    if os.path.lexists(os.path.join(WORKSPACE, "attempt-in-flight")):
+        fail(f"{subject} crosses a live Construction attempt marker")
+
+    accepted = correction_escalation_active_successes(
+        entries, len(entries), lot, source, subject,
+    )
+    retained = sorted(task for task in accepted if task < first)
+    if retained != list(range(1, first)):
+        fail(f"{subject} has no complete retained accepted-task prefix")
+    root = f"refs/bwr/{Path(WORKSPACE).name}/{lot}"
+    if first == 1:
+        first_plan_index, first_plan = plans[0]
+        base = {
+            "task": 0,
+            "authority": journal_line_proof(first_plan_index),
+            "commit": note_data(first_plan).get("commit"),
+        }
+    else:
+        base_index, base_entry = accepted[first - 1]
+        base = {
+            "task": first - 1,
+            "authority": journal_line_proof(base_index),
+            "commit": note_data(base_entry).get("sha"),
+        }
+    if marker["base"] != base["commit"] \
+            or correction_escalation_rewind_ref(f"{root}/task-{first - 1}") \
+            != base["commit"]:
+        fail(f"{subject} changes its exact rewind base")
+    expected_moved = []
+    marker_by_task = {item["task"]: item for item in marker["moved"]}
+    for task in sorted(task for task in accepted if task >= first):
+        if task > last:
+            fail(f"{subject} leaves accepted work after its affected suffix")
+        success_index, success = accepted[task]
+        commit = note_data(success).get("sha")
+        marker_move = marker_by_task.get(task)
+        if marker_move is None or marker_move["commit"] != commit \
+                or not re.fullmatch(
+                    rf"{re.escape(root)}/rewound/task-{task}(?:-(?:[2-9]|[1-9][0-9]+))?",
+                    marker_move["to"],
+                ):
+            fail(f"{subject} changes its exact moved accepted-task suffix")
+        source_commit = correction_escalation_rewind_ref(f"{root}/task-{task}")
+        archive_commit = correction_escalation_rewind_ref(marker_move["to"])
+        if pre_mutation and source_commit != commit \
+                or pre_mutation and archive_commit is not None \
+                or not pre_mutation and source_commit is not None \
+                or not pre_mutation and archive_commit != commit:
+            fail(f"{subject} has a changed physical moved-task owner")
+        expected_moved.append({
+            "task": task,
+            "success": journal_line_proof(success_index),
+            "commit": commit,
+            "from": f"{root}/task-{task}",
+            "to": marker_move["to"],
+        })
+    if set(marker_by_task) != {item["task"] for item in expected_moved}:
+        fail(f"{subject} adds a foreign moved task")
+    if pre_mutation:
+        head = correction_escalation_rewind_ref("HEAD")
+        if head != marker["pre_reset_commit"]:
+            fail(f"{subject} changes its frozen pre-reset commit")
+        above = subprocess.run(
+            ["git", "-C", project_root(), "rev-list", "--reverse",
+             f"{base['commit']}..{marker['pre_reset_commit']}"],
+            capture_output=True, text=True,
+        )
+        task_commits = {note_data(entry).get("sha") for _index, entry in accepted.values()}
+        expected_replayed = [commit for commit in above.stdout.splitlines()
+                             if commit not in task_commits] \
+            if above.returncode == 0 else None
+        if marker["replayed"] != expected_replayed:
+            fail(f"{subject} changes its ordered controller re-land input")
+        return {
+            "plan": journal_line_proof(plan_index),
+            "failure": journal_line_proof(failure_index),
+            "base": base,
+            "moved": expected_moved,
+            "pre_reset_commit": marker["pre_reset_commit"],
+            "replayed": marker["replayed"],
+        }
+    result_commit = correction_escalation_rewind_ref("HEAD")
+    result_tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "HEAD^{tree}"],
+        capture_output=True, text=True,
+    )
+    if result_commit is None or result_tree.returncode != 0:
+        fail(f"{subject} has no exact physical rewind result")
+    reland = marker["reland"]
+    if reland:
+        try:
+            reland_count = int(reland["reland-count"])
+        except ValueError:
+            fail(f"{subject} has a malformed controller re-land count")
+        reland_account = {
+            "parent": reland["reland-parent"],
+            "tree": reland["reland-tree"],
+            "subject_oid": reland["reland-subject"],
+            "count": reland_count,
+        }
+    else:
+        reland_account = None
+    data = {
+        "schema": 1,
+        "producer": "correction-escalation-rewind",
+        "classification": note_data(failure)["classification"],
+        "plan": journal_line_proof(plan_index),
+        "failure": journal_line_proof(failure_index),
+        "first": first,
+        "last": last,
+        "op": marker["op"],
+        "base": base,
+        "moved": expected_moved,
+        "pre_reset_commit": marker["pre_reset_commit"],
+        "replayed": marker["replayed"],
+        "reland": reland_account,
+        "result_commit": result_commit,
+        "result_tree": result_tree.stdout.strip(),
+    }
+    candidate = {
+        "event": "note", "kind": "rewind.done", "lot": lot, "data": data,
+    }
+    correction_escalation_c39d_rewind_account(
+        entries + [candidate], len(entries), candidate, source, accepted, subject,
+        candidate=True,
+    )
+    return data
+
+
+def correction_escalation_active_successes(
+        entries, before, lot, source, subject, *, validate_physical=True,
+):
+    accepted = {}
+    for index, entry in enumerate(
+        entries[source["opening_index"] + 1:before], source["opening_index"] + 1,
+    ):
+        if entry.get("kind") == "attempt.succeeded" and entry.get("lot") == lot:
+            task = entry.get("task")
+            data = note_data(entry)
+            if not construction_positive_integer(task) or task in accepted:
+                fail(f"{subject} has malformed or duplicate accepted task work")
+            validate_built_task_success(
+                entries, index, entry, lot, task, data.get("sha"), subject,
+            )
+            accepted[task] = (index, entry)
+            continue
+        data = note_data(entry)
+        if entry.get("kind") != "rewind.done" or entry.get("lot") != lot:
+            continue
+        if data.get("producer") != "correction-escalation-rewind":
+            fail(f"{subject} has an unauthenticated Construction rewind")
+        correction_escalation_c39d_rewind_account(
+            entries, index, entry, source, accepted, subject,
+            validate_physical=validate_physical,
+        )
+        for task in range(data["first"], data["last"] + 1):
+            accepted.pop(task, None)
+    return accepted
+
+
+def correction_escalation_c39d_rewind_account(
+        entries, index, entry, source, accepted, subject, *, validate_physical=True,
+        candidate=False,
+):
+    data = note_data(entry)
+    if entry.get("event") != "note" or entry.get("kind") != "rewind.done" \
+            or entry.get("lot") is None or set(data) != CORRECTION_ESCALATION_REWIND_KEYS \
+            or data.get("schema") != 1 \
+            or data.get("producer") != "correction-escalation-rewind" \
+            or data.get("classification") not in {"C3.9c", "C3.9d"} \
+            or not construction_positive_integer(data.get("first")) \
+            or not construction_positive_integer(data.get("last")) \
+            or data["first"] > data["last"] \
+            or not isinstance(data.get("op"), str) or not data["op"] \
+            or not isinstance(data.get("moved"), list) \
+            or not isinstance(data.get("replayed"), list) \
+            or len(data["replayed"]) != len(set(data["replayed"])) \
+            or any(not re.fullmatch(r"[0-9a-f]{40,64}", str(commit))
+                   for commit in data["replayed"]) \
+            or not re.fullmatch(
+                r"[0-9a-f]{40,64}", str(data.get("pre_reset_commit")),
+            ) \
+            or data.get("reland") is not None and not isinstance(data.get("reland"), dict) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("result_commit"))) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(data.get("result_tree"))):
+        fail(f"{subject} has malformed C3.9d rewind authority")
+    prior_index, prior = journal_entry_from_proof(
+        entries, data.get("plan"), f"{subject}'s prior escalation plan",
+    )
+    prior_data = note_data(prior)
+    if prior_index >= index or prior.get("kind") != "plan.written" \
+            or prior.get("lot") != entry.get("lot") \
+            or prior_data.get("schema") != 2 \
+            or prior_data.get("origin") != "correction-round" \
+            or prior_data.get("tasks") != data["last"]:
+        fail(f"{subject} does not consume its immediate prior escalation plan")
+    later_plans = [candidate for candidate in entries[prior_index + 1:index]
+                   if candidate.get("kind") == "plan.written"
+                   and candidate.get("lot") == entry.get("lot")]
+    if later_plans:
+        fail(f"{subject} does not consume its immediate prior escalation plan")
+
+    failure_index, failure = journal_entry_from_proof(
+        entries, data.get("failure"), f"{subject}'s Construction rewind failure",
+    )
+    failure_data = note_data(failure)
+    if failure_index <= prior_index or failure_index >= index \
+            or failure.get("kind") != "attempt.failed" \
+            or failure.get("lot") != entry.get("lot") \
+            or failure_data.get("classification") != data.get("classification") \
+            or not construction_positive_integer(failure.get("task")) \
+            or not data["first"] <= failure["task"] <= data["last"]:
+        fail(f"{subject} does not consume one exact current Construction rewind failure")
+    validate_attempt_failed_entry(entries, failure_index, failure)
+    exclusive = {
+        "attempt.failed", "attempt.succeeded", "plan.written", "rewind.done",
+        "paused", "aborted",
+    }
+    if any(candidate.get("kind") in exclusive
+           and candidate.get("lot") == entry.get("lot")
+           for candidate in entries[failure_index + 1:index]):
+        fail(f"{subject}'s C3.9d failure is no longer the current transition")
+
+    retained = sorted(task for task in accepted if task < data["first"])
+    if retained != list(range(1, data["first"])):
+        fail(f"{subject} has no complete retained accepted-task prefix")
+    expected_moved = []
+    root = f"refs/bwr/{Path(WORKSPACE).name}/{entry['lot']}"
+    for task in sorted(task for task in accepted if task >= data["first"]):
+        if task > data["last"]:
+            fail(f"{subject} leaves accepted work after its rewind suffix")
+        success_index, success = accepted[task]
+        commit = note_data(success).get("sha")
+        expected_moved.append({
+            "task": task,
+            "success": journal_line_proof(success_index),
+            "commit": commit,
+            "from": f"{root}/task-{task}",
+        })
+    if len(data["moved"]) != len(expected_moved):
+        fail(f"{subject} changes its exact moved accepted-task suffix")
+    for actual, expected in zip(data["moved"], expected_moved):
+        if not isinstance(actual, dict) or set(actual) != {*expected, "to"} \
+                or any(actual.get(key) != value for key, value in expected.items()) \
+                or not re.fullmatch(
+                    rf"{re.escape(root)}/rewound/task-{expected['task']}"
+                    r"(?:-(?:[2-9]|[1-9][0-9]+))?",
+                    str(actual.get("to")),
+                ):
+            fail(f"{subject} changes one exact moved task authority")
+        if validate_physical and git_object_name(actual["to"], subject) != expected["commit"]:
+            fail(f"{subject}'s moved task archive changed")
+
+    base = data.get("base")
+    if not isinstance(base, dict) or set(base) != {"task", "authority", "commit"} \
+            or base.get("task") != data["first"] - 1 \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(base.get("commit"))):
+        fail(f"{subject} has malformed rewind-base authority")
+    if data["first"] == 1:
+        first_plans = [(position, candidate) for position, candidate in enumerate(
+            entries[source["opening_index"] + 1:prior_index + 1],
+            source["opening_index"] + 1,
+        ) if candidate.get("kind") == "plan.written"
+            and candidate.get("lot") == entry.get("lot")]
+        if not first_plans:
+            fail(f"{subject} has no task-0 plan authority")
+        base_index, base_entry = first_plans[0]
+        expected_base_authority = journal_line_proof(base_index)
+        expected_base_commit = note_data(base_entry).get("commit")
+    else:
+        base_index, base_entry = accepted[data["first"] - 1]
+        expected_base_authority = journal_line_proof(base_index)
+        expected_base_commit = note_data(base_entry).get("sha")
+    if base["authority"] != expected_base_authority \
+            or base["commit"] != expected_base_commit:
+        fail(f"{subject} changes its exact rewind base")
+
+    ancestry = subprocess.run(
+        ["git", "-C", project_root(), "merge-base", "--is-ancestor",
+         base["commit"], data["pre_reset_commit"]],
+        capture_output=True, text=True,
+    )
+    above = subprocess.run(
+        ["git", "-C", project_root(), "rev-list", "--reverse",
+         f"{base['commit']}..{data['pre_reset_commit']}"],
+        capture_output=True, text=True,
+    )
+    task_commits = {
+        note_data(success).get("sha") for _success_index, success in accepted.values()
+    }
+    expected_replayed = [
+        commit for commit in above.stdout.splitlines() if commit not in task_commits
+    ] if ancestry.returncode == 0 and above.returncode == 0 else None
+    if data["replayed"] != expected_replayed:
+        fail(f"{subject} changes its ordered controller re-land input")
+
+    result = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{data['result_commit']}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or result.stdout.strip() != data["result_tree"]:
+        fail(f"{subject} changes its exact rewind result tree")
+    reland = data.get("reland")
+    if reland is None:
+        if data["result_commit"] != base["commit"]:
+            fail(f"{subject} adds an unowned rewind result commit")
+    else:
+        if set(reland) != {"parent", "tree", "subject_oid", "count"} \
+                or reland.get("parent") != base["commit"] \
+                or reland.get("tree") != data["result_tree"] \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(reland.get("subject_oid"))) \
+                or not construction_positive_integer(reland.get("count")) \
+                or reland["count"] > len(data["replayed"]):
+            fail(f"{subject} changes its exact controller re-land account")
+        parent = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{data['result_commit']}^"],
+            capture_output=True, text=True,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != base["commit"]:
+            fail(f"{subject}'s controller re-land has another parent")
+        subject_result = subprocess.run(
+            ["git", "-C", project_root(), "log", "-1", "--format=%s",
+             data["result_commit"]],
+            capture_output=True, text=True,
+        )
+        actual_subject = subject_result.stdout.removesuffix("\n")
+        subject_oid = subprocess.run(
+            ["git", "-C", project_root(), "hash-object", "--stdin"],
+            input=actual_subject, capture_output=True, text=True,
+        ) if subject_result.returncode == 0 else None
+        if subject_oid is None or subject_oid.returncode != 0 \
+                or subject_oid.stdout.strip() != reland["subject_oid"]:
+            fail(f"{subject}'s controller re-land has another subject")
+    return {
+        "proof": None if candidate else journal_line_proof(index),
+        "plan": data["plan"],
+        "failure": data["failure"],
+        "first": data["first"],
+        "last": data["last"],
+        "result_commit": data["result_commit"],
+        "result_tree": data["result_tree"],
+    }
+
+
+def correction_escalation_c39d_recut(entries, after, before, lot, source, subject):
+    rewinds = [(index, entry) for index, entry in enumerate(
+        entries[after + 1:before], after + 1,
+    ) if entry.get("kind") == "rewind.done" and entry.get("lot") == lot
+        and note_data(entry).get("producer") == "correction-escalation-rewind"
+        and note_data(entry).get("classification") == "C3.9d"]
+    if not rewinds:
+        return None
+    if len(rewinds) != 1:
+        fail(f"{subject} has no one exact C3.9d structural rewind")
+    rewind_index, rewind = rewinds[0]
+    if any(
+        candidate.get("lot") == lot and (
+            candidate.get("kind") in {
+                "attempt.failed", "attempt.succeeded", "paused", "aborted",
+                "rewind.done", "plan.written",
+            }
+            or candidate.get("event") == "session-started"
+            and candidate.get("job") == "implementer"
+            or candidate.get("event") == "subagent-started"
+            and candidate.get("kind") in {
+                "completeness", "design-checker", "code-checker", "gate-runner",
+            }
+        )
+        for candidate in entries[rewind_index + 1:before]
+    ):
+        fail(f"{subject}'s C3.9d rewind is no longer the current plan authority")
+    accepted = correction_escalation_active_successes(
+        entries, rewind_index, lot, source, subject,
+    )
+    return correction_escalation_c39d_rewind_account(
+        entries, rewind_index, rewind, source, accepted, subject,
+    )
+
+
+def correction_escalation_plan_work_state(
+        entries, before, lot, task_accounts, source, subject, *, live,
+):
+    tasks = {account["task"]: account for account in task_accounts}
+    successes = correction_escalation_active_successes(
+        entries, before, lot, source, subject,
+    )
+    if sorted(successes) != list(range(1, len(successes) + 1)):
+        fail(f"{subject} has no exact active accepted-task prefix")
+    accepted = {}
+    for task, (index, entry) in successes.items():
+        data = note_data(entry)
+        prior = committed_plan_task_state(lot, task, data["sha"], subject)
+        current = tasks.get(task)
+        if current is None \
+                or current["task_contract_sha256"] != prior["contract_sha256"] \
+                or current["design_sha256"] != prior["design_sha256"] \
+                or current["disagreement_sha256"] != prior["disagreement_sha256"]:
+            fail(f"{subject} changes already accepted task {task}")
+        accepted[task] = data["sha"]
+
+    starts = [(index, entry) for index, entry in enumerate(
+        entries[source["opening_index"] + 1:before], source["opening_index"] + 1,
+    ) if entry.get("event") == "session-started"
+        and entry.get("mode") == "construction" and entry.get("job") == "implementer"
+        and entry.get("lot") == lot]
+    for start_index, start in starts:
+        correction_escalation_attempt_terminal(
+            entries, before, lot, start_index, start, subject,
+        )
+
+    open_checkers = [entry for _, entry in open_subagent_brackets(entries[:before])
+                     if entry.get("lot") == lot
+                     and entry.get("kind") in {
+                         "completeness", "design-checker", "code-checker",
+                     }]
+    if open_checkers:
+        fail(f"{subject} follows an open Construction checker")
+    if live and os.path.lexists(os.path.join(WORKSPACE, "attempt-in-flight")):
+        fail(f"{subject} follows a live Construction attempt marker")
+    return accepted
+
+
+def correction_escalation_plan_written_account(
+        entries, index, lot, tasks, operation, commit, current, source, subject,
+        *, live=False,
+):
+    if not construction_positive_integer(tasks) or not isinstance(operation, str) \
+            or not operation or commit is not None \
+            and not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)):
+        fail(f"{subject} has a malformed plan publication identity")
+    relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{lot}-plan.md"
+    if commit is None:
+        workspace_plan = real_workspace_file(
+            PurePosixPath("plans", f"{lot}-plan.md"), f"{subject}'s workspace plan",
+        )
+        with open(workspace_plan, "rb") as source_file:
+            payload = source_file.read()
+    else:
+        payload = committed_regular_payload(commit, relative, subject)
+    manifest = plan_task_manifest(payload, subject)
+    if len(manifest) != tasks:
+        fail(f"{subject}'s task count contradicts its committed plan")
+    try:
+        plan_text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{subject}'s committed plan is not UTF-8", exc)
+    escalation_artifact = correction_escalation_artifact_identity(
+        source["terminal_data"], subject,
+    )
+    if correction_escalation_root_covers(plan_text, subject) != [escalation_artifact]:
+        fail(f"{subject} does not cover its exact Correction escalation artifact")
+
+    prior = [(position, entry) for position, entry in enumerate(
+        entries[source["opening_index"] + 1:index], source["opening_index"] + 1,
+    ) if entry.get("kind") == "plan.written" and entry.get("lot") == lot]
+    structural_recut = None
+    c2_recut = None
+    if prior:
+        structural_recut = correction_escalation_c39d_recut(
+            entries, prior[-1][0], index, lot, source, subject,
+        )
+        c2_recut = correction_escalation_incomplete_c2_bracket(
+            entries, prior[-1][0], index, lot, subject, required=False,
+        )
+        if structural_recut is not None and c2_recut is not None:
+            fail(f"{subject} has both C2 and C3.9d re-cut authority")
+        if structural_recut is None and c2_recut is None:
+            fail(f"{subject} has no exact C2 or C3.9d re-cut authority")
+    expected_parent = source["terminal_data"]["commit"] if not prior else (
+        structural_recut["result_commit"] if structural_recut is not None
+        else note_data(prior[-1][1]).get("commit")
+    )
+    if commit is None:
+        head = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "HEAD^{commit}"],
+            capture_output=True, text=True,
+        )
+        if head.returncode != 0 or head.stdout.strip() != expected_parent:
+            fail(f"{subject} does not start from its exact prior plan authority")
+    else:
+        parent = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", f"{commit}^"],
+            capture_output=True, text=True,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != expected_parent \
+                or not commit_changes_only(commit, relative):
+            fail(f"{subject} is not one exact plan-only successor commit")
+
+    task_accounts = escalation_plan_task_accounts(payload, lot, commit, subject)
+    correction_escalation_plan_item_coverage(
+        task_accounts, source["terminal_data"], subject,
+    )
+    accepted = correction_escalation_plan_work_state(
+        entries, index, lot, task_accounts, source, subject, live=live,
+    )
+    predecessor = {
+        "publication": None,
+        "transition_id": None,
+        "c2": None,
+        "rewind": None,
+    }
+    if prior:
+        prior_index, prior_entry = prior[-1]
+        prior_data = note_data(prior_entry)
+        prior_transition = prior_data.get("retry_transition")
+        transition_id = prior_transition.get("transition_id") \
+            if isinstance(prior_transition, dict) else None
+        if not re.fullmatch(r"[0-9a-f]{64}", str(transition_id)):
+            fail(f"{subject}'s immediate prior consumer map is malformed")
+        predecessor = {
+            "publication": journal_line_proof(prior_index),
+            "transition_id": transition_id,
+            "c2": c2_recut,
+            "rewind": structural_recut["proof"]
+            if structural_recut is not None else None,
+        }
+    required = {member["source"]["obligation_id"]: member for member in current["entries"]}
+    seen = []
+    consumer_map = []
+    dispositions = []
+    for task in task_accounts:
+        for obligation_id in task["obligation_ids"]:
+            if obligation_id in seen or obligation_id not in required:
+                fail(f"{subject} maps a duplicate or foreign final-checker obligation")
+            seen.append(obligation_id)
+            member = required[obligation_id]
+            assignment = member["assignment"]
+            try:
+                requirement = final_checker_consumer_requirement(member)
+            except ValueError as exc:
+                fail(f"{subject} has no exact immutable consumer requirement", exc)
+            if not prior:
+                if assignment.get("owner") != "sublot-plan" \
+                        or requirement.get("obligation_id") != obligation_id:
+                    fail(f"{subject} maps a non-plan final-checker obligation")
+                phase = requirement["manifest_phase"]
+            else:
+                if assignment.get("owner") != "task" \
+                        or assignment.get("unit") != {"kind": "task", "lot": lot} \
+                        or assignment.get("mapping_proof") != predecessor["transition_id"] \
+                        or assignment.get("phase") != requirement["manifest_phase"]:
+                    fail(f"{subject} does not consume its immediate prior consumer map")
+                phase = requirement["manifest_phase"]
+            if phase != member["source"]["required_consumer_phase"]:
+                fail(f"{subject} changes a final-checker consumer phase")
+            if requirement["escalation_item"] not in task["covers"]:
+                fail(f"{subject} maps an obligation outside its exact escalation item")
+            if task["task"] in accepted:
+                fail(f"{subject} assigns pending work to accepted task {task['task']}")
+            consumer_map.append({
+                "obligation_id": obligation_id,
+                "task": task["task"],
+                "phase": phase,
+                "escalation_item": requirement["escalation_item"],
+                "task_contract_sha256": task["task_contract_sha256"],
+            })
+            dispositions.append({
+                "obligation_id": obligation_id,
+                "outcome": "deferred",
+                "assignment": {
+                    "unit": {"kind": "task", "lot": lot},
+                    "task": task["task"],
+                    "phase": phase,
+                    "owner": "task",
+                    "task_contract_sha256": task["task_contract_sha256"],
+                },
+                "evidence": None,
+            })
+    expected_ids = sorted(required)
+    if sorted(seen) != expected_ids:
+        fail(
+            f"{subject} does not map every final-checker obligation exactly once",
+            {"missing": sorted(set(expected_ids) - set(seen))},
+        )
+    consumer_map.sort(key=lambda item: item["obligation_id"])
+    dispositions.sort(key=lambda item: item["obligation_id"])
+    transition, _ = materialize_final_checker_transition(
+        current, additions=[], dispositions=dispositions,
+        transfer_kind="plan-consumer-map",
+    )
+    preflight = {
+        "schema": 1,
+        "origin": "correction-escalation-plan",
+        "tasks": tasks,
+        "source": source["allocation_proof"],
+        "opening": source["opening_proof"],
+        "plan": relative,
+        "plan_sha256": sha256_bytes(payload),
+        "map_predecessor": predecessor,
+        "final_checker_consumer_map": consumer_map,
+        "retry_transition": transition,
+    }
+    preflight_sha256 = hashlib.sha256(json.dumps(
+        preflight, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    if commit is None:
+        return preflight
+    return {
+        "schema": 2,
+        "origin": "correction-round",
+        "tasks": tasks,
+        "op": operation,
+        "source": source["allocation_proof"],
+        "opening": source["opening_proof"],
+        "commit": commit,
+        "plan": relative,
+        "plan_sha256": sha256_bytes(payload),
+        "preflight_sha256": preflight_sha256,
+        "map_predecessor": predecessor,
+        "final_checker_consumer_map": consumer_map,
+        "retry_transition": transition,
+    }
+
+
+def validate_correction_escalation_plan_written_entry(
+        entries, index, entry, current=None, source=None,
+):
+    data = note_data(entry)
+    lot = entry.get("lot")
+    if entry.get("event") != "note" or entry.get("kind") != "plan.written" \
+            or entry.get("mode") != "construction" or entry.get("job") != "controller" \
+            or entry.get("correction") is not None or set(data) != CORRECTION_ESCALATION_PLAN_KEYS \
+            or data.get("schema") != 2 or data.get("origin") != "correction-round":
+        fail("a durable Correction escalation plan publication is malformed")
+    source = source or correction_escalation_sublot_account(
+        entries, index, lot, "a durable Correction escalation plan publication",
+    )
+    current = current or outstanding_correction_escalation_sublot_set(
+        entries, index, lot, "a durable Correction escalation plan publication",
+        source=source,
+    )
+    expected = correction_escalation_plan_written_account(
+        entries, index, lot, data.get("tasks"), data.get("op"), data.get("commit"),
+        current, source, "a durable Correction escalation plan publication",
+    )
+    if data != expected:
+        fail("a durable Correction escalation plan publication changes its exact map", expected)
+    return expected
+
+
+def outstanding_correction_escalation_sublot_set(
+        entries, before, lot, subject, *, source=None,
+):
+    source = source or correction_escalation_sublot_account(entries, before, lot, subject)
+    current = source["set"]
+    publications = [(index, entry) for index, entry in enumerate(entries[:before])
+                    if index > source["opening_index"]
+                    and entry.get("kind") == "plan.written" and entry.get("lot") == lot]
+    for index, entry in publications:
+        validate_correction_escalation_plan_written_entry(
+            entries, index, entry, current=current, source=source,
+        )
+        try:
+            current = validate_final_checker_transition(
+                current, note_data(entry)["retry_transition"],
+                transfer_kind="plan-consumer-map",
+            )
+        except ValueError as exc:
+            fail(f"{subject} has an invalid plan consumer-map transition", exc)
+    return current
+
+
+def correction_escalation_plan_origin(entries, lot):
+    return any(
+        entry.get("kind") == "sublot.allocated" and entry.get("text") == lot
+        and note_data(entry).get("origin") == "correction-round"
+        for entry in entries
+    )
+
+
+def correction_escalation_plan_preflight(entries, lot, tasks, subject):
+    if not correction_escalation_plan_origin(entries, lot):
+        return None
+    source = correction_escalation_sublot_account(entries, len(entries), lot, subject)
+    current = outstanding_correction_escalation_sublot_set(
+        entries, len(entries), lot, subject, source=source,
+    )
+    return correction_escalation_plan_written_account(
+        entries, len(entries), lot, tasks, "preflight", None,
+        current, source, subject, live=True,
+    )
+
+
+def normalize_correction_escalation_plan_written(entries, data, lot, subject):
+    if not isinstance(data, dict) or set(data) not in (
+        {"tasks", "op"}, CORRECTION_ESCALATION_PLAN_KEYS,
+    ):
+        fail(f"{subject} has malformed helper-owned input")
+    source = correction_escalation_sublot_account(entries, len(entries), lot, subject)
+    current = outstanding_correction_escalation_sublot_set(
+        entries, len(entries), lot, subject, source=source,
+    )
+    head = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head.returncode != 0:
+        fail(f"{subject} has no current plan commit")
+    expected = correction_escalation_plan_written_account(
+        entries, len(entries), lot, data.get("tasks"), data.get("op"),
+        head.stdout.strip(), current, source, subject, live=True,
+    )
+    if set(data) == CORRECTION_ESCALATION_PLAN_KEYS and data != expected:
+        fail(f"{subject} changes its exact consumer-map account", expected)
+    return expected
 
 
 def git_object_name(name, subject):
+    cache = CORRECTION_CONTRACT_STATE_CACHE.get()
+    key = ("git-object-name", name)
+    if cache is not None and key in cache:
+        return cache[key]
     result = subprocess.run(
         ["git", "-C", project_root(), "rev-parse", "--verify", f"{name}^{{commit}}"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         fail(f"{subject} is absent or is not a commit", name)
-    return result.stdout.strip()
+    commit = result.stdout.strip()
+    if cache is not None:
+        cache[key] = commit
+    return commit
 
 
 def built_sublot_origin(entries, before, built, subject):
@@ -7409,6 +10555,21 @@ def built_sublot_origin(entries, before, built, subject):
     allocation_data = note_data(allocation)
     if allocation_data.get("built") != built.split(".", 1)[0]:
         fail(f"{subject}'s sub-lot allocation belongs to another root lot")
+    if allocation_data.get("schema") == 2 \
+            and allocation_data.get("origin") == "correction-round":
+        validate_sublot_opening(
+            entries[:opening_index], None, built, f"{subject}'s Correction sub-lot opening",
+        )
+        validate_sublot_allocation(
+            entries[:allocation_index], allocation_data, built,
+            f"{subject}'s Correction escalation allocation",
+        )
+        return {
+            "kind": "correction-escalation-sublot",
+            "opening": journal_line_proof(opening_index),
+            "source": journal_line_proof(allocation_index),
+            "escalation": allocation_data["source"],
+        }
     closes = [(index, entry) for index, entry in enumerate(
         entries[allocation_index + 1:opening_index], allocation_index + 1,
     ) if entry.get("kind") == "pass.closed"]
@@ -7580,7 +10741,32 @@ def validate_pass_opening_history(entries, opening_index, subject, *, validate_o
             or isinstance(data.get("source_attempt"), bool):
         fail(f"{subject} has a malformed pass source identity", data)
     exact_pass_gate_result(entries, opening_index, data, subject)
-    if data["source_scope"] == "task":
+    if data["source_scope"] == "correction-task":
+        correction = data.get("source_round")
+        expected_owner = (
+            f"{built}/correction-{correction}/task-{data['source_task']}/"
+            f"attempt-{data['source_attempt']}"
+        )
+        if data.get("correction_terminal_kind") != "built" \
+                or not construction_positive_integer(correction) \
+                or data["source_lot"] != built or data["source_task"] < 1 \
+                or data["source_attempt"] < 1 or data["source_owner"] != expected_owner:
+            fail(f"{subject} does not consume the exact Correction task identity")
+        terminal_index, terminal = journal_entry_from_proof(
+            entries[:opening_index], data.get("correction_terminal"),
+            f"{subject}'s Correction Round terminal",
+        )
+        if terminal.get("kind") != "correction.round.built":
+            fail(f"{subject}'s Correction task source names another terminal")
+        account, generation = correction_review_generation_account(
+            entries, terminal_index, terminal, subject,
+        )
+        if data.get("position") != correction \
+                or data.get("generation_sha256") != generation \
+                or data.get("commit") != account["commit"] \
+                or data.get("gate") != account["gate"]:
+            fail(f"{subject} changes its exact Correction task generation")
+    elif data["source_scope"] == "task":
         expected_owner = f"{built}/task-{data['source_task']}/attempt-{data['source_attempt']}"
         if data["source_lot"] != built or data["source_task"] < 1 \
                 or data["source_attempt"] < 1 or data["source_owner"] != expected_owner:
@@ -7600,6 +10786,28 @@ def validate_pass_opening_history(entries, opening_index, subject, *, validate_o
                       and note_data(entry).get("built") == built]
         if duplicates:
             fail(f"{subject} repeats a task-owned pass for {built}")
+    elif data.get("correction_terminal_kind") == "amendment-resolved":
+        correction = data.get("source_round")
+        expected_owner = f"{built}/correction-{correction}/resolved"
+        if data["source_lot"] != "-" or data["source_task"] != 0 \
+                or data["source_attempt"] != 0 \
+                or not construction_positive_integer(correction) \
+                or data["source_owner"] != expected_owner:
+            fail(f"{subject} has a malformed resolved Correction source identity")
+        terminal_index, terminal = journal_entry_from_proof(
+            entries[:opening_index], data.get("correction_terminal"),
+            f"{subject}'s resolved Correction terminal",
+        )
+        if terminal.get("kind") != "correction.round.resolved":
+            fail(f"{subject}'s resolved source names another terminal")
+        account, generation = correction_review_generation_account(
+            entries, terminal_index, terminal, subject,
+        )
+        if data.get("position") != correction \
+                or data.get("generation_sha256") != generation \
+                or data.get("commit") != account["commit"] \
+                or data.get("gate") != account["gate"]:
+            fail(f"{subject} changes its exact resolved Correction generation")
     else:
         if data["source_lot"] != "-" or data["source_task"] != 0 \
                 or data["source_attempt"] != 0:
@@ -7644,6 +10852,17 @@ def current_pass_opening(entries, before, subject, *, validate_origin=True):
     return opening_index, opening, data["built"], data["commit"]
 
 
+def authenticated_product_pass_generation(entries, opening_index, mandate, subject):
+    """Project one lens identity from one historically authenticated pass."""
+    opening = validate_pass_opening_history(entries, opening_index, subject)
+    try:
+        return product_pass_generation_account(
+            journal_line_proof(opening_index), opening, mandate,
+        )
+    except ValueError as exc:
+        fail(f"{subject} has no exact Product pass-generation account", str(exc))
+
+
 def normalize_pass_opened(data):
     """A pass consumes one exact task success or amendment-owned successor."""
     if not isinstance(data, dict) or set(data) != {"built", "commit", "gate"}:
@@ -7666,18 +10885,68 @@ def normalize_pass_opened(data):
     if proof.returncode != 0:
         fail("pass.opened does not consume an accepted current full-gate proof", proof.stderr or proof.stdout)
     fields = proof.stdout.strip().split()
-    if len(fields) != 5:
+    if len(fields) != 6:
         fail("pass.opened received a malformed gate source proof", proof.stdout)
-    scope, owner, source_lot, task, attempt = fields
+    scope, owner, source_lot, task, attempt, correction_field = fields
     try:
         task, attempt = int(task), int(attempt)
     except ValueError:
         fail("pass.opened received a non-numeric gate source proof", fields)
+    correction = None
+    if correction_field != "-":
+        try:
+            correction = int(correction_field)
+        except ValueError:
+            fail("pass.opened received a non-numeric Correction Round proof", fields)
     normalized = {
         **data, "source_scope": scope, "source_owner": owner,
         "source_lot": source_lot, "source_task": task, "source_attempt": attempt,
     }
-    if scope == "task":
+    if scope in {"correction-task", "correction-baseline"}:
+        terminal_event_kind = "correction.round.built" \
+            if scope == "correction-task" else "correction.round.resolved"
+        terminals = [(index, entry) for index, entry in enumerate(entries)
+                     if entry.get("kind") == terminal_event_kind
+                     and note_data(entry).get("built") == built
+                     and note_data(entry).get("round") == correction
+                     and note_data(entry).get("commit") == commit
+                     and note_data(entry).get("gate") == gate]
+        if len(terminals) != 1:
+            fail("pass.opened has no one exact Correction Round terminal")
+        terminal_index, terminal = terminals[0]
+        artifact_account = correction_terminal_artifact_account(
+            entries, len(entries), built, correction, "the new product-review pass",
+        )
+        if artifact_account["terminal"] != journal_line_proof(terminal_index) \
+                or artifact_account["terminal_kind"] != terminal_event_kind:
+            fail("pass.opened changes its exact Correction Round terminal")
+        require_canonical_correction_terminal_artifact(
+            artifact_account, "the new product-review pass",
+        )
+        generation = artifact_account["generation_sha256"]
+        pass_ordinal = 1 + sum(
+            1 for entry in entries if entry.get("kind") == "pass.opened"
+            and note_data(entry).get("built") == built
+        )
+        resolved = scope == "correction-baseline"
+        normalized = {
+            "schema": 2,
+            "built": built,
+            "position": correction,
+            "generation_sha256": generation,
+            "pass": pass_ordinal,
+            "commit": commit,
+            "gate": gate,
+            "source_scope": "baseline" if resolved else "correction-task",
+            "correction_terminal_kind": "amendment-resolved" if resolved else "built",
+            "correction_terminal": journal_line_proof(terminal_index),
+            "source_owner": f"{built}/correction-{correction}/resolved" if resolved else owner,
+            "source_lot": "-" if resolved else source_lot,
+            "source_round": correction,
+            "source_task": 0 if resolved else task,
+            "source_attempt": 0 if resolved else attempt,
+        }
+    elif scope == "task":
         _, generation = validate_task_pass_completion(
             entries, len(entries), normalized, "the new product-review pass",
         )
@@ -7735,8 +11004,9 @@ def normalize_pass_opened(data):
 
 PRODUCT_RECEIPT_KEYS = REPORT_COUNT_KEYS | {"pass_commit", "pass_gate", "report_sha256"}
 PRODUCT_RECEIPT_V2_KEYS = REPORT_COUNT_KEYS | {
-    "schema", "pass_opening", "position", "generation_sha256", "pass", "pass_commit",
-    "pass_gate", "mandate", "report", "report_sha256",
+    "schema", "pass_opening", "built", "position", "generation_sha256", "pass",
+    "occurrence", "pass_commit", "pass_gate", "mandate", "report", "risk_history",
+    "report_sha256",
 }
 
 
@@ -7856,16 +11126,12 @@ def validate_product_report_entry(entries, opening_index, index, entry, built, s
             or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("report_sha256"))):
         fail(f"{subject} has malformed or stale durable report proof", data)
     report = product_report_relative(built, mandate, opening_data)
-    if schema_two and (
-        data.get("schema") != 2
-        or data.get("pass_opening") != journal_line_proof(opening_index)
-        or data.get("position") != opening_data["position"]
-        or data.get("generation_sha256") != opening_data["generation_sha256"]
-        or data.get("pass") != opening_data["pass"]
-        or data.get("mandate") != mandate
-        or data.get("report") != str(report)
-    ):
-        fail(f"{subject} changes its exact pass-local report generation", data)
+    if schema_two:
+        generation = authenticated_product_pass_generation(
+            entries, opening_index, mandate, subject,
+        )
+        if any(data.get(key) != value for key, value in generation.items()):
+            fail(f"{subject} changes its exact pass-local report generation", data)
     path = real_workspace_file(report, f"{subject}'s report")
     with open(path, "rb") as source:
         payload = source.read()
@@ -7917,19 +11183,10 @@ def normalize_product_report(entries, data, mandate):
         "report_sha256": report_sha,
     }
     if opening_data.get("schema") == 2:
-        normalized = {
-            **data,
-            "schema": 2,
-            "pass_opening": journal_line_proof(opening_index),
-            "position": opening_data["position"],
-            "generation_sha256": opening_data["generation_sha256"],
-            "pass": opening_data["pass"],
-            "pass_commit": opening_data["commit"],
-            "pass_gate": opening_data["gate"],
-            "mandate": mandate,
-            "report": str(report),
-            "report_sha256": report_sha,
-        }
+        generation = authenticated_product_pass_generation(
+            entries, opening_index, mandate, "the new product-review receipt",
+        )
+        normalized = {**data, **generation, "report_sha256": report_sha}
     candidate = {
         "event": "note", "kind": "report.received", "mandate": mandate,
         "data": normalized,
@@ -7962,7 +11219,7 @@ def product_verifier_identity(entries, before, mandate, subject):
     return opening_index, opening, built, commit, receipt_index, receipt_data
 
 
-def product_verifier_account(opening_index, opening, built, mandate, receipt_data):
+def product_verifier_account(entries, opening_index, opening, built, mandate, receipt_data):
     opening_data = note_data(opening)
     if opening_data.get("schema") != 2:
         return {
@@ -7970,18 +11227,10 @@ def product_verifier_account(opening_index, opening, built, mandate, receipt_dat
             "pass_gate": opening_data["gate"],
             "report_sha256": receipt_data["report_sha256"],
         }
-    return {
-        "schema": 2,
-        "pass_opening": journal_line_proof(opening_index),
-        "position": opening_data["position"],
-        "generation_sha256": opening_data["generation_sha256"],
-        "pass": opening_data["pass"],
-        "pass_commit": opening_data["commit"],
-        "pass_gate": opening_data["gate"],
-        "mandate": mandate,
-        "report": str(product_report_relative(built, mandate, opening_data)),
-        "report_sha256": receipt_data["report_sha256"],
-    }
+    generation = authenticated_product_pass_generation(
+        entries, opening_index, mandate, f"the {mandate} finding-verifier",
+    )
+    return {**generation, "report_sha256": receipt_data["report_sha256"]}
 
 
 def validate_product_verifier_terminal(data, identity, receipt_data, mandate, subject):
@@ -8050,21 +11299,20 @@ def product_verifier_calls(entries, receipt_index, mandate, identity, receipt_da
 def validate_product_finding_verifier(event, data, mandate):
     if mandate not in PRODUCT_REVIEW_MANDATES:
         fail("a product finding-verifier has no fixed lens mandate", mandate)
-    input_identity_keys = {"pass_commit", "pass_gate", "report_sha256"}
-    verdict_keys = {"confirmed", "disproved", "malformed", "claims"}
-    terminal_extra = {"unusable"} if isinstance(data, dict) and "unusable" in data else verdict_keys
-    if not isinstance(data, dict) or set(data) != input_identity_keys \
-            | (set() if event == "subagent-started" else terminal_extra):
-        fail(f"{event} product finding-verifier has malformed identity or result", data)
     entries = journal_entries()
     opening_index, opening, built, commit, receipt_index, receipt_data = product_verifier_identity(
         entries, len(entries), mandate, f"the {mandate} finding-verifier",
     )
     identity = product_verifier_account(
-        opening_index, opening, built, mandate, receipt_data,
+        entries, opening_index, opening, built, mandate, receipt_data,
     )
+    verdict_keys = {"confirmed", "disproved", "malformed", "claims"}
+    terminal_extra = {"unusable"} if isinstance(data, dict) and "unusable" in data else verdict_keys
+    expected_keys = set(identity) | (set() if event == "subagent-started" else terminal_extra)
+    if not isinstance(data, dict) or set(data) != expected_keys:
+        fail(f"{event} product finding-verifier has malformed identity or result", data)
     if commit != identity["pass_commit"] or any(
-        data.get(key) != identity[key] for key in input_identity_keys
+        data.get(key) != value for key, value in identity.items()
     ):
         fail(f"the {mandate} finding-verifier does not consume the current report generation",
              {"expected": identity, "actual": data})
@@ -8107,7 +11355,7 @@ def pass_verifier_state(commit, report_name):
         "the physical finding-verifier",
     )
     identity = product_verifier_account(
-        opening_index, opening, built, mandate, receipt_data,
+        entries, opening_index, opening, built, mandate, receipt_data,
     )
     calls = product_verifier_calls(
         entries, receipt_index, mandate, identity, receipt_data,
@@ -8138,7 +11386,7 @@ def validate_review_receipts(entries, opening_index, before, built, subject):
             fail(f"{subject} has a reopened {mandate} report without a fresh receipt")
         opening_data = note_data(entries[opening_index])
         identity = product_verifier_account(
-            opening_index, entries[opening_index], built, mandate, counts,
+            entries, opening_index, entries[opening_index], built, mandate, counts,
         )
         calls = product_verifier_calls(
             entries[:before], receipt_index, mandate, identity, counts,
@@ -8400,6 +11648,36 @@ def load_correction_round_parser():
     return module
 
 
+def load_correction_amendment_return_validator():
+    path = os.path.join(
+        WORKSPACE, "prompts", "construction", "correction_amendment_return.py",
+    )
+    specification = importlib.util.spec_from_file_location(
+        "bwr_correction_amendment_return", path,
+    )
+    if specification is None or specification.loader is None:
+        fail("the Correction AMENDMENT return validator cannot be loaded", path)
+    module = importlib.util.module_from_spec(specification)
+    try:
+        specification.loader.exec_module(module)
+    except (OSError, ValueError) as exc:
+        fail("the Correction AMENDMENT return validator cannot be loaded", exc)
+    return module
+
+
+def load_correction_escalation_parser():
+    path = os.path.join(WORKSPACE, "prompts", "construction", "correction_escalation.py")
+    specification = importlib.util.spec_from_file_location("bwr_correction_escalation", path)
+    if specification is None or specification.loader is None:
+        fail("the Correction escalation parser cannot be loaded", path)
+    module = importlib.util.module_from_spec(specification)
+    try:
+        specification.loader.exec_module(module)
+    except (OSError, ValueError) as exc:
+        fail("the Correction escalation parser cannot be loaded", exc)
+    return module
+
+
 def source_identity_key(identity):
     mandate, ordinal = identity.split("/F", 1)
     return PRODUCT_REVIEW_MANDATES.index(mandate), int(ordinal)
@@ -8499,6 +11777,67 @@ def validate_allocation_account(entries, opening_index, before, built, data, sub
     return account
 
 
+PRODUCT_SUBLOT_ALLOCATION_KEYS = {
+    "schema", "origin", "built", "source", "correction_supersession",
+    "items", "refuted",
+}
+
+
+def normalize_product_sublot_allocation(
+        entries, opening_index, before, built, data, subject, *, historical=False,
+):
+    """Project one fresh or durable Product sub-lot allocation account."""
+    opening_data = note_data(entries[opening_index])
+    durable = isinstance(data, dict) and data.get("schema") == 2
+    if durable:
+        if opening_data.get("schema") != 2 or set(data) != PRODUCT_SUBLOT_ALLOCATION_KEYS \
+                or data.get("origin") != "product-review" \
+                or data.get("built") != built \
+                or data.get("source") != journal_line_proof(opening_index):
+            fail(f"{subject} has malformed schema-2 sub-lot allocation authority")
+
+    if opening_data.get("schema") != 2:
+        account = validate_allocation_account(
+            entries, opening_index, before, built, data, subject,
+        )
+        return data, account
+
+    current, supersession = correction_allocation_lineage(
+        entries, opening_index, before, subject,
+        pending_consumer=data.get("correction_supersession") if durable else None,
+        historical=historical,
+    )
+    if current is not None:
+        fail(f"{subject} cannot overlap a live Correction Round allocation")
+    correction_supersession = None
+    if supersession is not None:
+        supersession_index, supersession_entry = supersession
+        if note_data(supersession_entry).get("outcome") not in {"sublot", "reclassify"}:
+            fail(f"{subject} has an unknown Correction Round supersession route")
+        correction_supersession = journal_line_proof(supersession_index)
+
+    bare = {
+        "built": data.get("built"),
+        "items": data.get("items"),
+        "refuted": data.get("refuted"),
+    } if durable else data
+    normalized = {
+        "schema": 2,
+        "origin": "product-review",
+        "built": built,
+        "source": journal_line_proof(opening_index),
+        "correction_supersession": correction_supersession,
+        "items": bare.get("items") if isinstance(bare, dict) else None,
+        "refuted": bare.get("refuted") if isinstance(bare, dict) else None,
+    }
+    if durable and data != normalized:
+        fail(f"{subject} changes its exact schema-2 sub-lot allocation authority")
+    account = validate_allocation_account(
+        entries, opening_index, before, built, bare, subject,
+    )
+    return normalized, account
+
+
 def validate_source_refutation(entries, data, text, subject):
     if set(data) != {"source"} or not isinstance(text, str) or not text:
         fail(f"{subject} must name one source and its exact observation", data)
@@ -8526,8 +11865,15 @@ def validate_allocation_identity(entries, opening_index, before, built, lot, sub
     return root
 
 
-def validate_sublot_allocation(entries, data, text, subject, *, validate_origin=True):
+def validate_sublot_allocation(
+        entries, data, text, subject, *, validate_origin=True, historical=False,
+):
     before = len(entries)
+    if isinstance(data, dict) and data.get("schema") == 2 \
+            and data.get("origin") == "correction-round":
+        return validate_correction_escalation_sublot_allocation(
+            entries, before, data, text, subject,
+        )
     opening_index, _, built, _ = current_pass_opening(
         entries, before, subject, validate_origin=validate_origin,
     )
@@ -8549,29 +11895,147 @@ def validate_sublot_allocation(entries, data, text, subject, *, validate_origin=
         entries, before, subject, {"implementation", "sublot"},
     )
     validate_allocation_identity(entries, opening_index, before, built, text, subject)
-    validate_allocation_account(entries, opening_index, before, built, data, subject)
-    opening_data = note_data(entries[opening_index])
-    if opening_data.get("schema") != 2:
-        return data
-    current, supersession = correction_allocation_lineage(
-        entries, opening_index, before, subject,
+    normalized, _ = normalize_product_sublot_allocation(
+        entries, opening_index, before, built, data, subject, historical=historical,
     )
-    if current is not None:
-        fail(f"{subject} cannot overlap a live Correction Round allocation")
-    correction_supersession = None
-    if supersession is not None:
-        supersession_index, supersession_entry = supersession
-        if note_data(supersession_entry).get("outcome") not in {"sublot", "reclassify"}:
-            fail(f"{subject} has an unknown Correction Round supersession route")
-        correction_supersession = journal_line_proof(supersession_index)
-    return {
+    return normalized
+
+
+def validate_correction_escalation_sublot_allocation(
+        entries, before, data, text, subject,
+):
+    required = {
+        "schema", "origin", "built", "source", "items", "retry_transition",
+    }
+    if set(data) != required or data.get("schema") != 2 \
+            or data.get("origin") != "correction-round":
+        fail(f"{subject} has malformed Correction escalation allocation data")
+    source_index, terminal = journal_entry_from_proof(
+        entries, data.get("source"), f"{subject}'s Correction escalation",
+    )
+    terminal_data = note_data(terminal)
+    built, correction = terminal_data.get("built"), terminal_data.get("round")
+    if source_index >= before or terminal.get("kind") != "correction.round.escalated" \
+            or terminal_data.get("route") != "sublot" or data.get("built") != built:
+        fail(f"{subject} has no exact Correction escalation source")
+    validate_correction_round_escalated_entry(entries, source_index, terminal)
+    if any(entry.get("kind") == "sublot.allocated"
+           and note_data(entry).get("origin") == "correction-round"
+           and note_data(entry).get("source") == data["source"]
+           for entry in entries[source_index + 1:before]):
+        fail(f"{subject}'s Correction escalation already has an allocation")
+    validate_allocation_identity(entries, source_index, before, built, text, subject)
+    try:
+        validate_global_authority_precedence(entries[:before])
+    except AuthorityPrecedenceError as exc:
+        fail(f"an unfinished global product-authority boundary outranks {subject}", exc)
+    current = outstanding_final_checker_set(
+        entries, before, built, correction, subject,
+    )
+    dispositions = []
+    carries_by_item = {item["id"]: [] for item in terminal_data["items"]}
+    for member in current["entries"]:
+        source = member["source"]
+        prior = member["assignment"]
+        try:
+            requirement = final_checker_consumer_requirement(member)
+        except ValueError as exc:
+            fail(f"{subject} has no exact immutable consumer requirement", exc)
+        if prior.get("owner") != "escalation-tail" \
+                or requirement.get("obligation_id") != source["obligation_id"] \
+                or requirement.get("escalation_item") not in carries_by_item:
+            fail(f"{subject} has a non-escalation outstanding obligation")
+        carries_by_item[requirement["escalation_item"]].append(source["obligation_id"])
+        dispositions.append({
+            "obligation_id": source["obligation_id"],
+            "outcome": "carried",
+            "assignment": {
+                "unit": {"kind": "sublot-plan", "lot": text, "source": data["source"]},
+                "task": None,
+                "phase": "publish-consumer-map",
+                "owner": "sublot-plan",
+                "consumer_requirement": requirement,
+            },
+            "evidence": None,
+        })
+    transition, _ = materialize_final_checker_transition(
+        current, additions=[], dispositions=dispositions,
+        transfer_kind="sublot-allocation",
+    )
+    items = [{
+        "id": item["id"],
+        "sources": sorted(set(item["origins"] + [
+            correction_escalation_blocker_identity(item, subject),
+        ])),
+        "carries": carries_by_item[item["id"]],
+    } for item in terminal_data["items"]]
+    expected = {
         "schema": 2,
-        "origin": "product-review",
+        "origin": "correction-round",
         "built": built,
-        "source": journal_line_proof(opening_index),
-        "correction_supersession": correction_supersession,
-        "items": data["items"],
-        "refuted": data["refuted"],
+        "source": data["source"],
+        "items": items,
+        "retry_transition": transition,
+    }
+    if data != expected:
+        fail(f"{subject} changes its exact Correction escalation allocation", expected)
+    return expected
+
+
+def correction_escalation_sublot_account(entries, before, lot, subject):
+    allocations = [(index, entry) for index, entry in enumerate(entries[:before])
+                   if entry.get("kind") == "sublot.allocated"
+                   and entry.get("text") == lot
+                   and note_data(entry).get("origin") == "correction-round"]
+    if len(allocations) != 1:
+        fail(f"{subject} has no one exact Correction escalation allocation")
+    allocation_index, allocation = allocations[0]
+    allocation_data = validate_sublot_allocation(
+        entries[:allocation_index], note_data(allocation), lot, subject,
+    )
+    source_index, terminal = journal_entry_from_proof(
+        entries, allocation_data["source"], f"{subject}'s escalation source",
+    )
+    terminal_data = note_data(terminal)
+    if source_index >= allocation_index or terminal.get("kind") != "correction.round.escalated":
+        fail(f"{subject} has no ordered Correction escalation source")
+    openings = [(index, entry) for index, entry in enumerate(
+        entries[allocation_index + 1:before], allocation_index + 1,
+    ) if entry.get("kind") == "sublot.opened" and entry.get("text") == lot]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact Correction escalation sub-lot opening")
+    opening_index, opening = openings[0]
+    validate_sublot_opening(
+        entries[:opening_index], opening.get("data"), lot, subject,
+    )
+    current = outstanding_final_checker_set(
+        entries, allocation_index + 1,
+        terminal_data["built"], terminal_data["round"], subject,
+    )
+    for member in current["entries"]:
+        assignment = member["assignment"]
+        try:
+            final_checker_consumer_requirement(member)
+        except ValueError as exc:
+            fail(f"{subject} has no exact immutable consumer requirement", exc)
+        if assignment.get("owner") != "sublot-plan" \
+                or assignment.get("unit") != {
+                    "kind": "sublot-plan", "lot": lot,
+                    "source": allocation_data["source"],
+                }:
+            fail(f"{subject} has a foreign sub-lot plan owner")
+    return {
+        "allocation_index": allocation_index,
+        "allocation": allocation,
+        "allocation_proof": journal_line_proof(allocation_index),
+        "allocation_data": allocation_data,
+        "source_index": source_index,
+        "terminal": terminal,
+        "terminal_data": terminal_data,
+        "opening_index": opening_index,
+        "opening": opening,
+        "opening_proof": journal_line_proof(opening_index),
+        "set": current,
     }
 
 
@@ -8811,6 +12275,12 @@ def normalize_correction_allocation(entries, data, subject, *, historical=False)
         {"built": built, "items": normalized["items"], "refuted": normalized["refuted"]},
         subject,
     )
+    admit_correction_entry(CorrectionEntryFacts(
+        allocation_present=False,
+        opening_present=False,
+        active_owner=None,
+        terminal=None,
+    ), "allocate")
     return normalized
 
 
@@ -8984,7 +12454,7 @@ def normalize_correction_allocation_supersession(
 
 
 def validate_sublot_opening(entries, data, text, subject):
-    """Prove that one sub-lot consumes its exact closed positive review pass."""
+    """Prove that one sub-lot consumes its exact product or Correction source."""
     if data is not None:
         fail(f"{subject} takes no structured data", data)
     if not isinstance(text, str) or not re.fullmatch(
@@ -8994,6 +12464,23 @@ def validate_sublot_opening(entries, data, text, subject):
     if any(entry.get("kind") == "sublot.opened" and entry.get("text") == text
            for entry in entries):
         fail(f"{subject} repeats the opening of {text}")
+
+    correction_allocations = [(index, entry) for index, entry in enumerate(entries)
+                              if entry.get("kind") == "sublot.allocated"
+                              and entry.get("text") == text
+                              and note_data(entry).get("origin") == "correction-round"]
+    if correction_allocations:
+        if len(correction_allocations) != 1:
+            fail(f"{subject} has no one exact Correction escalation allocation")
+        allocation_index, allocation = correction_allocations[0]
+        validate_sublot_allocation(
+            entries[:allocation_index], note_data(allocation), text, subject,
+        )
+        return {
+            "schema": 2,
+            "origin": "correction-round",
+            "allocation": journal_line_proof(allocation_index),
+        }
 
     opening_index, _, close_index, _, confirmed, built = current_pass_close(
         entries, subject, validate_origin=False, validate_current_gate=False,
@@ -9126,6 +12613,61 @@ def covers_values(plan):
     return values if active else None
 
 
+def correction_escalation_root_covers(plan, subject):
+    """Project one exact non-fenced root Covers account before Task 1."""
+    _, visible = markdown_structure_lines(plan)
+    task_starts = [
+        index for index, line in enumerate(visible)
+        if line is not None and re.fullmatch(r"## Task [1-9][0-9]* - .+", line)
+    ]
+    if not task_starts:
+        fail(f"{subject} has no structural task boundary after its root account")
+    root_end = task_starts[0]
+    covers_like = [
+        index for index, line in enumerate(visible[:root_end])
+        if line is not None and line.lstrip().startswith("Covers:")
+    ]
+    exact = [
+        index for index in covers_like
+        if visible[index] == "Covers:" or visible[index].startswith("Covers: ")
+    ]
+    if len(covers_like) != 1 or len(exact) != 1:
+        fail(f"{subject} has no one exact structural root Covers account")
+
+    start = exact[0]
+    first = visible[start].removeprefix("Covers:")
+    if first != first.rstrip() or first and not first.startswith(" "):
+        fail(f"{subject} has a malformed structural root Covers account")
+    values = [first.strip()] if first.strip() else []
+    continuation = set()
+    cursor = start + 1
+    while cursor < root_end:
+        line = visible[cursor]
+        if line is None:
+            cursor += 1
+            continue
+        if not line.strip():
+            break
+        if not line.startswith((" ", "\t")):
+            break
+        value = line.strip()
+        if value:
+            values.append(value)
+            continuation.add(cursor)
+        cursor += 1
+    if not values:
+        fail(f"{subject} has an empty structural root Covers account")
+
+    for index, line in enumerate(visible[:root_end]):
+        if line is None or not line.strip() or index == start or index in continuation:
+            continue
+        if line.lstrip().startswith("Covers:") \
+                or re.fullmatch(r" {0,3}#{2,6}(?:\s+.*)?", line) \
+                or re.match(r"^[A-Z][A-Za-z0-9 _/-]*:", line):
+            fail(f"{subject} has a foreign structural root account", line)
+    return values
+
+
 def validate_positive_close_artifacts(
     entries, opening_index, before, built, confirmed, subject, *, historical=False,
 ):
@@ -9139,29 +12681,9 @@ def validate_positive_close_artifacts(
     root = validate_allocation_identity(entries, opening_index, before, built, lot, subject)
     allocation_data = note_data(allocation)
     opening_data = note_data(entries[opening_index])
-    if allocation_data.get("schema") == 2:
-        current, supersession = correction_allocation_lineage(
-            entries, opening_index, before, subject, historical=historical,
-        )
-        if current is not None:
-            fail(f"{subject} cannot close a sub-lot over a live Correction Round allocation")
-        expected_supersession = (
-            journal_line_proof(supersession[0]) if supersession is not None else None
-        )
-        if set(allocation_data) != {
-            "schema", "origin", "built", "source", "correction_supersession",
-            "items", "refuted",
-        } or allocation_data.get("origin") != "product-review" \
-                or allocation_data.get("source") != journal_line_proof(opening_index) \
-                or allocation_data.get("correction_supersession") != expected_supersession:
-            fail(f"{subject} has malformed schema-2 sub-lot allocation authority")
-        allocation_data = {
-            "built": allocation_data["built"],
-            "items": allocation_data["items"],
-            "refuted": allocation_data["refuted"],
-        }
-    expected_account = validate_allocation_account(
+    _, expected_account = normalize_product_sublot_allocation(
         entries, opening_index, before, built, allocation_data, subject,
+        historical=historical,
     )
 
     confirmed_relative = product_confirmed_path(
@@ -9199,7 +12721,7 @@ def validate_positive_close_artifacts(
 
 def normalize_correction_pass_close(
         entries, opening_index, opening, before, built, confirmed, subject, *,
-        historical=False, submitted=None,
+        historical=False, submitted=None, publish_objects=True,
 ):
     current, _ = correction_allocation_lineage(
         entries, opening_index, before, subject, historical=historical,
@@ -9315,7 +12837,7 @@ def normalize_correction_pass_close(
             or list(artifact["source_finding_coverage"]) != list(expected_account):
         fail(f"{subject}'s Correction Round artifact changes its allocation authority")
 
-    if not historical:
+    if not historical and publish_objects:
         try:
             confirmed_path = publish_content_object(
                 WORKSPACE, built, confirmed_bytes, ".md",
@@ -9327,6 +12849,13 @@ def normalize_correction_pass_close(
             fail(f"{subject} cannot publish its immutable Correction Round authority", exc)
         confirmed_object = str(PurePosixPath(confirmed_path.relative_to(WORKSPACE)))
         artifact_object = str(PurePosixPath(artifact_path.relative_to(WORKSPACE)))
+    elif not historical:
+        confirmed_object = str(PurePosixPath(content_object_path(
+            Path(WORKSPACE), built, confirmed_sha256, ".md",
+        ).relative_to(WORKSPACE)))
+        artifact_object = str(PurePosixPath(content_object_path(
+            Path(WORKSPACE), built, artifact["artifact_sha256"], ".md",
+        ).relative_to(WORKSPACE)))
     normalized = {
         "schema": 2,
         "confirmed": confirmed,
@@ -9475,7 +13004,7 @@ def validate_correction_void_account(
 
 def validate_pass_close(
     entries, data, subject, *, historical=False,
-    validate_origin=True, validate_current_gate=True,
+    validate_origin=True, validate_current_gate=True, publish_objects=True,
 ):
     before = len(entries)
     opening_index, opening, built, _ = current_pass_opening(
@@ -9587,6 +13116,7 @@ def validate_pass_close(
             normalized, immutable_confirmed = normalize_correction_pass_close(
                 entries, opening_index, opening, before, built, confirmed, subject,
                 historical=historical, submitted=submitted,
+                publish_objects=publish_objects,
             )
             if submitted != {"confirmed": confirmed} and submitted != normalized:
                 fail(f"{subject} changes its derived Correction Round close authority")
@@ -9607,6 +13137,81 @@ def validate_pass_close(
             entries, before, built, subject, confirmed_relative=confirmed_relative,
         )
     return opening_index, opening, confirmed, built, submitted
+
+
+def correction_round_check_account(entries, built, correction, subject):
+    """Replay the current canonical Correction artifact without publishing authority."""
+    if not isinstance(built, str) or not re.fullmatch(
+        r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built,
+    ) or not construction_positive_integer(correction):
+        fail(f"{subject} has an invalid Correction Round identity")
+
+    openings = [
+        entry for entry in entries
+        if entry.get("kind") == "correction.round.opened"
+        and note_data(entry).get("built") == built
+        and note_data(entry).get("round") == correction
+    ]
+    if not openings:
+        opening_index, _opening, current_built, _commit = current_pass_opening(
+            entries, len(entries), subject,
+        )
+        if current_built != built:
+            fail(f"{subject} does not match the current PRODUCT REVIEW built unit")
+        current, _supersession = correction_allocation_lineage(
+            entries, opening_index, len(entries), subject,
+        )
+        if current is None:
+            fail(f"{subject} has no current Correction Round allocation")
+        allocation_index, allocation_entry = current
+        allocation = normalize_correction_allocation(
+            entries[:allocation_index], note_data(allocation_entry), subject,
+        )
+        if allocation["round"] != correction:
+            fail(f"{subject} does not match the current Correction Round allocation")
+        return validate_pass_close(
+            entries, {"confirmed": len(allocation["items"])}, subject,
+            publish_objects=False,
+        )[4]
+
+    state = current_correction_contract_state(
+        entries, len(entries), built, correction, subject,
+    )
+    relative = PurePosixPath("corrections", built, f"round-{correction}.md")
+    path = real_workspace_file(relative, f"{subject}'s canonical artifact")
+    parser = load_correction_round_parser()
+    try:
+        artifact = parser.parse_artifact(
+            path, expected_built=built, expected_round=correction,
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject}'s canonical artifact is invalid", exc)
+    if artifact["artifact_sha256"] != state["artifact_sha256"] \
+            or artifact["controller_sha256"] != state["controller_sha256"] \
+            or artifact["manifest_sha256"] != state["artifact"]["manifest_sha256"] \
+            or artifact["schema"] != state["artifact"]["schema"] \
+            or artifact["state"] != state["artifact"]["state"] \
+            or artifact["amendment"] != state["artifact"]["amendment"] \
+            or artifact["amendment_opening"] != state["artifact"]["amendment_opening"] \
+            or artifact["amendment_commit"] != state["artifact"]["amendment_commit"]:
+        fail(f"{subject}'s canonical artifact changes its current immutable authority")
+    return {
+        "schema": 1,
+        "route": "active-correction",
+        "built": built,
+        "round": correction,
+        "contract_authority": state["proof"],
+        "artifact": str(relative),
+        "artifact_sha256": artifact["artifact_sha256"],
+        "controller_sha256": artifact["controller_sha256"],
+        "manifest_sha256": artifact["manifest_sha256"],
+        "tasks": len(artifact["tasks"]),
+        "artifact_schema": artifact["schema"],
+        "artifact_state": artifact["state"],
+        "amendment": artifact["amendment"],
+        "amendment_opening": artifact["amendment_opening"],
+        "amendment_commit": artifact["amendment_commit"],
+    }
 
 
 def current_pass_close(
@@ -9759,6 +13364,12 @@ def normalize_correction_round_opening(entries, data, subject, *, historical=Fal
         )
         if head.returncode != 0 or head.stdout.strip() != close_data["base_commit"]:
             fail(f"{subject}'s repository is not at its frozen correction base")
+    admit_correction_entry(CorrectionEntryFacts(
+        allocation_present=True,
+        opening_present=False,
+        active_owner=None,
+        terminal=None,
+    ), "open")
     return expected
 
 
@@ -9785,64 +13396,94 @@ def git_commit_is_ancestor(ancestor, descendant):
     ).returncode == 0
 
 
+def retained_authority_transition(kind, proof, commit, base_commit, subject):
+    if not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)):
+        fail(f"{subject}'s retained {kind} has no exact commit")
+    if git_commit_is_ancestor(commit, base_commit):
+        return None
+    parent = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{commit}^"],
+        capture_output=True, text=True,
+    )
+    tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{commit}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    if parent.returncode != 0 or tree.returncode != 0:
+        fail(f"{subject}'s retained {kind} has no exact parent or tree")
+    semantic = {
+        "schema": 1,
+        "kind": kind,
+        "proof": proof,
+        "source_parent": parent.stdout.strip(),
+        "source_commit": commit,
+        "source_tree": tree.stdout.strip(),
+    }
+    semantic["transition_sha256"] = hashlib.sha256(json.dumps(
+        semantic, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    return semantic
+
+
+def correction_amendment_retained_transition(
+        entries, before, proof, base_commit, subject,
+):
+    commit_index, commit = journal_entry_from_proof(
+        entries[:before], proof, f"{subject}'s retained AMENDMENT",
+    )
+    if commit.get("kind") != "amendment.committed":
+        fail(f"{subject}'s retained AMENDMENT proof names another event")
+    validate_amendment_commit_entry(entries, commit_index, commit)
+    transition = retained_authority_transition(
+        "amendment", journal_line_proof(commit_index), note_data(commit).get("sha"),
+        base_commit, subject,
+    )
+    if transition is None:
+        fail(f"{subject}'s retained AMENDMENT is already present in its rewind base")
+    return transition
+
+
 def retained_authority_chain(entries, before, state, base_commit, subject):
     """Return retained controller transitions missing from one rewind base.
 
-    Stage 4 can produce post-task Correction artifact revisions. Later stages add
-    AMENDMENT, rebase, and controller-successor members to this same projector.
+    A rebase expands to its exact AMENDMENT commit followed by the correction
+    artifact commit. Later revisions remain independent ordered transitions.
     """
     transitions = []
-    current_projection = subprocess.run(
-        ["git", "-C", project_root(), "show", f"{base_commit}:{state['path']}"],
-        capture_output=True,
-    )
-    current_projection_sha256 = (
-        hashlib.sha256(current_projection.stdout).hexdigest()
-        if current_projection.returncode == 0 else None
-    )
+    seen = set()
+
+    def append_transition(kind, proof, commit):
+        if proof in seen:
+            fail(f"{subject}'s retained authority chain repeats one transition")
+        semantic = retained_authority_transition(
+            kind, proof, commit, base_commit, subject,
+        )
+        if semantic is None:
+            return
+        transitions.append(semantic)
+        seen.add(proof)
+
     for index, entry in enumerate(entries[state["opening_index"] + 1:before],
                                   state["opening_index"] + 1):
         data = note_data(entry)
-        if entry.get("kind") != "correction.round.revised" \
-                or data.get("built") != state["built"] \
-                or data.get("round") != state["round"]:
-            continue
-        commit = data.get("commit")
-        if not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)):
-            fail(f"{subject}'s retained revision has no exact commit")
-        if git_commit_is_ancestor(commit, base_commit):
-            continue
-        source_projection = subprocess.run(
-            ["git", "-C", project_root(), "show", f"{commit}:{state['path']}"],
-            capture_output=True,
-        )
-        if source_projection.returncode != 0:
-            fail(f"{subject}'s retained revision has no exact artifact projection")
-        source_projection_sha256 = hashlib.sha256(source_projection.stdout).hexdigest()
-        if source_projection_sha256 == current_projection_sha256:
-            current_projection_sha256 = source_projection_sha256
-            continue
-        parent = subprocess.run(
-            ["git", "-C", project_root(), "rev-parse", "--verify", f"{commit}^"],
-            capture_output=True, text=True,
-        )
-        if parent.returncode != 0:
-            fail(f"{subject}'s retained revision has no exact parent")
-        semantic = {
-            "schema": 1,
-            "kind": "revision",
-            "proof": journal_line_proof(index),
-            "source_parent": parent.stdout.strip(),
-            "source_commit": commit,
-            "source_tree": data.get("tree"),
-            "artifact_sha256": data.get("artifact_sha256"),
-            "controller_sha256": data.get("controller_sha256"),
-        }
-        semantic["transition_sha256"] = hashlib.sha256(json.dumps(
-            semantic, sort_keys=True, separators=(",", ":"),
-        ).encode()).hexdigest()
-        transitions.append(semantic)
-        current_projection_sha256 = source_projection_sha256
+        if entry.get("kind") == "correction.round.rebased" \
+                and data.get("built") == state["built"] \
+                and data.get("round") == state["round"]:
+            amendment_index, amendment = journal_entry_from_proof(
+                entries, data.get("amendment"), f"{subject}'s retained AMENDMENT",
+            )
+            if amendment_index >= index or amendment.get("kind") != "amendment.committed":
+                fail(f"{subject}'s retained rebase has no exact AMENDMENT predecessor")
+            validate_amendment_commit_entry(entries, amendment_index, amendment)
+            append_transition(
+                "amendment", journal_line_proof(amendment_index),
+                note_data(amendment).get("sha"),
+            )
+            append_transition("rebase", journal_line_proof(index), data.get("commit"))
+        elif entry.get("kind") == "correction.round.revised" \
+                and data.get("built") == state["built"] \
+                and data.get("round") == state["round"]:
+            append_transition("revision", journal_line_proof(index), data.get("commit"))
     return transitions
 
 
@@ -9853,6 +13494,79 @@ def correction_rewind_pending_owner_sha256(data):
         "disposition": "rewind",
         "event": semantic,
     }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def retained_transition_paths(transition, subject):
+    result = subprocess.run(
+        ["git", "-C", project_root(), "diff", "--name-only", "-z",
+         transition["source_parent"], transition["source_commit"]],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        fail(f"{subject}'s retained transition has no exact changed-path account")
+    paths = result.stdout.rstrip(b"\0").split(b"\0") if result.stdout else []
+    if not paths or paths != sorted(set(paths)):
+        fail(f"{subject}'s retained transition has no ordered changed-path account")
+    try:
+        return [path.decode("utf-8") for path in paths]
+    except UnicodeDecodeError as exc:
+        fail(f"{subject}'s retained transition has a non-UTF-8 path: {exc}")
+
+
+def retained_transition_tree(transition, onto, subject):
+    result = subprocess.run(
+        ["git", "-C", project_root(), "merge-tree", "--write-tree", "--no-messages",
+         f"--merge-base={transition['source_parent']}", onto,
+         transition["source_commit"]],
+        capture_output=True, text=True,
+    )
+    tree = result.stdout.splitlines()[0] if result.stdout.splitlines() else None
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", str(tree)):
+        return None
+    return tree
+
+
+def git_object_blob(treeish, path):
+    result = subprocess.run(
+        ["git", "-C", project_root(), "show", f"{treeish}:{path}"],
+        capture_output=True,
+    )
+    return None if result.returncode != 0 else result.stdout
+
+
+def retained_authority_failure(crossed, base_commit, artifact_path, subject):
+    """Return the first transition with no exact read-only authority projection."""
+    overlay = {}
+    for transition in crossed:
+        for path in retained_transition_paths(transition, subject):
+            parent_payload = git_object_blob(transition["source_parent"], path)
+            source_payload = git_object_blob(transition["source_commit"], path)
+            target_payload = overlay.get(path, git_object_blob(base_commit, path))
+            blocked = False
+            if path == artifact_path and source_payload is not None:
+                if target_payload is None or transition["kind"] == "revision":
+                    projected = source_payload
+                else:
+                    try:
+                        projected = load_correction_round_parser().merge_controller_projection(
+                            source_payload, target_payload,
+                        )
+                    except ValueError:
+                        projected = None
+                blocked = projected is None
+            elif target_payload != parent_payload and target_payload != source_payload:
+                projected = None
+                blocked = True
+            else:
+                projected = source_payload
+            if blocked:
+                return {
+                    "kind": transition["kind"], "proof": transition["proof"],
+                    "transition_sha256": transition["transition_sha256"],
+                    "reason": "the retained transition has no exact conflict-free Git projection",
+                }
+            overlay[path] = projected
+    return None
 
 
 def validate_correction_reland(transition, reland, onto, path, subject):
@@ -9874,34 +13588,116 @@ def validate_correction_reland(transition, reland, onto, path, subject):
         ["git", "-C", project_root(), "rev-parse", "--verify",
          f"{reland['result_commit']}^{{tree}}"], capture_output=True, text=True,
     )
+    changed_paths = retained_transition_paths(transition, subject)
     names = subprocess.run(
-        ["git", "-C", project_root(), "diff-tree", "--no-commit-id", "--name-only",
-         "-r", reland["result_commit"]], capture_output=True, text=True,
+        ["git", "-C", project_root(), "diff", "--name-only", "-z", onto,
+         reland["result_commit"]], capture_output=True,
     )
-    source_blob = subprocess.run(
-        ["git", "-C", project_root(), "show", f"{transition['source_commit']}:{path}"],
-        capture_output=True,
-    )
-    result_blob = subprocess.run(
-        ["git", "-C", project_root(), "show", f"{reland['result_commit']}:{path}"],
-        capture_output=True,
-    )
+    result_paths = names.stdout.rstrip(b"\0").split(b"\0") if names.stdout else []
     if parent.returncode != 0 or parent.stdout.strip() != onto \
             or tree.returncode != 0 or tree.stdout.strip() != reland["result_tree"] \
-            or names.returncode != 0 or names.stdout.splitlines() != [path] \
-            or source_blob.returncode != 0 or result_blob.returncode != 0 \
-            or source_blob.stdout != result_blob.stdout:
+            or names.returncode != 0 \
+            or result_paths != [item.encode() for item in changed_paths]:
         fail(f"{subject}'s retained-authority re-land changes its exact projection")
+    for changed_path in changed_paths:
+        source_payload = git_object_blob(transition["source_commit"], changed_path)
+        result_payload = git_object_blob(reland["result_commit"], changed_path)
+        if changed_path == path and source_payload is not None and result_payload is not None:
+            source_artifact = load_correction_round_parser().parse_artifact_bytes(source_payload)
+            result_artifact = load_correction_round_parser().parse_artifact_bytes(result_payload)
+            if result_payload != source_payload \
+                    or result_artifact["controller_sha256"] != source_artifact["controller_sha256"]:
+                fail(f"{subject}'s re-land changes its controller projection")
+        elif source_payload != result_payload:
+            fail(f"{subject}'s retained-authority re-land changes one owned path")
     return reland["result_commit"]
+
+
+def correction_rewind_stable_owner(
+        entries, rewind_index, replay_before, state, task, commit, subject,
+):
+    last_rewind = rewind_index
+    for later_index, later in enumerate(
+            entries[rewind_index + 1:replay_before], rewind_index + 1,
+    ):
+        later_data = note_data(later)
+        if later.get("kind") == "rewind.done" and later_data.get("schema") == 2 \
+                and later_data.get("unit") == {
+                    "kind": "correction", "built": state["built"],
+                    "round": state["round"],
+                } and any(
+                    isinstance(member, dict) and member.get("task") == task
+                    for member in later_data.get("moved", [])
+                ):
+            last_rewind = later_index
+    task_successes = [
+        (later_index, later) for later_index, later in enumerate(
+            entries[last_rewind + 1:replay_before], last_rewind + 1,
+        )
+        if later.get("kind") == "attempt.succeeded"
+        and later.get("lot") == state["built"]
+        and later.get("correction") == state["round"]
+        and later.get("task") == task
+    ]
+    candidates = [
+        (owner_index, owner) for owner_index, owner in task_successes
+        if note_data(owner).get("sha") == commit
+    ]
+    active = CORRECTION_SUCCESS_VALIDATIONS.get()
+    boundary = [
+        (owner_index, entries[owner_index])
+        for built, correction, owner_task, owner_index, owner_commit in active
+        if built == state["built"] and correction == state["round"]
+        and owner_task == task and owner_index >= replay_before
+        and owner_commit == commit and owner_index < len(entries)
+    ]
+    candidates.extend(boundary)
+    candidates = list({owner_index: owner for owner_index, owner in candidates}.items())
+    if not candidates:
+        if commit is None and not task_successes:
+            return None
+        validated_recovery = any(
+            isinstance(recovery, dict) and recovery.get("validated") is True
+            and recovery.get("built") == state["built"]
+            and recovery.get("round") == state["round"]
+            and recovery.get("task") == task
+            and recovery.get("from") == (
+                f"refs/bwr/{Path(WORKSPACE).name}/{state['built']}/"
+                f"correction-{state['round']}/task-{task}"
+            )
+            and recovery.get("source_commit") == commit
+            for recovery in CORRECTION_REWIND_SUCCESS_RECOVERIES.get()
+        )
+        if validated_recovery:
+            return None
+        if any(
+            isinstance(recovery, dict)
+            and recovery.get("built") == state["built"]
+            and recovery.get("round") == state["round"]
+            and recovery.get("task") == task
+            and recovery.get("commit") == commit
+            for recovery in CORRECTION_SUCCESS_RECOVERIES.get()
+        ):
+            return None
+    if len(candidates) != 1:
+        fail(f"{subject}'s replacement correction stable ref has no one exact owner")
+    owner_index, owner = candidates[0]
+    owner_data = note_data(owner)
+    identity = (
+        state["built"], state["round"], task, owner_index, owner_data.get("sha"),
+    )
+    if identity not in active:
+        validate_attempt_succeeded_entry(entries, owner_index, owner)
 
 
 def validate_correction_rewind_transition(
         entries, index, entry, state, subject, *, candidate=False, pending=False,
+        replay_before=None,
 ):
-    require_no_current_correction_stop(
-        entries, index, state["built"], state["round"], subject,
-    )
     data = note_data(entry)
+    replay_before = len(entries) if replay_before is None else replay_before
+    if replay_before < index + 1 or replay_before > len(entries):
+        fail(f"{subject} has an invalid historical replay boundary")
     required = {
         "schema", "unit", "unit_authority_sha256", "cause", "previous_rewind",
         "ref_root", "rewind", "target", "attempt", "moved", "crossed_authorities",
@@ -9917,63 +13713,26 @@ def validate_correction_rewind_transition(
             or data.get("ref_root") != expected_root \
             or data.get("rewind") != state.get("rewind_ordinal", 0) + 1 \
             or not construction_positive_integer(data.get("attempt")) \
-            or data.get("outstanding_retry_set_sha256") != final_checker_set_sha256(
-                outstanding_final_checker_set(
-                    entries, index, state["built"], state["round"], subject,
-                )
-            ) \
             or data.get("pending_owner_sha256") != correction_rewind_pending_owner_sha256(data):
         fail(f"{subject} has malformed Correction Round rewind authority")
 
-    cause = data.get("cause")
-    if not isinstance(cause, dict) or set(cause) != {"kind", "proof"} \
-            or cause.get("kind") != "attempt-failure":
-        fail(f"{subject} has an unsupported correction rewind cause")
-    failure_index, failure = journal_entry_from_proof(
-        entries, cause.get("proof"), f"{subject}'s attempt failure",
-    )
-    failure_data = note_data(failure)
-    if failure_index >= index or failure.get("kind") != "attempt.failed" \
-            or failure.get("lot") != state["built"] \
-            or failure.get("correction") != state["round"] \
-            or failure_data.get("schema") != 2 \
-            or failure_data.get("classification") != "C3.9c" \
-            or data["attempt"] != failure_data.get("attempt", 0) + 1:
-        fail(f"{subject} does not consume one exact correction C3.9c failure")
-    validate_attempt_failed_entry(entries, failure_index, failure)
-
     target = data.get("target")
     earliest = target.get("earliest_task") if isinstance(target, dict) else None
-    base_ref = f"{expected_root}/task-{earliest - 1}" if construction_positive_integer(earliest) else None
+    base_ref = f"{expected_root}/task-{earliest - 1}" \
+        if construction_positive_integer(earliest) else None
     if not isinstance(target, dict) or set(target) != {
         "earliest_task", "base_ref", "base_commit", "base_tree",
     } or not construction_positive_integer(earliest) \
-            or earliest > failure.get("task", 0) or target.get("base_ref") != base_ref \
+            or target.get("base_ref") != base_ref \
             or not re.fullmatch(r"[0-9a-f]{40,64}", str(target.get("base_commit"))) \
             or not re.fullmatch(r"[0-9a-f]{40,64}", str(target.get("base_tree"))):
         fail(f"{subject} has a malformed correction rewind target")
-    base_tree = subprocess.run(
-        ["git", "-C", project_root(), "rev-parse", "--verify",
-         f"{target['base_commit']}^{{tree}}"], capture_output=True, text=True,
-    )
-    if base_tree.returncode != 0 or base_tree.stdout.strip() != target["base_tree"]:
-        fail(f"{subject}'s correction rewind base tree changed")
-
-    accepted_before_failure = accepted_correction_tasks_at_prefix(
-        entries, failure_index + 1, state["built"], state["round"], state["opening_index"],
-    )
-    accepted_by_task = dict(accepted_before_failure)
-    expected_base_commit = (
-        state["opening"]["base_commit"] if earliest == 1
-        else accepted_by_task.get(earliest - 1)
-    )
-    if expected_base_commit is None or target["base_commit"] != expected_base_commit:
-        fail(f"{subject} changes its selected accepted rewind base")
 
     moved = data.get("moved")
     if not isinstance(moved, list):
         fail(f"{subject} has no correction rewind ref account")
     moved_tasks = []
+    rewind_recoveries = []
     for member in moved:
         task = member.get("task") if isinstance(member, dict) else None
         expected_from = f"{expected_root}/task-{task}"
@@ -9985,12 +13744,11 @@ def validate_correction_rewind_transition(
             fail(f"{subject} has a malformed moved correction ref")
         source = subprocess.run(
             ["git", "-C", project_root(), "rev-parse", "--verify",
-             f"{expected_from}^{{commit}}"],
-            capture_output=True, text=True,
+             f"{expected_from}^{{commit}}"], capture_output=True, text=True,
         )
         destination = subprocess.run(
-            ["git", "-C", project_root(), "rev-parse", "--verify", f"{expected_to}^{{commit}}"],
-            capture_output=True, text=True,
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{expected_to}^{{commit}}"], capture_output=True, text=True,
         )
         source_commit = source.stdout.strip() if source.returncode == 0 else None
         destination_commit = destination.stdout.strip() if destination.returncode == 0 else None
@@ -9999,11 +13757,133 @@ def validate_correction_rewind_transition(
                     or destination_commit not in {None, member["commit"]} \
                     or source_commit is None and destination_commit is None:
                 fail(f"{subject}'s pending correction ref prefix changed")
-        elif source_commit is not None or destination_commit != member["commit"]:
-            fail(f"{subject}'s immutable rewound correction ref changed")
+        elif candidate:
+            if source_commit is not None or destination_commit != member["commit"]:
+                fail(f"{subject}'s completed correction ref move changed")
+        else:
+            if destination_commit != member["commit"] \
+                    or source_commit == member["commit"]:
+                fail(f"{subject}'s immutable rewound correction ref changed")
+        rewind_recoveries.append({
+            "built": state["built"], "round": state["round"], "task": task,
+            "commit": member["commit"], "from": expected_from, "to": expected_to,
+            "source_commit": source_commit,
+        })
         moved_tasks.append(task)
     if moved_tasks != sorted(set(moved_tasks)):
         fail(f"{subject}'s moved correction refs are not ordered and unique")
+
+    cause = data.get("cause")
+    if not isinstance(cause, dict) or set(cause) != {"kind", "proof"} \
+            or cause.get("kind") not in {"attempt-failure", "amendment-rebase"}:
+        fail(f"{subject} has an unsupported correction rewind cause")
+    if cause["kind"] != "amendment-rebase":
+        require_no_active_correction_amendment(
+            entries, index, state["built"], state["round"], subject,
+        )
+    cause_index, cause_entry = journal_entry_from_proof(
+        entries, cause.get("proof"), f"{subject}'s correction rewind cause",
+    )
+    if cause_index >= index:
+        fail(f"{subject} does not consume one prior correction rewind cause")
+    def project_cause():
+        if cause["kind"] == "attempt-failure":
+            cause_data = note_data(cause_entry)
+            if cause_entry.get("kind") != "attempt.failed" \
+                    or cause_entry.get("lot") != state["built"] \
+                    or cause_entry.get("correction") != state["round"] \
+                    or cause_data.get("schema") != 2 \
+                    or cause_data.get("classification") != "C3.9c":
+                fail(f"{subject} does not consume one exact correction C3.9c failure")
+            validate_attempt_failed_entry(entries, cause_index, cause_entry)
+            accepted_before_cause = accepted_correction_tasks_at_prefix(
+                entries, cause_index + 1, state["built"], state["round"],
+                state["opening_index"],
+            )
+            accepted_data = {
+                task: success for task, _success_index, success
+                in accepted_correction_task_entries_at_prefix(
+                    entries, cause_index + 1, state["built"], state["round"],
+                    state["opening_index"],
+                )
+            }
+            return cause_entry.get("task", 0), accepted_before_cause, accepted_data
+        if cause_entry.get("kind") != "amendment.committed":
+            fail(f"{subject} does not consume one exact committed Correction AMENDMENT")
+        validate_amendment_commit_entry(entries, cause_index, cause_entry)
+        opening_index, opening, commit_index, commit, _commit_proof = (
+            correction_amendment_generation(entries, index, state, subject)
+        )
+        opening_data = note_data(opening)
+        if commit_index != cause_index or commit != cause_entry \
+                or opening_data.get("correction_authority") != state["proof"] \
+                or opening_data.get("correction_execution_authority_sha256") \
+                != state["execution_authority_sha256"]:
+            fail(f"{subject} changes its exact committed Correction AMENDMENT cause")
+        accepted_entries = accepted_correction_task_entries_at_prefix(
+            entries, opening_index, state["built"], state["round"],
+            state["opening_index"],
+        )
+        accepted_before_cause = [
+            (task, success["sha"]) for task, _success_index, success in accepted_entries
+        ]
+        accepted_data = {
+            task: success for task, _success_index, success in accepted_entries
+        }
+        latest_target_task = accepted_entries[-1][0] if accepted_entries else 0
+        return latest_target_task, accepted_before_cause, accepted_data
+
+    rewind_context = contextvars.copy_context()
+    rewind_context.run(
+        CORRECTION_REWIND_SUCCESS_RECOVERIES.set, tuple(rewind_recoveries),
+    )
+    rewind_context.run(CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.set, True)
+    rewind_context.run(
+        require_no_current_correction_stop,
+        entries, index, state["built"], state["round"], subject,
+    )
+    latest_target_task, accepted_before_cause, accepted_data = rewind_context.run(
+        project_cause,
+    )
+    current_retry_set = rewind_context.run(
+        outstanding_final_checker_set,
+        entries, index, state["built"], state["round"], subject,
+    )
+    if data.get("outstanding_retry_set_sha256") != final_checker_set_sha256(
+            current_retry_set,
+    ):
+        fail(f"{subject} changes its outstanding final-checker set")
+
+    if earliest > latest_target_task:
+        fail(f"{subject} has a malformed correction rewind target")
+    if data["attempt"] != accepted_data.get(earliest, {}).get("attempt", 0) + 1:
+        fail(f"{subject} changes its selected earliest-task retry attempt")
+    base_tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{target['base_commit']}^{{tree}}"], capture_output=True, text=True,
+    )
+    if base_tree.returncode != 0 or base_tree.stdout.strip() != target["base_tree"]:
+        fail(f"{subject}'s correction rewind base tree changed")
+
+    accepted_by_task = dict(accepted_before_cause)
+    expected_base_commit = (
+        state["opening"]["base_commit"] if earliest == 1
+        else accepted_by_task.get(earliest - 1)
+    )
+    if expected_base_commit is None or target["base_commit"] != expected_base_commit:
+        fail(f"{subject} changes its selected accepted rewind base")
+
+    for member in moved:
+        task = member["task"]
+        source_commit = next(
+            recovery["source_commit"] for recovery in rewind_recoveries
+            if recovery["task"] == task
+        )
+        if pending and source_commit == member["commit"]:
+            continue
+        correction_rewind_stable_owner(
+            entries, index, replay_before, state, task, source_commit, subject,
+        )
     expected_moved = [
         {
             "task": task,
@@ -10011,14 +13891,20 @@ def validate_correction_rewind_transition(
             "from": f"{expected_root}/task-{task}",
             "to": f"{expected_root}/rewound/r-{data['rewind']}/task-{task}",
         }
-        for task, commit in accepted_before_failure if task >= earliest
+        for task, commit in accepted_before_cause if task >= earliest
     ]
     if moved != expected_moved:
         fail(f"{subject} changes its complete accepted correction suffix")
 
-    expected_crossed = retained_authority_chain(
+    expected_crossed = rewind_context.run(
+        retained_authority_chain,
         entries, index, state, target["base_commit"], subject,
     )
+    if cause["kind"] == "amendment-rebase":
+        expected_crossed.append(rewind_context.run(
+            correction_amendment_retained_transition,
+            entries, index, cause["proof"], target["base_commit"], subject,
+        ))
     if data.get("crossed_authorities") != expected_crossed:
         fail(f"{subject} changes its complete retained authority chain")
     relands = data.get("relands")
@@ -10129,6 +14015,71 @@ def accepted_correction_tasks_at_prefix(entries, before, built, correction, open
     ]
 
 
+def require_correction_stable_task_ref(
+        entries, before, built, correction, task, commit, ref_root, subject,
+):
+    stable_ref = f"{ref_root}/task-{task}"
+    stable = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{stable_ref}^{{commit}}"], capture_output=True, text=True,
+    )
+    if stable.returncode == 0 and stable.stdout.strip() == commit:
+        return
+    if not CORRECTION_REWIND_SUCCESS_RECOVERIES.get() \
+            and not CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.get():
+        projection = contextvars.copy_context()
+        projection.run(CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.set, True)
+        recoveries = projection.run(
+            correction_rewind_history_recoveries,
+            entries, len(entries), f"{subject}'s rewind history",
+        )
+        projection.run(CORRECTION_REWIND_SUCCESS_RECOVERIES.set, recoveries)
+        return projection.run(
+            require_correction_stable_task_ref,
+            entries, before, built, correction, task, commit, ref_root, subject,
+        )
+    recoveries = [
+        recovery for recovery in CORRECTION_REWIND_SUCCESS_RECOVERIES.get()
+        if isinstance(recovery, dict)
+        and recovery.get("built") == built
+        and recovery.get("round") == correction
+        and recovery.get("task") == task
+        and recovery.get("commit") == commit
+        and recovery.get("from") == stable_ref
+    ]
+    destination = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{recoveries[0].get('to')}^{{commit}}"], capture_output=True, text=True,
+    ) if len(recoveries) == 1 else None
+    stable_commit = stable.stdout.strip() if stable.returncode == 0 else None
+    active_replacement = any(
+        owner_built == built and owner_correction == correction
+        and owner_task == task and owner_index >= before
+        and owner_commit == stable_commit
+        for owner_built, owner_correction, owner_task, owner_index, owner_commit
+        in CORRECTION_SUCCESS_VALIDATIONS.get()
+    )
+    helper_replacement = any(
+        isinstance(recovery, dict)
+        and recovery.get("built") == built
+        and recovery.get("round") == correction
+        and recovery.get("task") == task
+        and recovery.get("commit") == stable_commit
+        and isinstance(recovery.get("resolved"), dict)
+        and recovery["resolved"].get("ref_root") == ref_root
+        for recovery in CORRECTION_SUCCESS_RECOVERIES.get()
+    )
+    rewind_replacement = len(recoveries) == 1 \
+        and recoveries[0].get("source_commit") == stable_commit \
+        and stable_commit != commit
+    if stable.returncode == 0 and not (
+            active_replacement or helper_replacement or rewind_replacement
+    ) \
+            or len(recoveries) != 1 \
+            or destination.returncode != 0 or destination.stdout.strip() != commit:
+        fail(f"{subject}'s stable correction task-{task} ref changed")
+
+
 def correction_attempt_predecessor_account(
         entries, before, built, correction, task, subject,
         *, require_first_missing=False,
@@ -10158,19 +14109,16 @@ def correction_attempt_predecessor_account(
     ref_root = f"refs/bwr/{Path(WORKSPACE).name}/{built}/correction-{correction}"
     prefix = []
     for accepted_task, success_index, success in accepted:
-        stable = subprocess.run(
-            ["git", "-C", project_root(), "rev-parse", "--verify",
-             f"{ref_root}/task-{accepted_task}^{{commit}}"],
-            capture_output=True, text=True,
+        require_correction_stable_task_ref(
+            entries, before, built, correction, accepted_task, success["sha"],
+            ref_root, subject,
         )
-        if stable.returncode != 0 or stable.stdout.strip() != success["sha"]:
-            fail(f"{subject}'s stable correction task-{accepted_task} ref changed")
         prefix.append({
             "task": accepted_task,
             "success": journal_line_proof(success_index),
             "commit": success["sha"],
         })
-    if accepted:
+    if accepted and state["artifact"]["schema"] == 1:
         predecessor = correction_revision_parent(
             state, [(accepted_task, success["sha"])
                     for accepted_task, _index, success in accepted], subject,
@@ -10263,6 +14211,10 @@ def validate_correction_revision_projection(
                 for task in range(1, len(current_artifact["tasks"]) + 1)
             ],
         }
+    elif accepted:
+        preserved = state["artifact"]["task_projection"]["preserved"]
+        if [task for task, _commit in accepted] != preserved:
+            fail(f"{subject}'s accepted prefix changes its preserved contribution account")
 
     if artifact["schema"] != previous["schema"] \
             or artifact["state"] != previous["state"] \
@@ -10305,6 +14257,17 @@ def correction_revision_parent(state, accepted, subject):
     fail(f"{subject} has divergent task and controller-document authority")
 
 
+def correction_current_escalation_base(state, accepted, subject):
+    """Combine the accepted task prefix with the newest controller authority."""
+    if not accepted:
+        return state["execution_commit"]
+    return correction_revision_parent(
+        state,
+        [(task, success["sha"]) for task, _index, success in accepted],
+        subject,
+    )
+
+
 def validate_correction_revision_transition(
         entries, index, entry, state, subject, *, candidate=False,
 ):
@@ -10320,7 +14283,8 @@ def validate_correction_revision_transition(
         "schema", "built", "round", "revision", "previous",
         "previous_execution_authority_sha256", "reason", "from_task",
         "artifact_sha256", "artifact_object", "controller_sha256",
-        "manifest_sha256", "commit", "tree", "gate", "retry_transition",
+        "manifest_sha256", "commit", "tree", "gate", "blocker",
+        "retry_transition",
     }
     if set(data) != required or data.get("schema") != 1 \
             or data.get("built") != state["built"] \
@@ -10331,7 +14295,9 @@ def validate_correction_revision_transition(
             != state["execution_authority_sha256"] \
             or data.get("reason") != "task-contract-correction" \
             or not construction_positive_integer(data.get("from_task")) \
-            or data["from_task"] > len(state["artifact"]["tasks"]) \
+            or data["from_task"] not in {
+                item["task"] for item in state["artifact"]["tasks"]
+            } \
             or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("artifact_sha256"))) \
             or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("controller_sha256"))) \
             or data.get("manifest_sha256") != state["artifact"]["manifest_sha256"] \
@@ -10340,6 +14306,11 @@ def validate_correction_revision_transition(
             or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("gate"))) \
             or not isinstance(data.get("retry_transition"), dict):
         fail(f"{subject} has a malformed bounded revision authority", data)
+    expected_blocker = correction_revision_blocker_account(
+        entries, index, state["built"], state["round"], subject,
+    )
+    if data["blocker"] != expected_blocker:
+        fail(f"{subject} changes its exact C3.9b blocker account")
     artifact, accepted = validate_correction_revision_projection(
         entries, index, state, data, subject,
     )
@@ -10466,7 +14437,9 @@ def validate_final_checker_contract_map_revision(
             != state["execution_authority_sha256"] \
             or not isinstance(mapping, dict) or set(mapping) != mapping_keys \
             or not construction_positive_integer(mapping.get("task")) \
-            or mapping["task"] > len(state["artifact"]["tasks"]) \
+            or mapping["task"] not in {
+                item["task"] for item in state["artifact"]["tasks"]
+            } \
             or not re.fullmatch(r"[0-9a-f]{64}", str(mapping.get("operation"))) \
             or not isinstance(baseline, dict) \
             or set(baseline) != {"required", "reused_gate"} \
@@ -10516,7 +14489,7 @@ def validate_final_checker_contract_map_revision(
         entries, index, state["built"], state["round"], state["opening_index"],
     )
     previous = state["artifact"]
-    if accepted:
+    if accepted and state["artifact"]["schema"] == 1:
         committed = subprocess.run(
             ["git", "-C", project_root(), "show",
              f"{accepted[-1][2]['sha']}:{state['path']}"],
@@ -10534,6 +14507,10 @@ def validate_final_checker_contract_map_revision(
         if previous["controller_sha256"] != state["controller_sha256"] \
                 or previous["manifest_sha256"] != state["artifact"]["manifest_sha256"]:
             fail(f"{subject}'s accepted predecessor changes its current contract authority")
+    elif accepted:
+        preserved = state["artifact"]["task_projection"]["preserved"]
+        if [task for task, _index, _success in accepted] != preserved:
+            fail(f"{subject}'s accepted prefix changes its preserved contribution account")
     root_keys = (
         "schema", "state", "identity", "route", "source_findings",
         "source_finding_coverage", "finding_coverage", "manifest_sha256",
@@ -10544,6 +14521,7 @@ def validate_final_checker_contract_map_revision(
             or len(artifact["tasks"]) != len(previous["tasks"]):
         fail(f"{subject} changes structural Correction Round authority")
     target = mapping["task"]
+    target_seen = False
     for old_task, new_task in zip(previous["tasks"], artifact["tasks"], strict=True):
         if old_task["task"] != target:
             if new_task != old_task:
@@ -10555,6 +14533,7 @@ def validate_final_checker_contract_map_revision(
                     ),
                 })
             continue
+        target_seen = True
         stable = {
             key for key in old_task
             if key not in {
@@ -10601,6 +14580,8 @@ def validate_final_checker_contract_map_revision(
         }
         if any(data[key] != value for key, value in projected.items()):
             fail(f"{subject} changes its target task projection")
+    if not target_seen:
+        fail(f"{subject} has no exact active target task")
 
     if data["controller_sha256"] != artifact["controller_sha256"] \
             or data["manifest_sha256"] != artifact["manifest_sha256"] \
@@ -10622,7 +14603,10 @@ def validate_final_checker_contract_map_revision(
             ["git", "-C", project_root(), "rev-parse", "--verify", f"{data['commit']}^"],
             capture_output=True, text=True,
         )
-        if parent.returncode != 0 or parent.stdout.strip() != accepted[-1][2]["sha"]:
+        expected_parent = correction_revision_parent(
+            state, [(task, success["sha"]) for task, _index, success in accepted], subject,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != expected_parent:
             fail(f"{subject}'s controller document commit has another parent")
         names = subprocess.run(
             ["git", "-C", project_root(), "diff-tree", "--no-commit-id", "--name-only",
@@ -10695,6 +14679,9 @@ def final_checker_contract_mapping_account(
     require_no_current_correction_stop(
         entries, before, built, correction, subject,
     )
+    require_no_active_correction_amendment(
+        entries, before, built, correction, subject,
+    )
     if not isinstance(built, str) or not construction_positive_integer(correction) \
             or not re.fullmatch(r"[0-9a-f]{64}", str(operation)) \
             or not construction_positive_integer(task):
@@ -10709,9 +14696,9 @@ def final_checker_contract_mapping_account(
         fail(f"{subject} has no exact source correction failure")
 
     state = current_correction_contract_state(entries, before, built, correction, subject)
-    if state["kind"] != "correction.round.revised" \
-            or state["artifact"]["tasks"][task - 1]["task"] != task:
+    if state["kind"] != "correction.round.revised":
         fail(f"{subject} has no exact controller document revision")
+    task_state = correction_artifact_task(state["artifact"], task, subject)
     revisions = [
         (index, entry) for index, entry in enumerate(entries[:before])
         if entry.get("kind") == "correction.round.revised"
@@ -10768,19 +14755,11 @@ def final_checker_contract_mapping_account(
         "sha256": state["artifact_sha256"],
         "controller_sha256": state["controller_sha256"],
         "manifest_sha256": state["artifact"]["manifest_sha256"],
-        "design_contract_sha256": state["artifact"]["tasks"][task - 1][
-            "design_contract_sha256"
-        ],
-        "consumer_account_sha256": state["artifact"]["tasks"][task - 1][
-            "consumer_account_sha256"
-        ],
-        "task_contract_sha256": state["artifact"]["tasks"][task - 1][
-            "task_contract_sha256"
-        ],
-        "design_sha256": state["artifact"]["tasks"][task - 1]["design_sha256"],
-        "disagreement_sha256": state["artifact"]["tasks"][task - 1][
-            "disagreement_sha256"
-        ],
+        "design_contract_sha256": task_state["design_contract_sha256"],
+        "consumer_account_sha256": task_state["consumer_account_sha256"],
+        "task_contract_sha256": task_state["task_contract_sha256"],
+        "design_sha256": task_state["design_sha256"],
+        "disagreement_sha256": task_state["disagreement_sha256"],
         "commit": state["commit"],
         "tree": state["tree"],
         "gate": gate,
@@ -10806,7 +14785,6 @@ def final_checker_contract_mapping_account(
     ):
         fail(f"{subject} changes its pending map owner")
 
-    task_state = state["artifact"]["tasks"][task - 1]
     expected_document_ids = sorted(
         member["source"]["obligation_id"] for member in current["entries"]
         if member["assignment"]["owner"] == "task"
@@ -11109,7 +15087,578 @@ def validate_final_checker_contract_mapped_entry(entries, index, entry):
         fail("a durable final-checker contract map changes its exact task assignment", expected)
 
 
-def current_correction_contract_state(entries, before, built, correction, subject):
+def correction_amendment_return_baseline_owner(built, correction, amendment, commit):
+    return f"correction/{built}/c{correction}/amendment-{amendment}/return/{commit}"
+
+
+def correction_amendment_generation(entries, before, state, subject):
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "amendment.opened"
+                and note_data(entry).get("origin") == "correction-round"
+                and note_data(entry).get("built") == state["built"]
+                and note_data(entry).get("correction") == state["round"]
+                and note_data(entry).get("correction_authority") == state["proof"]]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact Correction Round AMENDMENT opening")
+    opening_index, opening = openings[0]
+    validate_amendment_opening_entry(entries, opening_index, opening)
+    commits = [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:before], opening_index + 1,
+    ) if entry.get("kind") == "amendment.committed"
+        and note_data(entry).get("amendment") == note_data(opening).get("amendment")]
+    if len(commits) != 1:
+        fail(f"{subject} has no one exact committed Correction Round AMENDMENT")
+    commit_index, commit = commits[0]
+    commit_proof = validate_amendment_commit_entry(entries, commit_index, commit)
+    return opening_index, opening, commit_index, commit, commit_proof
+
+
+def immutable_correction_return_object(built, reference, subject):
+    if not isinstance(reference, dict) or set(reference) != {"artifact", "sha256", "object"}:
+        fail(f"{subject} has no exact immutable return reference")
+    digest = reference.get("sha256") if isinstance(reference, dict) else None
+    relative = reference.get("object") if isinstance(reference, dict) else None
+    if not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+        fail(f"{subject} has no exact immutable return digest")
+    try:
+        path = validate_content_object(WORKSPACE, built, digest, ".json")
+        payload = path.read_bytes()
+        value = json.loads(payload)
+    except (OSError, UnicodeError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable return object", exc)
+    if str(path.relative_to(WORKSPACE)) != relative \
+            or json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n" \
+            != payload:
+        fail(f"{subject}'s immutable return object is not canonical")
+    return value
+
+
+def correction_amendment_item_account(
+        entries, before, proof, commit_index, amendment_commit, commit_proof, subject,
+):
+    item_index, item = journal_entry_from_proof(entries[:before], proof, subject)
+    if item_index != commit_index or item.get("kind") != "amendment.committed" \
+            or item != amendment_commit:
+        fail(f"{subject} is not the exact committed AMENDMENT generation")
+    validated = validate_amendment_commit_entry(entries, item_index, item)
+    item_data = note_data(item)
+    if validated != commit_proof or proof != journal_line_proof(commit_index):
+        fail(f"{subject} changes the committed AMENDMENT authority")
+    return {
+        "proof": proof,
+        "amendment": item_data["amendment"],
+        "commit": item_data["sha"],
+        "amendment_sha256": item_data["amendment_sha256"],
+        "spec_path": validated["spec_path"],
+        "spec_sha256": item_data["spec_sha256"],
+        "review_sha256": item_data["review_sha256"],
+    }
+
+
+def correction_amendment_absorption_accounts(
+        entries, before, return_account, commit_index, amendment_commit, commit_proof,
+        subject,
+):
+    accounts = {}
+
+    def resolve(proof, item_subject):
+        if proof not in accounts:
+            accounts[proof] = correction_amendment_item_account(
+                entries, before, proof, commit_index, amendment_commit, commit_proof,
+                item_subject,
+            )
+        return accounts[proof]
+
+    finding_accounts = {}
+    for item in return_account.get("findings", []):
+        if item.get("outcome") != "absorbed":
+            continue
+        finding_accounts[item["id"]] = resolve(
+            item.get("amendment_item"),
+            f"{subject}'s absorbed finding {item.get('id')}",
+        )
+    retry_accounts = {}
+    transition = return_account.get("retry_transition")
+    dispositions = transition.get("dispositions", []) if isinstance(transition, dict) else []
+    for item in dispositions:
+        if item.get("outcome") != "absorbed":
+            continue
+        evidence = item.get("evidence")
+        proof = evidence.get("amendment_item") if isinstance(evidence, dict) else None
+        obligation = item.get("obligation_id")
+        retry_accounts[obligation] = resolve(
+            proof,
+            f"{subject}'s absorbed final-checker obligation {obligation}",
+        )
+    return {"findings": finding_accounts, "retry_dispositions": retry_accounts}
+
+
+def correction_amendment_return_tree_account(
+        entries, before, state, opening_index, opening, commit_index, subject,
+        *, replay_before=None,
+):
+    replay_before = len(entries) if replay_before is None else replay_before
+    opening_data = note_data(opening)
+    pre_state = current_correction_contract_state(
+        entries, opening_index, state["built"], state["round"],
+        f"{subject}'s pre-AMENDMENT correction authority",
+    )
+    if opening_data.get("correction_authority") != pre_state["proof"] \
+            or opening_data.get("correction_execution_authority_sha256") \
+            != pre_state["execution_authority_sha256"]:
+        fail(f"{subject} changes its pre-AMENDMENT correction authority")
+    commit_proof = journal_line_proof(commit_index)
+    rewinds = [
+        (rewind_index, entry) for rewind_index, entry in enumerate(
+            entries[commit_index + 1:before], commit_index + 1,
+        )
+        if entry.get("kind") == "rewind.done"
+        and note_data(entry).get("schema") == 2
+        and note_data(entry).get("unit") == {
+            "kind": "correction", "built": state["built"], "round": state["round"],
+        }
+        and note_data(entry).get("cause") == {
+            "kind": "amendment-rebase", "proof": commit_proof,
+        }
+    ]
+    if len(rewinds) > 1:
+        fail(f"{subject} repeats its post-AMENDMENT correction rewind")
+    rewind_proof = None
+    return_parent = note_data(entries[commit_index])["sha"]
+    if rewinds:
+        rewind_index, rewind_entry = rewinds[0]
+        validate_correction_rewind_entry(
+            entries, rewind_index, rewind_entry, before=replay_before,
+        )
+        rewind_data = note_data(rewind_entry)
+        rewind_proof = journal_line_proof(rewind_index)
+        if state.get("rewind_proof") != rewind_proof \
+                or state.get("rewind_ordinal") != rewind_data.get("rewind") \
+                or state.get("execution_commit") != rewind_data.get("result_commit") \
+                or state.get("execution_tree") != rewind_data.get("result_tree") \
+                or state.get("execution_gate") != rewind_data.get("gate"):
+            fail(f"{subject} does not descend from its exact post-AMENDMENT rewind")
+        return_parent = rewind_data["result_commit"]
+    elif state.get("rewind_proof") != pre_state.get("rewind_proof") \
+            or state.get("execution_authority_sha256") \
+            != pre_state.get("execution_authority_sha256"):
+        fail(f"{subject} omits its post-AMENDMENT correction rewind")
+    return {
+        "pre_state": pre_state,
+        "rewind_proof": rewind_proof,
+        "rewind_index": rewinds[0][0] if rewinds else None,
+        "rewind": note_data(rewinds[0][1]) if rewinds else None,
+        "return_parent": return_parent,
+        "tree_transition": {
+            "pre_amendment_rewind": pre_state.get("rewind_proof"),
+            "rewind": rewind_proof,
+            "reland": None,
+        },
+    }
+
+
+def validate_correction_amendment_return_common(
+        entries, index, data, state, subject, *, replay_before=None,
+):
+    replay_before = len(entries) if replay_before is None else replay_before
+    require_no_current_correction_stop(
+        entries, index, state["built"], state["round"], subject,
+    )
+    opening_index, opening, commit_index, amendment_commit, commit_proof = (
+        correction_amendment_generation(entries, index, state, subject)
+    )
+    opening_data = note_data(opening)
+    amendment_number = opening_data["amendment"]
+    tree_account = correction_amendment_return_tree_account(
+        entries, index, state, opening_index, opening, commit_index, subject,
+        replay_before=replay_before,
+    )
+    pre_state = tree_account["pre_state"]
+    current_set = outstanding_final_checker_set(
+        entries, index, state["built"], state["round"], subject,
+    )
+    if final_checker_set_sha256(current_set) \
+            != opening_data["retry_transition"]["output_sha256"] \
+            or any(member["assignment"].get("owner") != "amendment-return"
+                   or member["assignment"].get("unit") != {
+                       "kind": "amendment", "number": amendment_number,
+                   } for member in current_set["entries"]):
+        fail(f"{subject} changes the set suspended by its AMENDMENT opening")
+
+    artifact_digest = data.get("artifact_sha256")
+    artifact_object = data.get("artifact_object")
+    try:
+        artifact_path = validate_content_object(
+            WORKSPACE, state["built"], artifact_digest, ".md",
+        )
+        parser = load_correction_round_parser()
+        artifact = parser.parse_artifact(
+            artifact_path, expected_built=state["built"], expected_round=state["round"],
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact post-AMENDMENT correction artifact", exc)
+    if str(artifact_path.relative_to(WORKSPACE)) != artifact_object \
+            or artifact.get("artifact_sha256") != artifact_digest:
+        fail(f"{subject} changes its post-AMENDMENT correction artifact object")
+
+    return_reference = data.get("return")
+    return_account = immutable_correction_return_object(
+        state["built"], return_reference, subject,
+    )
+    validator = load_correction_amendment_return_validator()
+    try:
+        validator.validate_return_account(
+            return_account,
+            previous_artifact=state["artifact"],
+            current_artifact=artifact,
+            input_set=current_set,
+        )
+    except ValueError as exc:
+        fail(f"{subject} has an invalid semantic return account", exc)
+    amendment_items = correction_amendment_absorption_accounts(
+        entries, index, return_account, commit_index, amendment_commit, commit_proof,
+        subject,
+    )
+
+    opening_proof = journal_line_proof(state["opening_index"])
+    accepted_successes = accepted_correction_task_entries_at_prefix(
+        entries, opening_index, state["built"], state["round"], state["opening_index"],
+    )
+    expected_contributions = []
+    ref_root = (
+        f"refs/bwr/{Path(WORKSPACE).name}/{state['built']}/correction-{state['round']}"
+    )
+    rewound_by_task = {
+        member["task"]: member for member in (
+            tree_account["rewind"].get("moved", []) if tree_account["rewind"] else []
+        )
+    }
+    for task, success_index, success_data in accepted_successes:
+        validate_attempt_succeeded_entry(entries, success_index, entries[success_index])
+        moved = rewound_by_task.get(task)
+        ref = moved["to"] if moved is not None else f"{ref_root}/task-{task}"
+        physical = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        stable = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{ref_root}/task-{task}^{{commit}}"], capture_output=True, text=True,
+        )
+        if physical.returncode != 0 or physical.stdout.strip() != success_data["sha"] \
+                or moved is not None and (
+                    moved.get("commit") != success_data["sha"]
+                    or stable.returncode == 0 and stable.stdout.strip() == success_data["sha"]
+                ):
+            fail(f"{subject}'s accepted correction contribution ref changed")
+        if moved is not None:
+            correction_rewind_stable_owner(
+                entries, tree_account["rewind_index"], replay_before, state, task,
+                stable.stdout.strip() if stable.returncode == 0 else None, subject,
+            )
+        expected_contributions.append({
+            "task": task,
+            "success": journal_line_proof(success_index),
+            "commit": success_data["sha"],
+            "gate": success_data["gate"],
+            "outcome": "rewound" if moved is not None else "preserved",
+            "rewind": tree_account["rewind_proof"] if moved is not None else None,
+        })
+    if set(rewound_by_task) != {
+        item["task"] for item in expected_contributions if item["outcome"] == "rewound"
+    } or return_account.get("accepted_contributions") != expected_contributions:
+        fail(f"{subject} changes its accepted Correction task contributions")
+
+    commit = data.get("commit")
+    tree = data.get("tree")
+    gate = data.get("gate")
+    if return_account.get("previous_authority") != pre_state["proof"] \
+            or return_account.get("previous_execution_authority_sha256") \
+            != pre_state["execution_authority_sha256"] \
+            or return_account.get("amendment") != {
+                "opening": journal_line_proof(opening_index),
+                "committed": journal_line_proof(commit_index),
+                "artifact_sha256": note_data(amendment_commit)["amendment_sha256"],
+                "spec_path": commit_proof["spec_path"],
+                "spec_sha256": note_data(amendment_commit)["spec_sha256"],
+            } \
+            or return_account.get("input_artifact") != {
+                "sha256": pre_state["artifact_sha256"],
+                "object": pre_state["artifact_object"],
+            } \
+            or return_account.get("tree_transition") != tree_account["tree_transition"] \
+            or return_account.get("current") != {
+                "artifact_sha256": artifact_digest,
+                "artifact_object": artifact_object,
+                "commit": commit,
+                "tree": tree,
+                "gate": gate,
+            }:
+        fail(f"{subject} changes its immutable return provenance")
+    expected_return_artifact = (
+        f"corrections/{state['built']}/round-{state['round']}-amendment-"
+        f"{amendment_number}-return.json"
+    )
+    if return_reference.get("artifact") != expected_return_artifact:
+        fail(f"{subject} changes its canonical return artifact path")
+
+    commit_check = subprocess.run(
+        ["git", "-C", project_root(), "cat-file", "-e", f"{commit}^{{commit}}"],
+        capture_output=True,
+    )
+    tree_check = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{commit}^{{tree}}"],
+        capture_output=True, text=True,
+    )
+    parent = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify", f"{commit}^"],
+        capture_output=True, text=True,
+    )
+    names = subprocess.run(
+        ["git", "-C", project_root(), "diff-tree", "--no-commit-id", "--name-only",
+         "-r", str(commit)], capture_output=True, text=True,
+    )
+    blob = subprocess.run(
+        ["git", "-C", project_root(), "show", f"{commit}:{state['path']}"],
+        capture_output=True,
+    )
+    if commit_check.returncode != 0 or tree_check.returncode != 0 \
+            or tree_check.stdout.strip() != tree \
+            or parent.returncode != 0 \
+            or parent.stdout.strip() != tree_account["return_parent"] \
+            or names.returncode != 0 or names.stdout.splitlines() != [state["path"]] \
+            or blob.returncode != 0 \
+            or hashlib.sha256(blob.stdout).hexdigest() != artifact_digest:
+        fail(f"{subject} has no exact post-AMENDMENT correction document commit")
+
+    gate_check = subprocess.run(
+        ["bash", GATE_CHECK, "require-correction-baseline", gate, commit,
+         state["built"], str(state["round"])],
+        capture_output=True, text=True,
+    )
+    owner = correction_amendment_return_baseline_owner(
+        state["built"], state["round"], amendment_number, commit,
+    )
+    accepted_gates = [note_data(candidate) for candidate in entries[:index]
+                      if candidate.get("event") == "subagent-ended"
+                      and candidate.get("kind") == "gate-runner"
+                      and note_data(candidate).get("op") == gate
+                      and "unusable" not in note_data(candidate)]
+    if gate_check.returncode != 0 or len(accepted_gates) != 1 \
+            or accepted_gates[0].get("scope") != "correction-baseline" \
+            or accepted_gates[0].get("owner") != owner \
+            or accepted_gates[0].get("head") != commit \
+            or accepted_gates[0].get("base") != commit \
+            or accepted_gates[0].get("green") is not True \
+            or accepted_gates[0].get("surface") != "unchanged":
+        fail(f"{subject} has no exact post-AMENDMENT correction baseline")
+    admit_correction_amendment(CorrectionAmendmentFacts(
+        opening_present=True,
+        active_owner="amendment",
+        accepted_tasks=opening_data["return_task"] - 1,
+        task_count=correction_lifecycle_task_count(pre_state["artifact"], subject),
+        return_task=opening_data["return_task"],
+        terminal=None,
+    ), "return")
+    return {
+        "state": state,
+        "opening_index": opening_index,
+        "opening": opening,
+        "commit_index": commit_index,
+        "amendment_commit": amendment_commit,
+        "artifact": artifact,
+        "return_account": return_account,
+        "current_set": current_set,
+        "tree_account": tree_account,
+        "opening_proof": opening_proof,
+        "amendment_items": amendment_items,
+    }
+
+
+def validate_correction_rebase_transition(
+        entries, index, entry, state, subject, *, candidate=False, replay_before=None,
+):
+    data = note_data(entry)
+    required = {
+        "schema", "built", "round", "previous_authority",
+        "previous_execution_authority_sha256", "amendment", "return",
+        "commit", "tree", "gate", "artifact_sha256", "artifact_object",
+        "controller_sha256", "rewind", "retry_transition", "preserved_tasks",
+        "earliest_task", "remaining_tasks",
+    }
+    if set(data) != required or data.get("schema") != 1 \
+            or data.get("built") != state["built"] or data.get("round") != state["round"]:
+        fail(f"{subject} has malformed rebase authority")
+    common = validate_correction_amendment_return_common(
+        entries, index, data, state, subject, replay_before=replay_before,
+    )
+    account = common["return_account"]
+    if account["route"] != "rebase":
+        fail(f"{subject} consumes another post-AMENDMENT route")
+    remaining = [item["task"] for item in account["task_projection"]["remaining"]]
+    preserved = account["task_projection"]["preserved"]
+    expected = {
+        "schema": 1,
+        "built": state["built"],
+        "round": state["round"],
+        "previous_authority": account["previous_authority"],
+        "previous_execution_authority_sha256": account[
+            "previous_execution_authority_sha256"
+        ],
+        "amendment": journal_line_proof(common["commit_index"]),
+        "return": data["return"],
+        "commit": account["current"]["commit"],
+        "tree": account["current"]["tree"],
+        "gate": account["current"]["gate"],
+        "artifact_sha256": account["current"]["artifact_sha256"],
+        "artifact_object": account["current"]["artifact_object"],
+        "controller_sha256": common["artifact"]["controller_sha256"],
+        "rewind": account["tree_transition"]["rewind"],
+        "retry_transition": account["retry_transition"],
+        "preserved_tasks": preserved,
+        "earliest_task": remaining[0],
+        "remaining_tasks": remaining,
+    }
+    if data != expected:
+        fail(f"{subject} changes its exact rebase account", expected)
+    authority_sha256 = hashlib.sha256(json.dumps(
+        data, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    _, execution_sha256 = correction_execution_account(
+        authority_sha256, data["commit"], data["tree"],
+        rewind=data["rewind"], gate=data["gate"],
+    )
+    return {
+        **state,
+        "proof": state["proof"] if candidate else journal_line_proof(index),
+        "kind": "correction.round.rebased",
+        "authority_sha256": authority_sha256,
+        "revision": state["revision"] + 1,
+        "artifact": common["artifact"],
+        "artifact_sha256": data["artifact_sha256"],
+        "artifact_object": data["artifact_object"],
+        "controller_sha256": data["controller_sha256"],
+        "commit": data["commit"],
+        "tree": data["tree"],
+        "gate": data["gate"],
+        "rewind_proof": data["rewind"],
+        "execution_commit": data["commit"],
+        "execution_tree": data["tree"],
+        "execution_gate": data["gate"],
+        "execution_authority_sha256": execution_sha256,
+    }
+
+
+def correction_resolved_account(entries, index, entry, state, subject):
+    data = note_data(entry)
+    required = {
+        "schema", "built", "round", "reason", "opening", "previous_authority",
+        "previous_execution_authority_sha256", "amendment", "return",
+        "accepted_contributions", "absorbed_findings", "commit", "tree", "gate",
+        "artifact_sha256", "artifact_object", "retry_transition", "generation_sha256",
+    }
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 1 \
+            or data.get("built") != state["built"] or data.get("round") != state["round"]:
+        fail(f"{subject} has malformed resolved authority")
+    common = validate_correction_amendment_return_common(
+        entries, index, data, state, subject,
+    )
+    account = common["return_account"]
+    if account["route"] != "resolved":
+        fail(f"{subject} consumes another post-AMENDMENT route")
+    contributions = [
+        item["task"] for item in account["accepted_contributions"]
+        if item["outcome"] == "preserved"
+    ]
+    absorbed = [item["id"] for item in account["findings"] if item["outcome"] == "absorbed"]
+    expected = {
+        "schema": 1,
+        "built": state["built"],
+        "round": state["round"],
+        "reason": "amendment-absorbed",
+        "opening": common["opening_proof"],
+        "previous_authority": account["previous_authority"],
+        "previous_execution_authority_sha256": account[
+            "previous_execution_authority_sha256"
+        ],
+        "amendment": journal_line_proof(common["commit_index"]),
+        "return": data["return"],
+        "accepted_contributions": contributions,
+        "absorbed_findings": absorbed,
+        "commit": account["current"]["commit"],
+        "tree": account["current"]["tree"],
+        "gate": account["current"]["gate"],
+        "artifact_sha256": account["current"]["artifact_sha256"],
+        "artifact_object": account["current"]["artifact_object"],
+        "retry_transition": account["retry_transition"],
+    }
+    expected["generation_sha256"] = hashlib.sha256(json.dumps(
+        expected, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    if data != expected:
+        fail(f"{subject} changes its exact resolved generation", expected)
+    admit_correction_terminal(CorrectionTerminalFacts(
+        opening_present=True,
+        active_owner=None,
+        accepted_tasks=len(contributions),
+        task_count=correction_lifecycle_task_count(state["artifact"], subject),
+        outstanding_obligations=False,
+        amendment_returned=True,
+        escalation_producer=False,
+        terminal=None,
+    ), "resolved")
+    return expected
+
+
+_CORRECTION_CONTRACT_STATE_PENDING = object()
+
+
+def correction_projection_cache_key(kind, entries, before, *identity):
+    prefix_sha256 = hashlib.sha256(json.dumps(
+        entries[:before], sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    return kind, prefix_sha256, *identity
+
+
+def current_correction_contract_state(
+        entries, before, built, correction, subject, *, replay_before=None,
+):
+    replay_before = before if replay_before is None else replay_before
+    if replay_before < before or replay_before > len(entries):
+        fail(f"{subject} has an invalid Correction authority replay boundary")
+    cache = CORRECTION_CONTRACT_STATE_CACHE.get()
+    if cache is None:
+        return _current_correction_contract_state(
+            entries, before, built, correction, subject,
+            replay_before=replay_before,
+        )
+    key = correction_projection_cache_key(
+        "contract-state", entries, before, built, correction, replay_before,
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        if cached is _CORRECTION_CONTRACT_STATE_PENDING:
+            return _current_correction_contract_state(
+                entries, before, built, correction, subject,
+                replay_before=replay_before,
+            )
+        return copy.deepcopy(cached)
+    cache[key] = _CORRECTION_CONTRACT_STATE_PENDING
+    try:
+        state = _current_correction_contract_state(
+            entries, before, built, correction, subject,
+            replay_before=replay_before,
+        )
+    except BaseException:
+        cache.pop(key, None)
+        raise
+    cache[key] = copy.deepcopy(state)
+    return state
+
+
+def _current_correction_contract_state(
+        entries, before, built, correction, subject, *, replay_before,
+):
     openings = [(index, entry) for index, entry in enumerate(entries[:before])
                 if entry.get("kind") == "correction.round.opened"
                 and note_data(entry).get("built") == built
@@ -11167,13 +15716,19 @@ def current_correction_contract_state(entries, before, built, correction, subjec
                     "kind": "correction", "built": built, "round": correction,
                 }:
             state = validate_correction_rewind_transition(
-                entries, index, entry, state, subject,
+                entries, index, entry, state, subject, replay_before=replay_before,
             )
         elif entry.get("kind") == "correction.round.revised" \
                 and note_data(entry).get("built") == built \
                 and note_data(entry).get("round") == correction:
             state = validate_correction_revision_transition(
                 entries, index, entry, state, subject,
+            )
+        elif entry.get("kind") == "correction.round.rebased" \
+                and note_data(entry).get("built") == built \
+                and note_data(entry).get("round") == correction:
+            state = validate_correction_rebase_transition(
+                entries, index, entry, state, subject, replay_before=before,
             )
         elif entry.get("kind") == "final-checker.contract-mapped" \
                 and entry.get("lot") == built and entry.get("correction") == correction:
@@ -11223,7 +15778,7 @@ def normalize_correction_rewind(entries, data, context, subject):
     return data
 
 
-def validate_correction_rewind_entry(entries, index, entry):
+def validate_correction_rewind_entry(entries, index, entry, *, before=None):
     data = note_data(entry)
     unit = data.get("unit") if isinstance(data, dict) else None
     built = unit.get("built") if isinstance(unit, dict) else None
@@ -11233,12 +15788,16 @@ def validate_correction_rewind_entry(entries, index, entry):
     )
     validate_correction_rewind_transition(
         entries, index, entry, state, "a durable correction rewind",
+        replay_before=len(entries) if before is None else before,
     )
 
 
 def normalize_correction_round_revision(entries, data, subject):
     if not isinstance(data, dict):
         fail(f"{subject} requires structured revision data")
+    require_no_active_correction_amendment(
+        entries, len(entries), data.get("built"), data.get("round"), subject,
+    )
     state = current_correction_contract_state(
         entries, len(entries), data.get("built"), data.get("round"), subject,
     )
@@ -11251,6 +15810,10 @@ def normalize_correction_round_revision(entries, data, subject):
 
 def validate_correction_round_revision_entry(entries, index, entry):
     data = note_data(entry)
+    require_no_active_correction_amendment(
+        entries, index, data.get("built"), data.get("round"),
+        "a durable correction.round.revised",
+    )
     state = current_correction_contract_state(
         entries, index, data.get("built"), data.get("round"),
         "a durable correction.round.revised",
@@ -11260,12 +15823,889 @@ def validate_correction_round_revision_entry(entries, index, entry):
     )
 
 
+def normalize_correction_round_rebased(entries, data, subject):
+    if not isinstance(data, dict):
+        fail(f"{subject} requires structured rebase data")
+    state = current_correction_contract_state(
+        entries, len(entries), data.get("built"), data.get("round"), subject,
+    )
+    candidate = {"kind": "correction.round.rebased", "data": data}
+    validate_correction_rebase_transition(
+        entries + [candidate], len(entries), candidate, state, subject, candidate=True,
+    )
+    return data
+
+
+def validate_correction_round_rebased_entry(entries, index, entry):
+    data = note_data(entry)
+    state = current_correction_contract_state(
+        entries, index, data.get("built"), data.get("round"),
+        "a durable correction.round.rebased",
+        replay_before=len(entries),
+    )
+    validate_correction_rebase_transition(
+        entries, index, entry, state, "a durable correction.round.rebased",
+        replay_before=len(entries),
+    )
+
+
+def normalize_correction_round_resolved(entries, data, subject):
+    if not isinstance(data, dict):
+        fail(f"{subject} requires structured resolved data")
+    state = current_correction_contract_state(
+        entries, len(entries), data.get("built"), data.get("round"), subject,
+    )
+    candidate = {"kind": "correction.round.resolved", "data": data}
+    return correction_resolved_account(
+        entries + [candidate], len(entries), candidate, state, subject,
+    )
+
+
+def validate_correction_round_resolved_entry(entries, index, entry):
+    data = note_data(entry)
+    state = current_correction_contract_state(
+        entries, index, data.get("built"), data.get("round"),
+        "a durable correction.round.resolved",
+    )
+    correction_resolved_account(
+        entries, index, entry, state, "a durable correction.round.resolved",
+    )
+
+
+def correction_post_amendment_escalation_projection(
+        return_account, correction_artifact, escalation_artifact, confirmed,
+        correction, subject,
+):
+    escalation_parser = load_correction_escalation_parser()
+    remaining = [
+        item["id"] for item in return_account["findings"]
+        if item["outcome"] == "remaining"
+    ]
+    source_coverage = correction_artifact.get("source_finding_coverage")
+    if remaining != list(correction_artifact.get("finding_coverage", {})) \
+            or correction_artifact.get("accepted_contributions") \
+            != return_account["accepted_contributions"]:
+        fail(f"{subject} changes its post-AMENDMENT finding or contribution partition")
+
+    expected_contributions = [{
+        key: item[key] for key in ("task", "success", "commit", "gate")
+    } for item in return_account["accepted_contributions"]]
+    if escalation_artifact.get("accepted_contributions") != expected_contributions:
+        fail(f"{subject} changes its complete accepted contribution account")
+
+    contribution_tasks = {
+        item["task"] for item in return_account["accepted_contributions"]
+    }
+    expected_items = []
+    expected_event_items = []
+    for ordinal, finding in enumerate(remaining, 1):
+        if not isinstance(source_coverage, dict) or finding not in source_coverage \
+                or finding not in confirmed:
+            fail(f"{subject} has no exact source account for {finding}")
+        item = {
+            "id": f"F{ordinal}",
+            "origins": [f"correction/c{correction}/{finding}"],
+            "sources": escalation_parser.canonical_source_identities(
+                confirmed[finding]["sources"], f"{subject}'s {finding} sources",
+            ),
+            "accepted_contributions": [
+                task for task in source_coverage[finding] if task in contribution_tasks
+            ],
+            "blocker": return_account["blocker"],
+            "required_outcome": return_account["required_sublot_outcome"],
+        }
+        expected_items.append(item)
+        expected_event_items.append({
+            key: item[key]
+            for key in ("id", "origins", "sources", "accepted_contributions", "blocker")
+        })
+    projected_items = [{
+        key: item.get(key)
+        for key in (
+            "id", "origins", "sources", "accepted_contributions", "blocker",
+            "required_outcome",
+        )
+    } for item in escalation_artifact.get("items", [])]
+    if projected_items != expected_items:
+        fail(f"{subject} does not account for every remaining finding", expected_items)
+    return {
+        "accepted_contributions": expected_contributions,
+        "items": expected_event_items,
+    }
+
+
+def correction_post_amendment_escalation_account(entries, index, entry, state, subject):
+    data = note_data(entry)
+    required = {
+        "schema", "producer", "built", "round", "route", "opening",
+        "previous_authority", "previous_execution_authority_sha256", "amendment",
+        "return", "completed_tasks", "items", "commit", "tree", "gate", "blocker",
+        "correction_artifact_sha256", "correction_artifact_object", "artifact",
+        "artifact_sha256", "artifact_object", "retry_transition",
+    }
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 2 \
+            or data.get("producer") != "post-amendment-return" \
+            or data.get("route") != "sublot" or data.get("built") != state["built"] \
+            or data.get("round") != state["round"]:
+        fail(f"{subject} has malformed post-AMENDMENT escalation authority")
+    common = validate_correction_amendment_return_common(
+        entries, index, {
+            "artifact_sha256": data.get("correction_artifact_sha256"),
+            "artifact_object": data.get("correction_artifact_object"),
+            "return": data.get("return"), "commit": data.get("commit"),
+            "tree": data.get("tree"), "gate": data.get("gate"),
+        }, state, subject,
+    )
+    return_account = common["return_account"]
+    if return_account["route"] != "sublot":
+        fail(f"{subject} consumes another post-AMENDMENT route")
+    relative = f"corrections/{state['built']}/round-{state['round']}-escalation.md"
+    try:
+        object_path = validate_content_object(
+            WORKSPACE, state["built"], data.get("artifact_sha256"), ".md",
+        )
+        artifact = load_correction_escalation_parser().parse_artifact(
+            object_path, expected_built=state["built"], expected_round=state["round"],
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable escalation artifact", exc)
+    if data.get("artifact") != relative \
+            or data.get("artifact_object") != str(object_path.relative_to(WORKSPACE)) \
+            or artifact.get("artifact_sha256") != data.get("artifact_sha256") \
+            or artifact.get("opening") != common["opening_proof"] \
+            or artifact.get("previous_authority") != return_account["previous_authority"] \
+            or artifact.get("amendment_opening") != journal_line_proof(common["opening_index"]) \
+            or artifact.get("amendment_commit") != journal_line_proof(common["commit_index"]) \
+            or artifact.get("return_sha256") != data["return"]["sha256"] \
+            or artifact.get("commit") != data["commit"] or artifact.get("tree") != data["tree"] \
+            or artifact.get("gate") != data["gate"] \
+            or artifact.get("correction_artifact_sha256") \
+            != data["correction_artifact_sha256"] \
+            or artifact.get("blocker") != return_account["blocker"] \
+            or artifact.get("required_outcome") != return_account["required_sublot_outcome"]:
+        fail(f"{subject} changes its escalation artifact authority")
+    output_set = validate_final_checker_transition(
+        common["current_set"], return_account["retry_transition"],
+        transfer_kind="amendment-return",
+    )
+    requirements = [entry["assignment"]["consumer_requirement"]
+                    for entry in output_set["entries"]]
+    if artifact["requirements"] != requirements:
+        fail(f"{subject}'s escalation artifact changes its consumer requirements")
+    confirmed = correction_escalation_confirmed_account(entries, index, state, subject)
+    projection = correction_post_amendment_escalation_projection(
+        return_account, common["artifact"], artifact, confirmed, state["round"], subject,
+    )
+    expected_items = projection["items"]
+    completed = [
+        item["task"] for item in return_account["accepted_contributions"]
+        if item["outcome"] == "preserved"
+    ]
+    expected = {
+        "schema": 2,
+        "producer": "post-amendment-return",
+        "built": state["built"], "round": state["round"], "route": "sublot",
+        "opening": common["opening_proof"],
+        "previous_authority": return_account["previous_authority"],
+        "previous_execution_authority_sha256": return_account[
+            "previous_execution_authority_sha256"
+        ],
+        "amendment": {
+            "opening": journal_line_proof(common["opening_index"]),
+            "committed": journal_line_proof(common["commit_index"]),
+        },
+        "return": data["return"],
+        "completed_tasks": completed,
+        "items": expected_items,
+        "commit": return_account["current"]["commit"],
+        "tree": return_account["current"]["tree"],
+        "gate": return_account["current"]["gate"],
+        "blocker": return_account["blocker"],
+        "correction_artifact_sha256": return_account["current"]["artifact_sha256"],
+        "correction_artifact_object": return_account["current"]["artifact_object"],
+        "artifact": relative,
+        "artifact_sha256": artifact["artifact_sha256"],
+        "artifact_object": str(object_path.relative_to(WORKSPACE)),
+        "retry_transition": return_account["retry_transition"],
+    }
+    if data != expected:
+        fail(f"{subject} changes its exact post-AMENDMENT escalation", expected)
+    admit_correction_terminal(CorrectionTerminalFacts(
+        opening_present=True,
+        active_owner=None,
+        accepted_tasks=len(completed),
+        task_count=correction_lifecycle_task_count(state["artifact"], subject),
+        outstanding_obligations=False,
+        amendment_returned=True,
+        escalation_producer=True,
+        terminal=None,
+    ), "escalated")
+    return expected
+
+
+def correction_escalation_confirmed_account(entries, before, state, subject):
+    opening = state["opening"]
+    close_index, close = journal_entry_from_proof(
+        entries, opening.get("pass_close"), f"{subject}'s source pass close",
+    )
+    close_data = note_data(close)
+    if close_index >= before or close.get("kind") != "pass.closed" \
+            or close_data.get("route") != "correction":
+        fail(f"{subject} has no exact source pass close")
+    try:
+        object_path = validate_content_object(
+            WORKSPACE, state["built"], close_data["confirmed_sha256"], ".md",
+        )
+        payload = object_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable confirmed source", exc)
+    if str(object_path.relative_to(WORKSPACE)) != close_data["confirmed_object"]:
+        fail(f"{subject} changes its immutable confirmed source path")
+    return confirmed_account_bytes(payload, f"{subject}'s immutable confirmed source")
+
+
+def correction_escalation_item_task_accounts(
+        items, source_coverage, correction, subject,
+):
+    if not isinstance(items, list) or not isinstance(source_coverage, dict):
+        fail(f"{subject} has malformed escalation item coverage")
+    accounts = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("origins"), list):
+            fail(f"{subject} has malformed escalation item authority")
+        tasks = set()
+        for origin in item["origins"]:
+            match = re.fullmatch(
+                rf"correction/c{correction}/(F[1-9][0-9]*)", str(origin),
+            )
+            finding_tasks = source_coverage.get(match.group(1)) if match else None
+            if not isinstance(finding_tasks, list):
+                fail(f"{subject} has a foreign escalation item origin")
+            tasks.update(finding_tasks)
+        accounts.append({"id": item.get("id"), "tasks": sorted(tasks)})
+    return accounts
+
+
+def correction_ordinary_escalation_consumer_requirements(
+        current, artifact, source_coverage, correction, subject,
+):
+    current_entries = current.get("entries") if isinstance(current, dict) else None
+    requirements = artifact.get("requirements") if isinstance(artifact, dict) else None
+    if not isinstance(current_entries, list) or not isinstance(requirements, list):
+        fail(f"{subject} has malformed consumer requirements")
+    current_ids = [
+        member.get("source", {}).get("obligation_id")
+        if isinstance(member, dict) else None
+        for member in current_entries
+    ]
+    requirement_ids = [
+        requirement.get("obligation_id")
+        if isinstance(requirement, dict) else None
+        for requirement in requirements
+    ]
+    if requirement_ids != current_ids:
+        fail(f"{subject} changes its exact consumer requirement identities")
+    item_accounts = correction_escalation_item_task_accounts(
+        artifact.get("items"), source_coverage, correction, subject,
+    )
+    projected = []
+    for member, requirement in zip(current_entries, requirements):
+        source = member.get("source") if isinstance(member, dict) else None
+        try:
+            escalation_item = final_checker_escalation_item(member, item_accounts)
+        except ValueError as exc:
+            fail(f"{subject} has no exact escalation-item consumer authority", exc)
+        expected = {
+            "obligation_id": source.get("obligation_id")
+            if isinstance(source, dict) else None,
+            "checker": source.get("checker") if isinstance(source, dict) else None,
+            "manifest_phase": source.get("required_consumer_phase")
+            if isinstance(source, dict) else None,
+            "remaining_outcome": artifact.get("required_outcome"),
+            "escalation_item": escalation_item,
+        }
+        if requirement != expected:
+            fail(f"{subject} changes one exact consumer requirement")
+        projected.append(requirement)
+    return projected
+
+
+def correction_ordinary_escalation_account(entries, index, entry, state, subject):
+    require_no_active_correction_amendment(
+        entries, index, state["built"], state["round"], subject,
+    )
+    data = note_data(entry)
+    required = {
+        "schema", "producer", "built", "round", "route", "opening",
+        "latest_authority", "execution_authority_sha256", "completed_tasks",
+        "items", "commit", "blocker", "artifact", "artifact_sha256",
+        "artifact_object", "retry_transition",
+    }
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 1 \
+            or data.get("producer") != "ordinary" or data.get("route") != "sublot" \
+            or data.get("built") != state["built"] or data.get("round") != state["round"]:
+        fail(f"{subject} has malformed ordinary escalation authority")
+    if state["kind"] == "correction.round.rebased" or any(
+        candidate.get("kind") == "amendment.opened"
+        and note_data(candidate).get("origin") == "correction-round"
+        and note_data(candidate).get("built") == state["built"]
+        and note_data(candidate).get("correction") == state["round"]
+        for candidate in entries[state["opening_index"] + 1:index]
+    ):
+        fail(f"{subject} cannot use the ordinary producer after AMENDMENT")
+    blocker_index, blocker = journal_entry_from_proof(
+        entries, data.get("blocker"), f"{subject}'s structural blocker",
+    )
+    blocker_data = note_data(blocker)
+    if blocker_index >= index or blocker.get("kind") != "attempt.failed" \
+            or blocker.get("lot") != state["built"] \
+            or blocker.get("correction") != state["round"] \
+            or blocker_data.get("schema") != 2 \
+            or blocker_data.get("classification") != "C3.9d" \
+            or blocker_data.get("unit_authority_sha256") != state["authority_sha256"] \
+            or blocker_data.get("execution_authority_sha256") \
+            != state["execution_authority_sha256"]:
+        fail(f"{subject} does not consume one exact current C3.9d blocker")
+    validate_attempt_failed_entry(entries, blocker_index, blocker)
+    if any(
+        candidate.get("kind") in {
+            "attempt.failed", "attempt.succeeded", "paused", "aborted",
+            "correction.round.revised", "correction.round.rebased", "rewind.done",
+        }
+        and (
+            candidate.get("lot") == state["built"]
+            or note_data(candidate).get("built") == state["built"]
+            or note_data(candidate).get("unit", {}).get("built") == state["built"]
+        )
+        for candidate in entries[blocker_index + 1:index]
+    ):
+        fail(f"{subject}'s structural blocker is no longer the current transition")
+
+    accepted = accepted_correction_task_entries_at_prefix(
+        entries, index, state["built"], state["round"], state["opening_index"],
+    )
+    completed = [task for task, _success_index, _success in accepted]
+    commit = correction_current_escalation_base(state, accepted, subject)
+    relative = f"corrections/{state['built']}/round-{state['round']}-escalation.md"
+    try:
+        object_path = validate_content_object(
+            WORKSPACE, state["built"], data.get("artifact_sha256"), ".md",
+        )
+        artifact = load_correction_escalation_parser().parse_artifact(
+            object_path, expected_built=state["built"], expected_round=state["round"],
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable ordinary escalation artifact", exc)
+    if data.get("artifact") != relative \
+            or data.get("artifact_object") != str(object_path.relative_to(WORKSPACE)) \
+            or artifact.get("schema") != 1 or artifact.get("producer") != "ordinary" \
+            or artifact.get("artifact_sha256") != data.get("artifact_sha256") \
+            or artifact.get("authority") != state["proof"] \
+            or artifact.get("commit") != commit \
+            or artifact.get("blocker") != data.get("blocker"):
+        fail(f"{subject} changes its ordinary escalation artifact authority")
+
+    source_coverage = state["artifact"]["source_finding_coverage"]
+    unresolved = [
+        finding for finding, tasks in source_coverage.items()
+        if any(task not in completed for task in tasks)
+    ]
+    confirmed = correction_escalation_confirmed_account(entries, index, state, subject)
+    origins = []
+    expected_contributions = []
+    accepted_by_task = {task: success for task, _index, success in accepted}
+    for task in completed:
+        satisfies = [
+            finding for finding, tasks in source_coverage.items() if task in tasks
+        ]
+        success = accepted_by_task[task]
+        expected_contributions.append({
+            "task": task, "commit": success["sha"], "gate": success["gate"],
+            "satisfies": satisfies,
+        })
+    for item in artifact["items"]:
+        item_findings = []
+        for origin in item["origins"]:
+            match = re.fullmatch(
+                rf"correction/c{state['round']}/(F[1-9][0-9]*)", origin,
+            )
+            if match is None:
+                fail(f"{subject}'s escalation item names another correction origin")
+            item_findings.append(match.group(1))
+        expected_sources = sorted({
+            source for finding in item_findings for source in confirmed[finding]["sources"]
+        }, key=source_identity_key)
+        expected_tasks = sorted({
+            task for finding in item_findings for task in source_coverage[finding]
+            if task in completed
+        })
+        if item["sources"] != expected_sources \
+                or item["accepted_contributions"] != expected_tasks \
+                or item["blocker"] != data["blocker"]:
+            fail(f"{subject}'s escalation item changes its source or contribution account")
+        origins.extend(item_findings)
+    if origins != unresolved or artifact["accepted_contributions"] != expected_contributions:
+        fail(f"{subject} does not account for every unresolved finding and contribution")
+
+    current = outstanding_final_checker_set(
+        entries, index, state["built"], state["round"], subject,
+    )
+    requirements = correction_ordinary_escalation_consumer_requirements(
+        current, artifact, source_coverage, state["round"], subject,
+    )
+    dispositions = []
+    for member, requirement in zip(current["entries"], requirements):
+        source = member["source"]
+        dispositions.append({
+            "obligation_id": source["obligation_id"], "outcome": "carried",
+            "assignment": {
+                "unit": {
+                    "kind": "correction-escalation", "built": state["built"],
+                    "round": state["round"], "producer": "ordinary",
+                    "authority": state["proof"],
+                },
+                "task": None, "phase": "sublot-plan-consumer-map",
+                "owner": "escalation-tail", "consumer_requirement": requirement,
+            },
+            "evidence": None,
+        })
+    transition, _output = materialize_final_checker_transition(
+        current, additions=[], dispositions=dispositions,
+        transfer_kind="ordinary-escalation",
+    )
+    expected = {
+        "schema": 1, "producer": "ordinary", "built": state["built"],
+        "round": state["round"], "route": "sublot",
+        "opening": journal_line_proof(state["opening_index"]),
+        "latest_authority": state["proof"],
+        "execution_authority_sha256": state["execution_authority_sha256"],
+        "completed_tasks": completed,
+        "items": [{
+            "id": item["id"], "origins": item["origins"],
+            "sources": item["sources"],
+            "accepted_contributions": item["accepted_contributions"],
+            "blocker": item["blocker"],
+        } for item in artifact["items"]],
+        "commit": commit, "blocker": data["blocker"], "artifact": relative,
+        "artifact_sha256": artifact["artifact_sha256"],
+        "artifact_object": str(object_path.relative_to(WORKSPACE)),
+        "retry_transition": transition,
+    }
+    if data != expected:
+        fail(f"{subject} changes its exact ordinary escalation", expected)
+    admit_correction_terminal(CorrectionTerminalFacts(
+        opening_present=True,
+        active_owner=None,
+        accepted_tasks=len(completed),
+        task_count=correction_lifecycle_task_count(state["artifact"], subject),
+        outstanding_obligations=False,
+        amendment_returned=False,
+        escalation_producer=True,
+        terminal=None,
+    ), "escalated")
+    return expected
+
+
+def correction_retained_authority_escalation_account(
+        entries, index, entry, state, subject,
+):
+    require_no_active_correction_amendment(
+        entries, index, state["built"], state["round"], subject,
+    )
+    data = note_data(entry)
+    required = {
+        "schema", "producer", "built", "round", "route", "opening",
+        "latest_authority", "previous_rewind", "cause", "target",
+        "crossed_authorities", "blocker", "completed_tasks", "items",
+        "commit", "tree", "gate", "artifact_sha256", "artifact_object",
+        "retry_transition",
+    }
+    if not isinstance(data, dict) or set(data) != required or data.get("schema") != 3 \
+            or data.get("producer") != "retained-authority-rewind" \
+            or data.get("route") != "sublot" or data.get("built") != state["built"] \
+            or data.get("round") != state["round"]:
+        fail(f"{subject} has malformed retained-authority escalation")
+    if not any(
+        candidate.get("kind") == "correction.round.rebased"
+        and note_data(candidate).get("built") == state["built"]
+        and note_data(candidate).get("round") == state["round"]
+        for candidate in entries[state["opening_index"] + 1:index]
+    ):
+        fail(f"{subject} has no retained rebase authority")
+    if data.get("opening") != journal_line_proof(state["opening_index"]) \
+            or data.get("latest_authority") != state["proof"] \
+            or data.get("previous_rewind") != state.get("rewind_proof"):
+        fail(f"{subject} changes its current Correction authority")
+
+    failure_index, failure = journal_entry_from_proof(
+        entries, data.get("cause"), f"{subject}'s failed rewind cause",
+    )
+    failure_data = note_data(failure)
+    if failure_index >= index or failure.get("kind") != "attempt.failed" \
+            or failure.get("lot") != state["built"] \
+            or failure.get("correction") != state["round"] \
+            or failure_data.get("schema") != 2 \
+            or failure_data.get("classification") != "C3.9c" \
+            or failure_data.get("unit_authority_sha256") != state["authority_sha256"] \
+            or failure_data.get("execution_authority_sha256") \
+            != state["execution_authority_sha256"]:
+        fail(f"{subject} does not consume one exact current C3.9c failure")
+    validate_attempt_failed_entry(entries, failure_index, failure)
+    if any(
+        candidate.get("kind") in {
+            "attempt.failed", "attempt.succeeded", "paused", "aborted", "rewind.done",
+            "correction.round.revised", "correction.round.rebased",
+            "correction.round.resolved", "correction.round.escalated",
+        }
+        and (
+            candidate.get("lot") == state["built"]
+            or note_data(candidate).get("built") == state["built"]
+            or note_data(candidate).get("unit", {}).get("built") == state["built"]
+        )
+        for candidate in entries[failure_index + 1:index]
+    ):
+        fail(f"{subject}'s failed rewind cause is no longer current")
+
+    target = data.get("target")
+    earliest = target.get("earliest_task") if isinstance(target, dict) else None
+    root = f"refs/bwr/{Path(WORKSPACE).name}/{state['built']}/correction-{state['round']}"
+    base_ref = f"{root}/task-{earliest - 1}" if construction_positive_integer(earliest) else None
+    if not isinstance(target, dict) or set(target) != {
+        "earliest_task", "base_ref", "base_commit", "base_tree",
+    } or not construction_positive_integer(earliest) \
+            or earliest > failure.get("task", 0) or target.get("base_ref") != base_ref:
+        fail(f"{subject} has a malformed retained-authority target")
+    accepted_at_failure = accepted_correction_task_entries_at_prefix(
+        entries, failure_index + 1, state["built"], state["round"], state["opening_index"],
+    )
+    accepted_commits = {task: success["sha"] for task, _idx, success in accepted_at_failure}
+    expected_base = state["opening"]["base_commit"] if earliest == 1 \
+        else accepted_commits.get(earliest - 1)
+    base_tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{target.get('base_commit')}^{{tree}}"], capture_output=True, text=True,
+    )
+    if expected_base is None or target.get("base_commit") != expected_base \
+            or base_tree.returncode != 0 or target.get("base_tree") != base_tree.stdout.strip():
+        fail(f"{subject} changes its exact proposed rewind base")
+
+    crossed = retained_authority_chain(
+        entries, index, state, target["base_commit"], subject,
+    )
+    public_crossed = [{
+        "kind": item["kind"], "proof": item["proof"],
+        "source_commit": item["source_commit"], "source_tree": item["source_tree"],
+        "transition_sha256": item["transition_sha256"],
+    } for item in crossed]
+    if not crossed or data.get("crossed_authorities") != public_crossed:
+        fail(f"{subject} changes its complete crossed-authority account")
+    failed_transition = retained_authority_failure(
+        crossed, target["base_commit"], state["path"], subject,
+    )
+    if failed_transition is None:
+        fail(f"{subject} invents an escalation for a preservable authority chain")
+
+    accepted = accepted_correction_task_entries_at_prefix(
+        entries, index, state["built"], state["round"], state["opening_index"],
+    )
+    completed = [{
+        "task": task, "success": journal_line_proof(success_index),
+        "commit": success["sha"], "gate": success["gate"],
+    } for task, success_index, success in accepted]
+    completed_tasks = [item["task"] for item in completed]
+    current_commit = correction_current_escalation_base(state, accepted, subject)
+    current_tree = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "--verify",
+         f"{current_commit}^{{tree}}"], capture_output=True, text=True,
+    )
+    current_gate = state["execution_gate"] \
+        if current_commit == state["execution_commit"] else completed[-1]["gate"]
+    if current_tree.returncode != 0 or not re.fullmatch(r"[0-9a-f]{64}", str(current_gate)):
+        fail(f"{subject} has no exact current accepted tree and gate")
+    next_rewind = state.get("rewind_ordinal", 0) + 1
+    for task, _success_index, success in accepted:
+        stable = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{root}/task-{task}^{{commit}}"], capture_output=True, text=True,
+        )
+        archived = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "--verify",
+             f"{root}/rewound/r-{next_rewind}/task-{task}^{{commit}}"],
+            capture_output=True,
+        )
+        if stable.returncode != 0 or stable.stdout.strip() != success["sha"] \
+                or archived.returncode == 0:
+            fail(f"{subject} does not preserve every accepted Correction ref")
+
+    current = outstanding_final_checker_set(
+        entries, index, state["built"], state["round"], subject,
+    )
+    owner = {
+        "schema": 1, "producer": "retained-authority-rewind",
+        "built": state["built"], "round": state["round"],
+        "opening": journal_line_proof(state["opening_index"]),
+        "latest_authority": state["proof"], "previous_rewind": state.get("rewind_proof"),
+        "cause": data["cause"], "target": target, "crossed_authorities": crossed,
+        "failed_transition": failed_transition,
+        "current_set_sha256": final_checker_set_sha256(current),
+        "completed": completed, "current_commit": current_commit,
+        "current_tree": current_tree.stdout.strip(), "current_gate": current_gate,
+        "artifact_sha256": state["artifact_sha256"],
+        "artifact_object": state["artifact_object"],
+        "current_authority_sha256": state["authority_sha256"],
+        "current_execution_authority_sha256": state["execution_authority_sha256"],
+    }
+    owner_sha256 = hashlib.sha256(json.dumps(
+        owner, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    blocker_data = data.get("blocker")
+    expected_blocker_path = (
+        f"corrections/{state['built']}/round-{state['round']}-rewind-preservation.md"
+    )
+    if not isinstance(blocker_data, dict) or set(blocker_data) != {
+        "artifact", "sha256", "object",
+    } or blocker_data.get("artifact") != expected_blocker_path:
+        fail(f"{subject} has a malformed immutable preservation blocker")
+    try:
+        object_path = validate_content_object(
+            WORKSPACE, state["built"], blocker_data.get("sha256"), ".md",
+        )
+        blocker = load_correction_escalation_parser().parse_rewind_blocker(
+            object_path, expected_built=state["built"], expected_round=state["round"],
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} has no exact immutable preservation blocker", exc)
+    if blocker_data.get("object") != str(object_path.relative_to(WORKSPACE)) \
+            or blocker["sha256"] != blocker_data["sha256"] \
+            or blocker["owner_sha256"] != owner_sha256 \
+            or blocker["opening"] != owner["opening"] \
+            or blocker["latest_authority"] != owner["latest_authority"] \
+            or blocker["previous_rewind"] != owner["previous_rewind"] \
+            or blocker["cause"] != owner["cause"] \
+            or blocker["target_commit"] != target["base_commit"] \
+            or blocker["failed_transition"] != failed_transition["proof"] \
+            or blocker["failed_transition_sha256"] != failed_transition["transition_sha256"] \
+            or blocker["failure_reason"] != failed_transition["reason"] \
+            or blocker["current_commit"] != current_commit \
+            or blocker["current_tree"] != current_tree.stdout.strip() \
+            or blocker["current_gate"] != current_gate:
+        fail(f"{subject} changes its preservation blocker authority")
+
+    expected_blocker_items = []
+    event_items = []
+    coverage = state["artifact"]["source_finding_coverage"]
+    for finding, tasks in coverage.items():
+        contributions = [task for task in tasks if task in completed_tasks]
+        expected_blocker_items.append({
+            "id": finding, "origin": f"correction/c{state['round']}/{finding}",
+            "accepted_contributions": contributions,
+        })
+        event_items.append({
+            "id": finding, "origins": [f"correction/c{state['round']}/{finding}"],
+            "accepted_contributions": contributions, "blocker": blocker_data,
+        })
+    if blocker["items"] != expected_blocker_items:
+        fail(f"{subject} changes its complete unresolved finding account")
+    item_accounts = correction_escalation_item_task_accounts(
+        event_items, coverage, state["round"], subject,
+    )
+    dispositions = []
+    for member in current["entries"]:
+        source = member["source"]
+        try:
+            escalation_item = final_checker_escalation_item(member, item_accounts)
+        except ValueError as exc:
+            fail(f"{subject} has no exact escalation-item consumer authority", exc)
+        requirement = {
+            "obligation_id": source["obligation_id"], "checker": source["checker"],
+            "manifest_phase": source["required_consumer_phase"],
+            "remaining_outcome": blocker["required_outcome"],
+            "escalation_item": escalation_item,
+        }
+        dispositions.append({
+            "obligation_id": source["obligation_id"], "outcome": "carried",
+            "assignment": {
+                "unit": {
+                    "kind": "correction-escalation", "built": state["built"],
+                    "round": state["round"], "producer": "retained-authority-rewind",
+                    "rewind_owner_sha256": owner_sha256,
+                },
+                "task": None, "phase": "sublot-plan-consumer-map",
+                "owner": "escalation-tail", "consumer_requirement": requirement,
+            },
+            "evidence": None,
+        })
+    transition, _output = materialize_final_checker_transition(
+        current, additions=[], dispositions=dispositions,
+        transfer_kind="retained-authority-escalation",
+    )
+    expected = {
+        "schema": 3, "producer": "retained-authority-rewind",
+        "built": state["built"], "round": state["round"], "route": "sublot",
+        "opening": owner["opening"], "latest_authority": owner["latest_authority"],
+        "previous_rewind": owner["previous_rewind"], "cause": owner["cause"],
+        "target": target, "crossed_authorities": public_crossed,
+        "blocker": blocker_data, "completed_tasks": completed_tasks,
+        "items": event_items, "commit": current_commit,
+        "tree": current_tree.stdout.strip(), "gate": current_gate,
+        "artifact_sha256": state["artifact_sha256"],
+        "artifact_object": state["artifact_object"], "retry_transition": transition,
+    }
+    if data != expected:
+        fail(f"{subject} changes its exact retained-authority escalation", expected)
+    admit_correction_terminal(CorrectionTerminalFacts(
+        opening_present=True,
+        active_owner=None,
+        accepted_tasks=len(completed_tasks),
+        task_count=correction_lifecycle_task_count(state["artifact"], subject),
+        outstanding_obligations=False,
+        amendment_returned=True,
+        escalation_producer=True,
+        terminal=None,
+    ), "escalated")
+    return expected
+
+
+def normalize_correction_round_escalated(entries, data, subject):
+    if not isinstance(data, dict) or data.get("producer") not in {
+        "ordinary", "post-amendment-return", "retained-authority-rewind",
+    }:
+        fail(f"{subject} waits for its exact producer-specific escalation validator")
+    state = current_correction_contract_state(
+        entries, len(entries), data.get("built"), data.get("round"), subject,
+    )
+    candidate = {"kind": "correction.round.escalated", "data": data}
+    if data["producer"] == "ordinary":
+        return correction_ordinary_escalation_account(
+            entries + [candidate], len(entries), candidate, state, subject,
+        )
+    if data["producer"] == "post-amendment-return":
+        return correction_post_amendment_escalation_account(
+            entries + [candidate], len(entries), candidate, state, subject,
+        )
+    return correction_retained_authority_escalation_account(
+        entries + [candidate], len(entries), candidate, state, subject,
+    )
+
+
+def validate_correction_round_escalated_entry(entries, index, entry):
+    data = note_data(entry)
+    if data.get("producer") not in {
+        "ordinary", "post-amendment-return", "retained-authority-rewind",
+    }:
+        fail("a durable correction.round.escalated has an unsupported producer")
+    state = current_correction_contract_state(
+        entries, index, data.get("built"), data.get("round"),
+        "a durable correction.round.escalated",
+    )
+    if data["producer"] == "ordinary":
+        correction_ordinary_escalation_account(
+            entries, index, entry, state, "a durable correction.round.escalated",
+        )
+    elif data["producer"] == "post-amendment-return":
+        correction_post_amendment_escalation_account(
+            entries, index, entry, state, "a durable correction.round.escalated",
+        )
+    else:
+        correction_retained_authority_escalation_account(
+            entries, index, entry, state, "a durable correction.round.escalated",
+        )
+
+
+def correction_round_built_implementer_lifecycles(
+        entries, before, built, correction, active_successes, subject,
+):
+    lifecycles = []
+    expected_context_base = {
+        "mode": "construction", "lot": built, "correction": correction,
+        "job": "implementer",
+    }
+    for task, success_index, success_data in active_successes:
+        success = entries[success_index]
+        validate_attempt_succeeded_entry(entries, success_index, success)
+        attempt = success_data.get("attempt")
+        starts = [(index, entry) for index, entry in enumerate(entries[:success_index])
+                  if entry.get("event") == "session-started"
+                  and entry.get("lot") == built
+                  and entry.get("correction") == correction
+                  and entry.get("task") == task
+                  and entry.get("attempt") == attempt]
+        if len(starts) != 1:
+            fail(f"{subject}'s correction task-{task} has no one exact implementer start")
+        start_index, start = starts[0]
+        expected_context = {
+            **expected_context_base, "task": task, "attempt": attempt,
+        }
+        actual_start_context = {
+            key: start[key] for key in CONTEXT_FIELDS if key in start
+        }
+        if actual_start_context != expected_context:
+            fail(f"{subject}'s correction task-{task} has a changed implementer context", {
+                "expected": expected_context, "actual": actual_start_context,
+            })
+        validate_construction_session_start(
+            start, f"{subject}'s correction task-{task} implementer start",
+            entries=entries, index=start_index, require_account=True,
+        )
+        session = start.get("session")
+        retirement_indices = [
+            index for index, entry in enumerate(entries[:before])
+            if entry.get("event") == "session-retired"
+            and entry.get("session") == session
+        ]
+        status_indices = [
+            index for index, entry in enumerate(entries[:before])
+            if entry.get("event") == "session-status"
+            and entry.get("session") == session
+        ]
+        if retirement_indices and any(
+            index > retirement_indices[0] for index in status_indices
+        ):
+            fail(f"{subject}'s correction task-{task} changes status after retirement")
+        chain = correction_implementer_retirement_chain(
+            entries, before, session, expected_context,
+            f"{subject}'s correction task-{task}",
+        )
+        if not retirement_indices or any(
+            index <= success_index for index in retirement_indices
+        ) or chain["status"] != "done" or not chain["complete"]:
+            fail(f"{subject}'s correction task-{task} has no complete implementer retirement")
+        lifecycles.append({
+            "task": task, "attempt": attempt, "session": session,
+            "start": journal_line_proof(start_index),
+            "success": journal_line_proof(success_index),
+            "retirements": chain["retirements"],
+        })
+    return lifecycles
+
+
+def correction_round_built_implementer_preflight(
+        entries, before, built, correction, subject,
+):
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "correction.round.opened"
+                and note_data(entry).get("built") == built
+                and note_data(entry).get("round") == correction]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact Correction Round opening")
+    opening_index, _opening = openings[0]
+    active_successes = accepted_correction_task_entries_at_prefix(
+        entries, before, built, correction, opening_index,
+    )
+    return correction_round_built_implementer_lifecycles(
+        entries, before, built, correction, active_successes, subject,
+    )
+
+
 def correction_round_built_account(entries, before, built, correction, subject):
     if not isinstance(built, str) or not re.fullmatch(
         r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", built,
     ) or not construction_positive_integer(correction):
         fail(f"{subject} has a malformed Correction Round identity")
     require_no_current_correction_stop(
+        entries, before, built, correction, subject,
+    )
+    require_no_active_correction_amendment(
         entries, before, built, correction, subject,
     )
     openings = [(index, entry) for index, entry in enumerate(entries[:before])
@@ -11301,9 +16741,14 @@ def correction_round_built_account(entries, before, built, correction, subject):
     active_successes = accepted_correction_task_entries_at_prefix(
         entries, before, built, correction, opening_index,
     )
+    artifact_task_ids = [item["task"] for item in contract_state["artifact"]["tasks"]]
+    task_count = correction_lifecycle_task_count(contract_state["artifact"], subject)
     if [task for task, _index, _data in active_successes] \
-            != list(range(1, opening_data["tasks"] + 1)):
+            != list(range(1, task_count + 1)):
         fail(f"{subject} has no complete active Correction Round task prefix")
+    implementers = correction_round_built_implementer_lifecycles(
+        entries, before, built, correction, active_successes, subject,
+    )
     successes = []
     attempts = 0
     for task, success_index, success_data in active_successes:
@@ -11339,7 +16784,7 @@ def correction_round_built_account(entries, before, built, correction, subject):
         int(match.group(1)) for line in refs.stdout.splitlines()
         if (match := re.fullmatch(re.escape(ref_root) + r"/task-([1-9][0-9]*)", line))
     )
-    if stable_tasks != list(range(1, opening_data["tasks"] + 1)):
+    if stable_tasks != list(range(1, task_count + 1)):
         fail(f"{subject}'s stable correction task refs are incomplete or foreign")
 
     final_data = successes[-1][1]
@@ -11373,7 +16818,7 @@ def correction_round_built_account(entries, before, built, correction, subject):
             or artifact.get("controller_sha256") != contract_state["controller_sha256"] \
             or artifact.get("manifest_sha256") \
             != contract_state["artifact"]["manifest_sha256"] \
-            or len(artifact.get("tasks", [])) != opening_data["tasks"]:
+            or [item["task"] for item in artifact.get("tasks", [])] != artifact_task_ids:
         fail(f"{subject}'s final correction artifact changes its frozen controller authority")
 
     expected = {
@@ -11383,8 +16828,9 @@ def correction_round_built_account(entries, before, built, correction, subject):
         "opening": opening_proof,
         "latest_authority": contract_state["proof"],
         "execution_authority_sha256": contract_state["execution_authority_sha256"],
-        "tasks": opening_data["tasks"],
+        "tasks": task_count,
         "attempts": attempts,
+        "implementers": implementers,
         "commit": final_data["sha"],
         "gate": final_data["gate"],
         "artifact_sha256": artifact_sha256,
@@ -11394,6 +16840,16 @@ def correction_round_built_account(entries, before, built, correction, subject):
     expected["generation_sha256"] = hashlib.sha256(json.dumps(
         expected, sort_keys=True, separators=(",", ":"),
     ).encode()).hexdigest()
+    admit_correction_terminal(CorrectionTerminalFacts(
+        opening_present=True,
+        active_owner=None,
+        accepted_tasks=len(active_successes),
+        task_count=task_count,
+        outstanding_obligations=bool(retry_set["entries"]),
+        amendment_returned=False,
+        escalation_producer=False,
+        terminal=None,
+    ), "built")
     return expected
 
 
@@ -11420,6 +16876,150 @@ def validate_correction_round_built_entry(entries, index, entry):
         fail("a durable correction.round.built changes its completed generation", expected)
 
 
+def historical_schema_one_product_close(
+        entries, opening_index, close_index, close, subject,
+):
+    """Replay one superseded schema-1 close from durable journal authority only."""
+    opening = entries[opening_index]
+    opening_data = note_data(opening)
+    close_data = note_data(close)
+    built = opening_data.get("built")
+    interval = entries[opening_index + 1:close_index]
+    amendments = [(index, entry) for index, entry in enumerate(
+        interval, opening_index + 1,
+    ) if entry.get("kind") == "amendment.opened"
+        and note_data(entry).get("origin") == "product-review"
+        and note_data(entry).get("built") == built]
+
+    if close_data.get("voided") is True:
+        if close_data != {"voided": True} or len(amendments) != 1:
+            fail(f"{subject} changes a historical schema-1 pass void")
+        amendment_index, amendment = amendments[0]
+        validate_amendment_opening_entry(
+            entries[:amendment_index + 1], amendment_index, amendment,
+        )
+        return None, close_data
+
+    validate_pass_opening_history(
+        entries[:opening_index + 1], opening_index, subject,
+    )
+    if set(close_data) != {"confirmed"}:
+        fail(f"{subject} has a malformed historical schema-1 close", close_data)
+    confirmed = close_data.get("confirmed")
+    if not isinstance(confirmed, int) or isinstance(confirmed, bool) or confirmed < 0:
+        fail(f"{subject} has an invalid historical confirmed count", confirmed)
+    if amendments:
+        fail(f"{subject} rewrites a Product AMENDMENT void as an ordinary close")
+    if any(entry.get("kind") == "sublot.opened" for entry in interval):
+        fail(f"{subject} closes after its historical sub-lot already opened")
+
+    verifier_confirmed = 0
+    for mandate in PRODUCT_REVIEW_MANDATES:
+        receipts = [(index, entry) for index, entry in enumerate(
+            interval, opening_index + 1,
+        ) if entry.get("kind") == "report.received" and entry.get("mandate") == mandate]
+        if not receipts:
+            fail(f"{subject} has no durable historical {mandate} receipt")
+        receipt_index, receipt = receipts[-1]
+        receipt_data = note_data(receipt)
+        if receipt.get("event") != "note" or set(receipt_data) != PRODUCT_RECEIPT_KEYS or any(
+            not isinstance(receipt_data.get(key), int)
+            or isinstance(receipt_data.get(key), bool)
+            or receipt_data[key] < 0
+            for key in REPORT_COUNT_KEYS
+        ) or receipt_data.get("pass_commit") != opening_data["commit"] \
+                or receipt_data.get("pass_gate") != opening_data["gate"] \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(receipt_data.get("report_sha256"))):
+            fail(f"{subject} has a malformed historical {mandate} receipt", receipt_data)
+        reopened = [entry for entry in entries[receipt_index + 1:close_index]
+                    if entry.get("kind") == "bound.spent"
+                    and entry.get("mandate") == mandate
+                    and isinstance(entry.get("text"), str)
+                    and (
+                        entry["text"].startswith("malformed block returned")
+                        or entry["text"].startswith("malformed finding returned:")
+                        or entry["text"].startswith("report returned whole for recalibration")
+                    )]
+        if reopened:
+            fail(f"{subject} has a reopened historical {mandate} report")
+        identity = product_verifier_account(
+            entries, opening_index, opening, built, mandate, receipt_data,
+        )
+        calls = product_verifier_calls(
+            entries[:close_index], receipt_index, mandate, identity, receipt_data,
+            f"{subject}'s historical {mandate} finding-verifier",
+        )
+        if not calls or calls[-1]["terminal"] != "complete":
+            fail(f"{subject} has no settled historical {mandate} verifier")
+        verifier_confirmed += note_data(calls[-1]["end"])["confirmed"]
+    if confirmed != verifier_confirmed:
+        fail(f"{subject}'s historical close contradicts its durable verifier results", {
+            "close": confirmed, "verifiers": verifier_confirmed,
+        })
+    return confirmed, close_data
+
+
+def product_pass_completions(entries, before, subject):
+    """Return every Product pass completion after exact prefix replay."""
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "pass.opened"]
+    if not openings:
+        fail(f"{subject} has no Product pass history")
+    completions = []
+    for ordinal, (opening_index, opening) in enumerate(openings):
+        interval_end = openings[ordinal + 1][0] if ordinal + 1 < len(openings) else before
+        closes = [(index, entry) for index, entry in enumerate(
+            entries[opening_index + 1:interval_end], opening_index + 1,
+        ) if entry.get("kind") == "pass.closed"]
+        if len(closes) != 1:
+            fail(f"{subject}'s pass interval has no one exact terminal", {
+                "opening": opening_index, "found": len(closes),
+            })
+        close_index, close = closes[0]
+        if opening.get("event") != "note" or close.get("event") != "note":
+            fail(f"{subject}'s pass interval changes its opening or terminal event kind")
+        opening_data = note_data(opening)
+        close_data = note_data(close)
+        current = ordinal == len(openings) - 1
+        if opening_data.get("schema") == 2 or current:
+            replayed = validate_pass_close(
+                entries[:close_index], close_data, f"{subject}'s pass at {opening_index}",
+                historical=True, validate_current_gate=False, publish_objects=False,
+            )
+            replayed_opening_index, replayed_opening, confirmed, built, normalized = replayed
+            if replayed_opening_index != opening_index or replayed_opening is not opening:
+                fail(f"{subject}'s pass terminal selects another opening")
+            if confirmed is None:
+                amendments = [(index, entry) for index, entry in enumerate(
+                    entries[opening_index + 1:close_index], opening_index + 1,
+                ) if entry.get("kind") == "amendment.opened"
+                    and note_data(entry).get("origin") == "product-review"
+                    and note_data(entry).get("built") == built]
+                if len(amendments) != 1:
+                    fail(f"{subject}'s pass void has no one exact Product AMENDMENT")
+                amendment_index, amendment = amendments[0]
+                validate_amendment_opening_entry(
+                    entries[:amendment_index + 1], amendment_index, amendment,
+                )
+        else:
+            confirmed, normalized = historical_schema_one_product_close(
+                entries, opening_index, close_index, close,
+                f"{subject}'s pass at {opening_index}",
+            )
+            built = opening_data["built"]
+        completions.append({
+            "opening_index": opening_index,
+            "opening": opening,
+            "close_index": close_index,
+            "close": close,
+            "built": built,
+            "confirmed": confirmed,
+            "voided": confirmed is None,
+            "data": normalized,
+        })
+    return completions
+
+
 def validate_lot_delivered(entries, data):
     subject = "a lot delivery"
     if set(data) != {"sha", "passes"}:
@@ -11430,7 +17030,13 @@ def validate_lot_delivered(entries, data):
     if not isinstance(passes, int) or isinstance(passes, bool) or passes < 1:
         fail(f"{subject} has no positive pass count", passes)
 
-    opening_index, opening, close_index, _, confirmed, built = current_pass_close(entries, subject)
+    completions = product_pass_completions(entries, len(entries), subject)
+    current = completions[-1]
+    opening_index = current["opening_index"]
+    opening = current["opening"]
+    close_index = current["close_index"]
+    confirmed = current["confirmed"]
+    built = current["built"]
     opening_data = note_data(opening)
     if confirmed != 0:
         fail(f"{subject} requires an exact clean current pass close", confirmed)
@@ -11452,18 +17058,10 @@ def validate_lot_delivered(entries, data):
         fail(f"{subject} still has open decision-batch work", unfinished_batches)
 
     root = built.split(".", 1)[0]
-    completed = 0
-    active_root = None
-    for entry in entries:
-        if entry.get("kind") == "pass.opened":
-            candidate = note_data(entry).get("built")
-            active_root = candidate.split(".", 1)[0] if isinstance(candidate, str) else None
-        elif entry.get("kind") == "pass.closed" and active_root == root:
-            close_data = note_data(entry)
-            confirmed_count = close_data.get("confirmed")
-            if isinstance(confirmed_count, int) and not isinstance(confirmed_count, bool) \
-                    and confirmed_count >= 0 and close_data.get("voided") is not True:
-                completed += 1
+    completed = sum(
+        1 for completion in completions
+        if not completion["voided"] and completion["built"].split(".", 1)[0] == root
+    )
     if passes != completed:
         fail(f"{subject} has the wrong completed-pass count", {"recorded": passes, "actual": completed})
 
@@ -12006,6 +17604,9 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         data = normalize_attempt_failed(notes, data, context)
     elif kind == "rewind.done" and isinstance(data, dict) and data.get("schema") == 2:
         data = normalize_correction_rewind(notes, data, context, "the correction rewind")
+    elif kind == "rewind.done" \
+            and correction_escalation_plan_origin(notes, context.get("lot")):
+        fail("a Correction escalation rewind terminal is owned by rewind.sh")
     elif kind == "attempt.succeeded":
         data = normalize_attempt_succeeded(notes, data, context)
     elif kind in {"paused", "aborted"} and isinstance(data, dict) \
@@ -12386,6 +17987,21 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             journal_entries(), data or {}, "a bounded Correction Round revision",
         )
 
+    if kind == "correction.round.rebased":
+        data = normalize_correction_round_rebased(
+            journal_entries(), data or {}, "a post-AMENDMENT Correction Round rebase",
+        )
+
+    if kind == "correction.round.resolved":
+        data = normalize_correction_round_resolved(
+            journal_entries(), data or {}, "a post-AMENDMENT resolved Correction Round",
+        )
+
+    if kind == "correction.round.escalated":
+        data = normalize_correction_round_escalated(
+            journal_entries(), data or {}, "a structurally escalated Correction Round",
+        )
+
     if kind == "correction.round.built":
         data = normalize_correction_round_built(
             journal_entries(), data or {}, "a completed Correction Round",
@@ -12400,6 +18016,16 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         validate_construction_lot_origin(
             journal_entries(), len(journal_entries()), context.get("lot"),
             f"{kind} construction entry",
+        )
+    if kind == "plan.written" and any(
+        entry.get("kind") == "sublot.allocated"
+        and entry.get("text") == context.get("lot")
+        and note_data(entry).get("origin") == "correction-round"
+        for entry in journal_entries()
+    ):
+        data = normalize_correction_escalation_plan_written(
+            journal_entries(), data or {}, context.get("lot"),
+            "a Correction escalation plan publication",
         )
 
     if kind == "pass.opened":
@@ -12493,13 +18119,45 @@ def write_line(entry):
         print(f"**progress WARNING** · {recovery}")
 
 
-def append_event(by, event, **fields):
+def write_validated_line(builder):
+    """Validate one current journal prefix and append under the same lock."""
+    recovery = None
+    with open(JOURNAL_LOCK, "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fd = os.open(JOURNAL, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o666)
+        try:
+            append_start, recovery = _repair_incomplete_tail(fd)
+            entry = builder(journal_entries())
+            payload = (
+                json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            try:
+                written = os.write(fd, payload)
+            except OSError:
+                os.ftruncate(fd, append_start)
+                raise
+            if written != len(payload):
+                os.ftruncate(fd, append_start)
+                raise OSError(
+                    f"short journal write: wrote {written} of {len(payload)} bytes"
+                )
+        finally:
+            os.close(fd)
+    if recovery:
+        print(f"**progress WARNING** · {recovery}")
+
+
+def event_entry(by, event, **fields):
     entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "by": by, "event": event}
     for key in LINE_FIELDS:
         value = fields.get(key)
-        if value is not None:  # absent, never null — the file is read by hand too
+        if value is not None:
             entry[key] = value
-    write_line(entry)
+    return entry
+
+
+def append_event(by, event, **fields):
+    write_line(event_entry(by, event, **fields))
 
 
 def refresh_dashboard():
@@ -12531,8 +18189,136 @@ def refresh_dashboard():
 def cmd_session_started(args):
     me = whoami()
     target = created_session(args.session_id)
+    context = context_of(target)
+    if context.get("mode") == "product-review" and context.get("job") == "reviewer":
+        bwr = ((target.get("annotations") or {}).get("bwr") or {})
+
+        def build_product_reviewer_start(entries):
+            mandate = context.get("mandate")
+            opening_index, _opening, built, _commit = current_pass_opening(
+                entries, len(entries), "the Product reviewer start",
+            )
+            if pass_closes(entries, opening_index, len(entries)):
+                fail("the Product reviewer start belongs to a closed pass")
+            if context.get("lot") != built or mandate not in PRODUCT_REVIEW_MANDATES:
+                fail("the Product reviewer start has another pass or mandate")
+            account = authenticated_product_pass_generation(
+                entries, opening_index, mandate, "the Product reviewer start",
+            )
+            data = None
+            if account["schema"] == 2:
+                expected_annotations = {
+                    "position": account["position"],
+                    "pass": account["pass"],
+                    "generation": account["generation_sha256"],
+                }
+                if any(bwr.get(key) != value for key, value in expected_annotations.items()):
+                    fail("the Product reviewer start does not name its exact pass generation")
+                data = account
+            elif any(bwr.get(key) not in (None, "") for key in ("position", "pass", "generation")):
+                fail("an ordinary Product reviewer start advertises Correction pass authority")
+            return event_entry(
+                me["session_id"], "session-started",
+                session=args.session_id, data=data, **context,
+            )
+
+        write_validated_line(build_product_reviewer_start)
+        return
+    data = None
+    if context.get("mode") == "construction" and context.get("job") == "implementer":
+        entries = journal_entries()
+        projection = contextvars.copy_context()
+        if construction_positive_integer(context.get("correction")) and any(
+            entry.get("kind") == "rewind.done"
+            and note_data(entry).get("unit") == {
+                "kind": "correction", "built": context.get("lot"),
+                "round": context.get("correction"),
+            }
+            for entry in entries
+        ):
+            projection = correction_rewind_history_projection(
+                entries, len(entries), "the construction implementer start rewind history",
+            )
+        data = projection.run(
+            construction_session_start_account,
+            context, args.session_id, "the construction implementer start",
+        )
+        projection.run(
+            validate_construction_session_start,
+            {
+                "event": "session-started", "session": args.session_id,
+                "data": data, **context,
+            },
+            "the construction implementer start",
+            entries=entries, index=len(entries), require_account=True,
+        )
     append_event(me["session_id"], "session-started",
-                 session=args.session_id, **context_of(target))
+                 session=args.session_id, data=data, **context)
+
+
+def perform_session_status(args, me, target_context):
+    # The act and its record in one call: run() exits loudly on failure, so a
+    # status that did not change is a line that never gets written.
+    run(["update-session", args.session_id, "annotations", f"set:bwr.status={args.status}"])
+    append_event(me["session_id"], "session-status",
+                 session=args.session_id, status=args.status, **target_context)
+
+
+def correction_implementer_status_account(
+        entries, before, session, context, status, subject,
+):
+    expected_context = {
+        "mode": "construction", "lot": context.get("lot"),
+        "correction": context.get("correction"), "task": context.get("task"),
+        "attempt": context.get("attempt"), "job": "implementer",
+    }
+    if not isinstance(session, str) or not session \
+            or context != expected_context \
+            or status not in {"working", "idle", "blocked"} \
+            or not construction_positive_integer(context.get("correction")):
+        fail(f"{subject} has another active Correction implementer status")
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "session-started"
+              and entry.get("session") == session]
+    if len(starts) != 1:
+        fail(f"{subject} has no one exact implementer start")
+    start_index, start = starts[0]
+    actual_start_context = {
+        key: start[key] for key in CONTEXT_FIELDS if key in start
+    }
+    if actual_start_context != expected_context:
+        fail(f"{subject} changes its implementer start context")
+    validate_construction_session_start(
+        start, f"{subject}'s implementer start",
+        entries=entries, index=start_index, require_account=True,
+    )
+    if any(entry.get("event") == "session-retired"
+           and entry.get("session") == session for entry in entries[:before]):
+        fail(f"{subject} follows the start of implementer retirement")
+    if any(entry.get("kind") in {
+        "correction.round.built", "correction.round.resolved",
+        "correction.round.escalated",
+    } and note_data(entry).get("built") == context["lot"]
+        and note_data(entry).get("round") == context["correction"]
+        for entry in entries[:before]):
+        fail(f"{subject} follows a terminal Correction Round")
+    statuses = []
+    for index, entry in enumerate(entries[:before]):
+        if entry.get("event") != "session-status" \
+                or entry.get("session") != session:
+            continue
+        actual_context = {
+            key: entry[key] for key in CONTEXT_FIELDS if key in entry
+        }
+        if actual_context != expected_context \
+                or entry.get("status") not in {"working", "idle", "blocked"}:
+            fail(f"{subject} has a changed implementer status history")
+        statuses.append(journal_line_proof(index))
+    return {
+        "schema": 1, "session": session, "context": expected_context,
+        "status": status, "start": journal_line_proof(start_index),
+        "statuses": statuses,
+    }
 
 
 def cmd_session_status(args):
@@ -12540,21 +18326,458 @@ def cmd_session_status(args):
         fail(f"unknown status `{args.status}`", "Statuses: " + " · ".join(STATUSES))
     me = whoami()
     target = run(["session", args.session_id])
-    # The act and its record in one call: run() exits loudly on failure, so a
-    # status that did not change is a line that never gets written.
-    run(["update-session", args.session_id, "annotations", f"set:bwr.status={args.status}"])
-    append_event(me["session_id"], "session-status",
-                 session=args.session_id, status=args.status, **context_of(target))
-
-
-def cmd_session_retired(args):
-    if args.status not in TERMINAL:
-        fail(f"`{args.status}` is not a terminal status",
-             "session-retired takes: " + " · ".join(TERMINAL)
-             + ". For a non-terminal change, use session-status.")
-    me = whoami()
-    target = run(["session", args.session_id])
     target_context = context_of(target)
+    correction_implementer = target_context.get("mode") == "construction" \
+        and target_context.get("job") == "implementer" \
+        and "correction" in target_context
+    if not correction_implementer:
+        repair_journal_tail()
+        perform_session_status(args, me, target_context)
+        return
+
+    operation = f"correction-implementer-status:{args.session_id}"
+    with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+        repair_journal_tail()
+        current_target = run(["session", args.session_id])
+        current_context = context_of(current_target)
+        if current_context != target_context:
+            fail("the Correction implementer changed before status admission")
+        entries = journal_entries()
+        account = correction_implementer_status_account(
+            entries, len(entries), args.session_id, current_context, args.status,
+            "the Correction implementer status",
+        )
+        lease.bind_generation(sha256_bytes(json.dumps(
+            account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")))
+        perform_session_status(args, me, current_context)
+
+
+def correction_implementer_terminal_account(
+        entries, before, start_index, context, subject,
+):
+    """Derive one Correction implementer retirement status from its logical terminal."""
+    candidates = [(index, entry) for index, entry in enumerate(
+        entries[start_index + 1:before], start_index + 1,
+    ) if entry.get("event") == "note"
+        and entry.get("kind") in {"attempt.succeeded", "attempt.failed", "paused", "aborted"}
+        and entry.get("lot") == context["lot"]
+        and entry.get("correction") == context["correction"]
+        and entry.get("task") == context["task"]
+        and note_data(entry).get("attempt") == context["attempt"]]
+    if len(candidates) != 1:
+        fail(f"{subject} has no one exact logical attempt terminal", {
+            "found": len(candidates),
+        })
+    terminal_index, terminal = candidates[0]
+    terminal_prefix = entries[:terminal_index + 1]
+    kind = terminal["kind"]
+    if kind == "attempt.succeeded":
+        validate_attempt_succeeded_entry(terminal_prefix, terminal_index, terminal)
+        status = "done"
+    elif kind == "attempt.failed":
+        validate_attempt_failed_entry(terminal_prefix, terminal_index, terminal)
+        status = correction_attempt_failure_retirement_status(note_data(terminal))
+    else:
+        expected_attempt_stop_data(
+            terminal_prefix, terminal_index, terminal,
+            f"{subject}'s logical {kind} terminal",
+        )
+        status = "superseded" if kind == "paused" else "cancelled"
+    return {
+        "kind": kind,
+        "proof": journal_line_proof(terminal_index),
+        "status": status,
+    }
+
+
+def correction_implementer_retirement_account(
+        entries, before, session, context, status, archive, hide, subject,
+):
+    expected_context = {
+        "mode": "construction", "lot": context.get("lot"),
+        "correction": context.get("correction"), "task": context.get("task"),
+        "attempt": context.get("attempt"), "job": "implementer",
+    }
+    if not isinstance(session, str) or not session \
+            or context != expected_context \
+            or not construction_positive_integer(context.get("correction")):
+        fail(f"{subject} has another Correction implementer identity")
+    starts = [(index, entry) for index, entry in enumerate(entries[:before])
+              if entry.get("event") == "session-started"
+              and entry.get("session") == session]
+    if len(starts) != 1:
+        fail(f"{subject} has no one exact implementer start")
+    start_index, start = starts[0]
+    actual_context = {
+        key: start[key] for key in CONTEXT_FIELDS if key in start
+    }
+    if actual_context != expected_context:
+        fail(f"{subject} changes its implementer start context")
+    validate_construction_session_start(
+        start, f"{subject}'s implementer start",
+        entries=entries, index=start_index, require_account=True,
+    )
+    if any(entry.get("kind") in {
+        "correction.round.built", "correction.round.resolved",
+        "correction.round.escalated",
+    } and note_data(entry).get("built") == context["lot"]
+        and note_data(entry).get("round") == context["correction"]
+        for entry in entries[:before]):
+        fail(f"{subject} follows a terminal Correction Round")
+    if archive is not True or hide is not True:
+        fail(f"{subject} must archive and hide its physical implementer")
+    terminal = correction_implementer_terminal_account(
+        entries, before, start_index, expected_context, subject,
+    )
+    if status != terminal["status"]:
+        fail(f"{subject} changes its status derived from the logical terminal", {
+            "expected": terminal["status"], "actual": status,
+        })
+    chain = correction_implementer_retirement_chain(
+        entries, before, session, expected_context, subject,
+    )
+    if chain["status"] is not None and chain["status"] != status:
+        fail(f"{subject} changes its terminal status during recovery")
+    if chain["complete"]:
+        fail(f"{subject} follows a complete implementer retirement")
+    if chain["retirements"]:
+        first_retirement_index, _entry = journal_entry_from_proof(
+            entries, chain["retirements"][0]["proof"], subject,
+        )
+        terminal_index, _entry = journal_entry_from_proof(
+            entries, terminal["proof"], subject,
+        )
+        if first_retirement_index <= terminal_index:
+            fail(f"{subject} starts before its logical terminal")
+    return {
+        "schema": 1, "session": session, "context": expected_context,
+        "status": status, "archive": archive, "hide": hide,
+        "start": journal_line_proof(start_index),
+        "terminal": terminal,
+        "retirements": chain["retirements"],
+        "remaining": {
+            "status": not chain["retirements"],
+            "archive": not chain["archived"],
+            "hide": not chain["hidden"],
+        },
+    }
+
+
+def correction_implementer_retirement_chain(
+        entries, before, session, expected_context, subject,
+):
+    retirements = [(index, entry) for index, entry in enumerate(entries[:before])
+                   if entry.get("event") == "session-retired"
+                   and entry.get("session") == session]
+    status = None
+    archived = False
+    hidden = False
+    account = []
+    for index, entry in retirements:
+        actual_context = {
+            key: entry[key] for key in CONTEXT_FIELDS if key in entry
+        }
+        current_status = entry.get("status")
+        current_archived = entry.get("archived")
+        current_hidden = entry.get("hidden")
+        if actual_context != expected_context \
+                or current_status not in TERMINAL \
+                or not isinstance(current_archived, bool) \
+                or not isinstance(current_hidden, bool) \
+                or current_hidden and not current_archived \
+                or archived and not current_archived \
+                or hidden and not current_hidden \
+                or hidden:
+            fail(f"{subject} has a malformed implementer retirement chain")
+        if status is None:
+            status = current_status
+        elif current_status != status:
+            fail(f"{subject} changes status across its retirement chain")
+        archived = current_archived
+        hidden = current_hidden
+        account.append({
+            "proof": journal_line_proof(index), "status": current_status,
+            "archived": current_archived, "hidden": current_hidden,
+        })
+    return {
+        "status": status, "archived": archived, "hidden": hidden,
+        "complete": archived and hidden, "retirements": account,
+    }
+
+
+def correction_attempt_physical_start(
+        entries, before, built, correction, task, attempt, subject,
+        *, validate_sequence=True,
+):
+    starts = [
+        (index, entry) for index, entry in enumerate(entries[:before])
+        if entry.get("event") == "session-started"
+        and entry.get("mode") == "construction"
+        and entry.get("job") == "implementer"
+        and entry.get("lot") == built
+        and entry.get("correction") == correction
+        and entry.get("task") == task
+        and entry.get("attempt") == attempt
+    ]
+    if len(starts) != 1:
+        fail(f"{subject} has no one exact physical start for Correction attempt {attempt}")
+    start_index, start = starts[0]
+    validate_construction_session_start(
+        start, f"{subject}'s Correction attempt {attempt} start",
+        entries=entries, index=start_index, require_account=True,
+        validate_sequence=validate_sequence,
+    )
+    return start_index, start
+
+
+def correction_attempt_failure_retirement_status(failure_data):
+    obligation = failure_data.get("checker_obligation")
+    blocker_reviews = [
+        review for checker in ("design", "code")
+        if isinstance(obligation, dict)
+        and isinstance((review := obligation.get(f"{checker}_review")), dict)
+        and isinstance(review.get("contract_blocked"), list)
+        and review["contract_blocked"]
+    ]
+    if len(blocker_reviews) > 1:
+        fail("a Correction attempt failure has conflicting controller blockers")
+    return "superseded" if blocker_reviews else "failed"
+
+
+def correction_attempt_retry_account(
+        entries, before, built, correction, task, attempt, subject,
+):
+    start_index, start = correction_attempt_physical_start(
+        entries, before, built, correction, task, attempt, subject,
+        validate_sequence=False,
+    )
+    failures = [
+        (index, entry) for index, entry in enumerate(entries[start_index + 1:before],
+                                                      start_index + 1)
+        if entry.get("event") == "note" and entry.get("kind") == "attempt.failed"
+        and entry.get("lot") == built and entry.get("correction") == correction
+        and entry.get("task") == task and note_data(entry).get("attempt") == attempt
+    ]
+    successes = [
+        (index, entry) for index, entry in enumerate(entries[start_index + 1:before],
+                                                      start_index + 1)
+        if entry.get("event") == "note" and entry.get("kind") == "attempt.succeeded"
+        and entry.get("lot") == built and entry.get("correction") == correction
+        and entry.get("task") == task and note_data(entry).get("attempt") == attempt
+    ]
+    unit = {"kind": "correction", "built": built, "round": correction}
+    prior = None
+    terminal_index = None
+    retirement_before = None
+    expected_status = None
+    if successes:
+        if len(successes) != 1 or failures:
+            fail(f"{subject} has conflicting prior Correction attempt terminals")
+        success_index, success = successes[0]
+        validate_attempt_succeeded_entry(entries, success_index, success)
+        success_data = note_data(success)
+        rewinds = []
+        for rewind_index, rewind in enumerate(entries[success_index + 1:before],
+                                              success_index + 1):
+            rewind_data = note_data(rewind)
+            if rewind.get("event") != "note" or rewind.get("kind") != "rewind.done" \
+                    or rewind_data.get("schema") != 2 or rewind_data.get("unit") != unit:
+                continue
+            members = [
+                member for member in rewind_data.get("moved", [])
+                if isinstance(member, dict) and member.get("task") == task
+                and member.get("commit") == success_data.get("sha")
+            ]
+            if members:
+                if len(members) != 1:
+                    fail(f"{subject} has an ambiguous moved Correction task account")
+                rewinds.append((rewind_index, rewind, members[0]))
+        if len(rewinds) != 1:
+            fail(f"{subject} has no one exact rewind for its successful prior attempt")
+        rewind_index, rewind, moved = rewinds[0]
+        validate_correction_rewind_entry(entries, rewind_index, rewind, before=before)
+        terminal_index = success_index
+        retirement_before = rewind_index
+        expected_status = "done"
+        prior = {
+            "success": journal_line_proof(success_index),
+            "commit": success_data["sha"],
+            "gate": success_data["gate"],
+            "rewind": journal_line_proof(rewind_index),
+            "moved": moved,
+        }
+    elif len(failures) == 1:
+        failure_index, failure = failures[0]
+        if current_correction_stop_state(
+            entries, failure_index, subject, unit=unit,
+        ) is not None:
+            fail(f"{subject} follows a paused prior Correction attempt without its resume")
+        validate_attempt_failed_entry(entries, failure_index, failure)
+        failure_data = note_data(failure)
+        if failure_data.get("classification") == "C3.9d":
+            fail(f"{subject} follows a structural Correction attempt failure")
+        conflicting = [
+            entry for candidate_index, entry in enumerate(
+                entries[start_index + 1:before], start_index + 1,
+            )
+            if entry.get("event") == "note"
+            and entry.get("lot") == built and entry.get("correction") == correction
+            and entry.get("task") == task and note_data(entry).get("attempt") == attempt
+            and (entry.get("kind") in {"attempt.succeeded", "aborted"}
+                 or entry.get("kind") == "paused" and candidate_index > failure_index)
+        ]
+        if conflicting:
+            fail(f"{subject} follows a final prior Correction attempt terminal")
+        terminal_index = failure_index
+        expected_status = correction_attempt_failure_retirement_status(failure_data)
+        prior = {
+            "failure": journal_line_proof(failure_index),
+            "classification": failure_data["classification"],
+        }
+    elif not failures:
+        pauses = [
+            (index, entry) for index, entry in enumerate(
+                entries[start_index + 1:before], start_index + 1,
+            )
+            if entry.get("event") == "note" and entry.get("kind") == "paused"
+            and entry.get("lot") == built and entry.get("correction") == correction
+            and entry.get("task") == task and note_data(entry).get("attempt") == attempt
+        ]
+        if len(pauses) != 1:
+            fail(f"{subject} has no one exact prior Correction failure or pause")
+        pause_index, pause = pauses[0]
+        stopped = expected_attempt_stop_data(
+            entries, pause_index, pause, f"{subject}'s prior Correction pause",
+        )
+        stop = (pause_index, pause, stopped)
+        pause_proof = journal_line_proof(pause_index)
+        resumes = [
+            (index, entry) for index, entry in enumerate(
+                entries[pause_index + 1:before], pause_index + 1,
+            )
+            if entry.get("event") == "note" and entry.get("kind") == "resumed"
+            and entry.get("lot") == built and entry.get("correction") == correction
+            and note_data(entry).get("stop") == pause_proof
+        ]
+        if len(resumes) != 1:
+            fail(f"{subject} has no one exact resume for its prior Correction pause")
+        resume_index, resume = resumes[0]
+        correction_resume_account(
+            entries, resume_index, resume, stop, f"{subject}'s prior Correction resume",
+        )
+        if any(
+            entry.get("event") == "note"
+            and entry.get("lot") == built and entry.get("correction") == correction
+            and entry.get("task") == task and note_data(entry).get("attempt") == attempt
+            and entry.get("kind") in {"attempt.succeeded", "attempt.failed", "aborted"}
+            for entry in entries[start_index + 1:before]
+        ):
+            fail(f"{subject} follows another terminal for its paused Correction attempt")
+        terminal_index = pause_index
+        expected_status = "superseded"
+        prior = {
+            "paused": pause_proof,
+            "resumed": journal_line_proof(resume_index),
+        }
+    else:
+        fail(f"{subject} has several prior Correction attempt failures")
+    if any(
+        entry.get("event") == "note" and entry.get("kind") in {
+            "correction.round.built", "correction.round.resolved",
+            "correction.round.escalated",
+        } and note_data(entry).get("built") == built
+        and note_data(entry).get("round") == correction
+        for entry in entries[:before]
+    ):
+        fail(f"{subject} follows a terminal Correction Round")
+    expected_context = {
+        "mode": "construction", "lot": built, "correction": correction,
+        "task": task, "attempt": attempt, "job": "implementer",
+    }
+    chain = correction_implementer_retirement_chain(
+        entries, before, start["session"], expected_context, subject,
+    )
+    if not chain["complete"] or chain["status"] != expected_status:
+        fail(f"{subject} has no complete prior Correction implementer retirement")
+    retirement_indexes = [
+        journal_entry_from_proof(entries, member["proof"], subject)[0]
+        for member in chain["retirements"]
+    ]
+    if not retirement_indexes or retirement_indexes[0] <= terminal_index:
+        fail(f"{subject}'s prior Correction implementer retired before its terminal")
+    if retirement_before is not None and retirement_indexes[-1] >= retirement_before:
+        fail(f"{subject}'s successful prior implementer retired after its rewind")
+    if any(
+        entry.get("event") == "session-status" and entry.get("session") == start["session"]
+        for entry in entries[retirement_indexes[0] + 1:before]
+    ):
+        fail(f"{subject} has a status mutation after the prior retirement began")
+    return {
+        "schema": 1,
+        "unit": unit,
+        "task": task,
+        "attempt": attempt,
+        "session": start["session"],
+        "start": journal_line_proof(start_index),
+        **prior,
+        "retirements": chain["retirements"],
+    }
+
+
+def correction_attempt_sequence_account(
+        entries, before, built, correction, task, attempt, subject,
+):
+    if not construction_positive_integer(attempt):
+        fail(f"{subject} has no positive Correction attempt ordinal")
+    starts = [
+        (index, entry) for index, entry in enumerate(entries[:before])
+        if entry.get("event") == "session-started"
+        and entry.get("mode") == "construction"
+        and entry.get("job") == "implementer"
+        and entry.get("lot") == built
+        and entry.get("correction") == correction
+        and entry.get("task") == task
+    ]
+    for ordinal, (start_index, start) in enumerate(starts, 1):
+        if start.get("attempt") != ordinal:
+            fail(f"{subject} has a gap or reorder in its Correction attempt sequence")
+        validate_construction_session_start(
+            start, f"{subject}'s Correction attempt {ordinal} start",
+            entries=entries, index=start_index, require_account=True,
+            validate_sequence=False,
+        )
+        expected_prior = None if ordinal == 1 else correction_attempt_retry_account(
+            entries, start_index, built, correction, task, ordinal - 1, subject,
+        )
+        identity = note_data(start).get("attempt_identity")
+        if not isinstance(identity, dict) or identity.get("prior_attempt") != expected_prior:
+            fail(f"{subject} changes Correction attempt {ordinal}'s prior authority")
+    expected_attempt = len(starts) + 1
+    if attempt != expected_attempt:
+        fail(f"{subject} must start Correction attempt {expected_attempt}", {
+            "expected": expected_attempt, "actual": attempt,
+        })
+    if attempt == 1:
+        return None
+    return correction_attempt_retry_account(
+        entries, before, built, correction, task, attempt - 1, subject,
+    )
+
+
+def correction_attempt_terminal_prior_account(
+        entries, index, built, correction, task, attempt, subject,
+):
+    _start_index, start = correction_attempt_physical_start(
+        entries, index, built, correction, task, attempt, subject,
+    )
+    identity = note_data(start).get("attempt_identity")
+    if not isinstance(identity, dict):
+        fail(f"{subject} has no exact frozen physical attempt identity")
+    return identity.get("prior_attempt")
+
+
+def perform_session_retirement(args, me, target_context):
     reach_preflight = None
     if target_context.get("mode") == "amendment" \
             and target_context.get("mandate") == "reach" and args.status == "done":
@@ -12609,6 +18832,77 @@ def cmd_session_retired(args):
         fail(f"`{step}` failed after the status change", detail, journaled=True)
 
 
+def perform_correction_implementer_retirement(args, me, target_context, account):
+    remaining = account["remaining"]
+    if remaining["status"]:
+        ok, detail = attempt([
+            "update-session", args.session_id, "annotations",
+            f"set:bwr.status={args.status}",
+        ])
+        if not ok:
+            fail("the status change failed, so the retirement did not happen", detail)
+
+    archived = not remaining["archive"]
+    hidden = not remaining["hide"]
+    failed_step = None
+    if remaining["archive"]:
+        ok, detail = attempt(["update-session", args.session_id, "archive"])
+        archived = ok
+        if not ok:
+            failed_step = ("archive", detail)
+    if remaining["hide"] and failed_step is None:
+        ok, detail = attempt(["update-session", args.session_id, "hide"])
+        hidden = ok
+        if not ok:
+            failed_step = ("hide", detail)
+
+    append_event(
+        me["session_id"], "session-retired", session=args.session_id,
+        status=args.status, archived=archived, hidden=hidden, **target_context,
+    )
+    if failed_step:
+        refresh_dashboard()
+        step, detail = failed_step
+        fail(f"`{step}` failed after the status change", detail, journaled=True)
+
+
+def cmd_session_retired(args):
+    if args.status not in TERMINAL:
+        fail(f"`{args.status}` is not a terminal status",
+             "session-retired takes: " + " · ".join(TERMINAL)
+             + ". For a non-terminal change, use session-status.")
+    me = whoami()
+    target = run(["session", args.session_id])
+    target_context = context_of(target)
+    correction_implementer = target_context.get("mode") == "construction" \
+        and target_context.get("job") == "implementer" \
+        and "correction" in target_context
+    if not correction_implementer:
+        repair_journal_tail()
+        perform_session_retirement(args, me, target_context)
+        return
+
+    operation = f"correction-implementer-retirement:{args.session_id}"
+    with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+        repair_journal_tail()
+        current_target = run(["session", args.session_id])
+        current_context = context_of(current_target)
+        if current_context != target_context:
+            fail("the Correction implementer changed before retirement admission")
+        entries = journal_entries()
+        account = correction_implementer_retirement_account(
+            entries, len(entries), args.session_id, current_context,
+            args.status, args.archive, args.hide,
+            "the Correction implementer retirement",
+        )
+        lease.bind_generation(sha256_bytes(json.dumps(
+            account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")))
+        perform_correction_implementer_retirement(
+            args, me, current_context, account,
+        )
+
+
 def correction_gate_subagent_lease(event, data, lease, operation):
     correction_scope = isinstance(data, dict) and data.get("scope") in {
         "correction-task", "correction-review", "correction-baseline",
@@ -12638,6 +18932,31 @@ def correction_gate_subagent_lease(event, data, lease, operation):
         fail("the Correction gate boundary does not own its authority lease", str(exc))
 
 
+def correction_escalation_completeness_terminal(
+        entries, owner, context, data, subject,
+):
+    correction_escalation_completeness_result_account(data, subject)
+    candidates = [(index, opening) for index, opening in open_subagent_brackets(entries)
+                  if opening.get("by") == owner
+                  and opening.get("kind") == "completeness"
+                  and subagent_event_context(opening) == context
+                  and isinstance(opening.get("data"), dict)
+                  and opening["data"].get("owner") == "correction-escalation-plan"]
+    if len(candidates) != 1:
+        fail(f"{subject} has no one exact open plan-bound physical call")
+    opening_index, opening = candidates[0]
+    expected = current_correction_escalation_completeness_account(
+        entries, len(entries), context.get("lot"), subject,
+    )
+    correction_escalation_completeness_result_account(
+        data, subject, expected_totals=expected.get("semantic_totals"),
+    )
+    if opening.get("data") != expected \
+            or set(data) & CORRECTION_ESCALATION_COMPLETENESS_KEYS:
+        fail(f"{subject} changes its frozen plan authority")
+    return {**expected, **data}
+
+
 def cmd_subagent_started(args, *, correction_lease=None, correction_operation=None):
     if args.kind not in SUBAGENT_KINDS:
         fail(f"unknown subagent kind `{args.kind}`",
@@ -12645,6 +18964,66 @@ def cmd_subagent_started(args, *, correction_lease=None, correction_operation=No
     data = parse_data(args.data)
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
+    if correction_lease is None and args.kind in {
+        "completeness", "design-checker", "code-checker",
+    }:
+        entries = journal_entries()
+        lot = context.get("lot")
+        if correction_escalation_plan_origin(entries, lot):
+            operation_account = {
+                "kind": "correction-escalation-checker-start",
+                "lot": lot,
+                "checker": args.kind,
+                "task": context.get("task"),
+                "round": context.get("round"),
+            }
+            operation = "correction-escalation-checker-start:" + hashlib.sha256(
+                json.dumps(
+                    operation_account, sort_keys=True, separators=(",", ":"),
+                ).encode(),
+            ).hexdigest()
+            try:
+                with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+                    return cmd_subagent_started(
+                        args, correction_lease=lease,
+                        correction_operation=operation,
+                    )
+            except (OSError, ValueError) as exc:
+                fail("the Correction escalation checker lease failed", str(exc))
+    escalation_checker_owner = correction_operation is not None \
+        and correction_operation.startswith("correction-escalation-checker-start:")
+    if escalation_checker_owner:
+        try:
+            correction_lease.verify(correction_operation)
+        except (OSError, ValueError) as exc:
+            fail("the Correction escalation checker does not own its lease", str(exc))
+        if os.path.lexists(os.path.join(WORKSPACE, "plan-commit-in-progress")):
+            fail("a Correction escalation plan publication is unfinished")
+        if args.kind in {"design-checker", "code-checker"}:
+            entries = journal_entries()
+            require_no_open_correction_escalation_c2(
+                entries, len(entries), context.get("lot"),
+                "the Correction escalation checker opening",
+            )
+        if args.kind == "completeness":
+            if context.get("mode") != "construction" \
+                    or context.get("job") != "controller" \
+                    or not isinstance(context.get("lot"), str) \
+                    or any(context.get(key) is not None for key in (
+                        "correction", "task", "attempt", "round", "mandate",
+                    )):
+                fail("a Correction escalation completeness opening has another context")
+            if data is not None:
+                fail("a Correction escalation completeness opening derives its own plan")
+            entries = journal_entries()
+            correction_escalation_c2_opening_admission(
+                entries, len(entries), context.get("lot"),
+                "the Correction escalation completeness opening",
+            )
+            data = current_correction_escalation_completeness_account(
+                entries, len(entries), context.get("lot"),
+                "the Correction escalation completeness opening",
+            )
     if args.kind == "gate-runner":
         correction_gate_subagent_lease(
             "subagent-started", data, correction_lease, correction_operation,
@@ -12666,12 +19045,50 @@ def cmd_subagent_started(args, *, correction_lease=None, correction_operation=No
                         if key in data})
         if check == "diagnostic":
             context.pop("round", None)
+    elif args.kind == "completeness" and escalation_checker_owner:
+        pass
     elif data is not None:
         fail(f"subagent-started {args.kind} does not take structured data")
-    validate_subagent_transition(
-        journal_entries(), "subagent-started", me["session_id"], args.kind, context, data,
-    )
-    append_event(me["session_id"], "subagent-started", kind=args.kind, data=data, **context)
+    if escalation_checker_owner:
+        generation = hashlib.sha256(json.dumps({
+            "event": "subagent-started",
+            "kind": args.kind,
+            "context": context,
+            "data": data,
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        try:
+            correction_lease.bind_generation(generation)
+        except (OSError, ValueError) as exc:
+            fail("the Correction escalation checker changed after lease acquisition", str(exc))
+    if escalation_checker_owner and args.kind == "completeness":
+        def build_c2_opening(entries):
+            correction_lease.verify(correction_operation)
+            correction_escalation_c2_opening_admission(
+                entries, len(entries), context.get("lot"),
+                "the Correction escalation completeness opening",
+            )
+            current = current_correction_escalation_completeness_account(
+                entries, len(entries), context.get("lot"),
+                "the Correction escalation completeness opening",
+            )
+            if current != data:
+                fail("the Correction escalation completeness opening changed before append")
+            validate_subagent_transition(
+                entries, "subagent-started", me["session_id"], args.kind, context, data,
+                live=True,
+            )
+            return event_entry(
+                me["session_id"], "subagent-started", kind=args.kind,
+                data=data, **context,
+            )
+
+        write_validated_line(build_c2_opening)
+    else:
+        validate_subagent_transition(
+            journal_entries(), "subagent-started", me["session_id"], args.kind, context, data,
+            live=False,
+        )
+        append_event(me["session_id"], "subagent-started", kind=args.kind, data=data, **context)
     if args.kind in {"design-checker", "code-checker"}:
         print(json.dumps({
             "manifest": data["manifest"], "manifest_sha256": data["manifest_sha256"],
@@ -12698,6 +19115,93 @@ def cmd_subagent_ended(args, *, correction_lease=None, correction_operation=None
     data = parse_data(args.data)
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
+    if correction_lease is None and args.kind in {
+        "completeness", "design-checker", "code-checker",
+    }:
+        entries = journal_entries()
+        lot = context.get("lot")
+        if correction_escalation_plan_origin(entries, lot):
+            operation_account = {
+                "kind": "correction-escalation-checker-terminal",
+                "owner": me["session_id"],
+                "lot": lot,
+                "checker": args.kind,
+                "task": context.get("task"),
+                "attempt": context.get("attempt"),
+                "round": context.get("round"),
+            }
+            operation = "correction-escalation-checker-terminal:" + hashlib.sha256(
+                json.dumps(
+                    operation_account, sort_keys=True, separators=(",", ":"),
+                ).encode(),
+            ).hexdigest()
+            try:
+                with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+                    return cmd_subagent_ended(
+                        args, correction_lease=lease,
+                        correction_operation=operation,
+                    )
+            except (OSError, ValueError) as exc:
+                fail("the Correction escalation checker lease failed", str(exc))
+    escalation_checker_owner = correction_operation is not None \
+        and correction_operation.startswith("correction-escalation-checker-terminal:")
+    if escalation_checker_owner:
+        if args.kind not in {"completeness", "design-checker", "code-checker"}:
+            fail("a Correction escalation checker terminal has another kind")
+        if args.kind == "completeness" and (
+            context.get("mode") != "construction"
+            or context.get("job") != "controller"
+            or not isinstance(context.get("lot"), str)
+            or any(context.get(key) is not None for key in (
+                "correction", "task", "attempt", "round", "mandate",
+            ))
+        ):
+            fail("a Correction escalation completeness terminal has another context")
+        try:
+            correction_lease.verify(correction_operation)
+        except (OSError, ValueError) as exc:
+            fail("the Correction escalation checker does not own its lease", str(exc))
+
+        def build_terminal(entries):
+            if not correction_escalation_plan_origin(entries, context.get("lot")):
+                fail("the Correction escalation checker terminal lost its plan owner")
+            terminal_context = dict(context)
+            if args.kind == "completeness":
+                normalized = correction_escalation_completeness_terminal(
+                    entries, me["session_id"], terminal_context, data,
+                    "the Correction escalation completeness terminal",
+                )
+            else:
+                check = args.kind.removesuffix("-checker")
+                normalized = normalize_construction_ended(
+                    entries, data, terminal_context, check, args.round,
+                )
+                terminal_context.update({
+                    key: normalized[key]
+                    for key in ("lot", "correction", "task", "attempt")
+                    if key in normalized
+                })
+            validate_subagent_transition(
+                entries, "subagent-ended", me["session_id"], args.kind,
+                terminal_context, normalized,
+            )
+            generation = hashlib.sha256(json.dumps({
+                "event": "subagent-ended",
+                "kind": args.kind,
+                "context": terminal_context,
+                "data": normalized,
+            }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            try:
+                correction_lease.bind_generation(generation)
+            except (OSError, ValueError) as exc:
+                fail("the Correction escalation checker changed after lease acquisition", str(exc))
+            return event_entry(
+                me["session_id"], "subagent-ended",
+                kind=args.kind, data=normalized, **terminal_context,
+            )
+
+        write_validated_line(build_terminal)
+        return
     if args.kind == "gate-runner":
         correction_gate_subagent_lease(
             "subagent-ended", data, correction_lease, correction_operation,
@@ -12710,6 +19214,13 @@ def cmd_subagent_ended(args, *, correction_lease=None, correction_operation=None
         data = validate_product_finding_verifier("subagent-ended", data, args.mandate)
     elif args.kind == "consolidation":
         data = normalize_consolidation_ended(journal_entries(), data, args.round)
+    elif args.kind == "completeness" \
+            and correction_escalation_plan_origin(journal_entries(), context.get("lot")):
+        entries = journal_entries()
+        data = correction_escalation_completeness_terminal(
+            entries, me["session_id"], context, data,
+            "the Correction escalation completeness terminal",
+        )
     elif args.kind in {*CONSTRUCTION_CHECKERS.values(), "diagnostic"}:
         check = args.kind.removesuffix("-checker")
         data = normalize_construction_ended(
@@ -12774,12 +19285,51 @@ def open_subagent_brackets(entries):
     return open_calls
 
 
-def validate_subagent_transition(entries, event, owner, kind, context, data):
+def validate_subagent_transition(entries, event, owner, kind, context, data, *, live=False):
     candidate = {"event": event, "by": owner, "kind": kind, **context}
     if data is not None:
         candidate["data"] = data
     open_calls = open_subagent_brackets(entries)
     if event == "subagent-started":
+        if kind == "completeness" and isinstance(data, dict) \
+                and data.get("owner") == "correction-escalation-plan":
+            plan_index, _ = journal_entry_from_proof(
+                entries, data.get("plan"),
+                "the Correction escalation completeness opening's plan",
+            )
+            expected = correction_escalation_completeness_plan_account(
+                entries, plan_index, context.get("lot"),
+                "the Correction escalation completeness opening",
+                frozen=data, live=live,
+            )
+            if set(data) != CORRECTION_ESCALATION_COMPLETENESS_KEYS \
+                    or data != expected:
+                fail("the Correction escalation completeness opening changes its plan")
+            completed = []
+            lost = []
+            for terminal in entries[plan_index + 1:]:
+                if terminal.get("event") != "subagent-ended" \
+                        or terminal.get("kind") != "completeness" \
+                        or subagent_event_context(terminal) != context:
+                    continue
+                terminal_data = note_data(terminal)
+                terminal_account = correction_escalation_completeness_plan_account(
+                    entries, plan_index, context.get("lot"),
+                    "a durable Correction escalation completeness terminal",
+                    frozen=terminal_data,
+                )
+                result = correction_escalation_completeness_terminal_account(
+                    terminal_data, terminal_account,
+                    "a durable Correction escalation completeness terminal",
+                )
+                if result["kind"] == "result":
+                    completed.append(terminal)
+                else:
+                    lost.append(terminal_account)
+            if completed:
+                fail("this Correction escalation plan already has a usable C2 result")
+            if lost and any(data != lost_account for lost_account in lost):
+                fail("the replacement completeness call changes its lost C2 publication")
         duplicates = [opening for _, opening in open_calls
                       if subagent_terminal_matches(opening, candidate)
                       and subagent_terminal_matches(candidate, opening)]
@@ -13111,19 +19661,7 @@ def product_authority_chain(entries, account, before, subject):
 
 
 def refuse_foreign_correction_pending_owner(operation, args, data, me):
-    markers = {
-        "correction-allocation-supersede-in-progress": "correction-round-supersede.sh",
-        "correction-round-open-in-progress": "correction-round-open.sh",
-        "correction-round-built-in-progress": "correction-round-built.sh",
-        "correction-round-revision-in-progress": "correction-round-revise.sh",
-        "correction-attempt-failure-in-progress": "attempt-failed.sh --correction",
-        "correction-rewind-in-progress": "rewind.sh --correction",
-        "correction-attempt-stop-in-progress": "stop.sh <pause|abort> --correction",
-        "final-checker-contract-map-in-progress": "final-checker-contract-map.sh",
-        CORRECTION_VOID_MARKER: "correction-round-void.sh",
-        "correction-product-authority-in-progress": "correction-product-authority.sh",
-    }
-    for name, command in markers.items():
+    for name, command in CORRECTION_PENDING_OWNER_COMMANDS.items():
         marker = os.path.join(WORKSPACE, name)
         if not os.path.lexists(marker):
             continue
@@ -13151,7 +19689,27 @@ def refuse_foreign_correction_pending_owner(operation, args, data, me):
             ).encode()).hexdigest() \
             and account.get("work_unit") == data.get("unit") \
             and account.get("target_task") == args.task
-        if not same_owner and not product_step and not map_source_step:
+        map_escalation_step = False
+        if name == "final-checker-contract-map-in-progress" \
+                and args.kind == "correction.round.escalated" \
+                and isinstance(account, dict) and data.get("producer") == "ordinary":
+            try:
+                _failure_index, failure = journal_entry_from_proof(
+                    journal_entries(), data.get("blocker"),
+                    "the ordinary Correction escalation blocker",
+                )
+            except SystemExit:
+                raise
+            map_escalation_step = account.get("failure_route_sha256") == hashlib.sha256(
+                json.dumps(
+                    note_data(failure), sort_keys=True, separators=(",", ":"),
+                ).encode(),
+            ).hexdigest() and account.get("work_unit") == {
+                "kind": "correction", "built": data.get("built"),
+                "round": data.get("round"),
+            }
+        if not same_owner and not product_step and not map_source_step \
+                and not map_escalation_step:
             fail(
                 "another Correction Round authority owner is unfinished",
                 f"resume {command} with its exact recorded arguments",
@@ -13160,7 +19718,7 @@ def refuse_foreign_correction_pending_owner(operation, args, data, me):
 
 def helper_owned_correction_event(kind, owner_marker, operation, data):
     allowed = HELPER_OWNED_CORRECTION_NOTE_MARKERS.get(kind)
-    if kind in {"attempt.failed", "rewind.done"} and not (
+    if kind in {"attempt.failed", "attempt.succeeded", "rewind.done"} and not (
         isinstance(data, dict) and data.get("schema") == 2
     ):
         allowed = None
@@ -13219,7 +19777,53 @@ def helper_owned_correction_event(kind, owner_marker, operation, data):
         event = data
     else:
         event = account.get("event")
-    if owner_marker == "correction-rewind-in-progress" and event is None:
+    if owner_marker == "correction-rewind-in-progress" \
+            and kind == "correction.round.escalated":
+        owner = account.get("owner") if isinstance(account, dict) else None
+        public_crossed = [{
+            "kind": item.get("kind"), "proof": item.get("proof"),
+            "source_commit": item.get("source_commit"),
+            "source_tree": item.get("source_tree"),
+            "transition_sha256": item.get("transition_sha256"),
+        } for item in owner.get("crossed_authorities", [])] \
+            if isinstance(owner, dict) else None
+        completed = owner.get("completed") if isinstance(owner, dict) else None
+        expected_fields = {
+            "schema": 3,
+            "producer": "retained-authority-rewind",
+            "built": owner.get("built") if isinstance(owner, dict) else None,
+            "round": owner.get("round") if isinstance(owner, dict) else None,
+            "route": "sublot",
+            "opening": owner.get("opening") if isinstance(owner, dict) else None,
+            "latest_authority": owner.get("latest_authority")
+            if isinstance(owner, dict) else None,
+            "previous_rewind": owner.get("previous_rewind")
+            if isinstance(owner, dict) else None,
+            "cause": owner.get("cause") if isinstance(owner, dict) else None,
+            "target": owner.get("target") if isinstance(owner, dict) else None,
+            "crossed_authorities": public_crossed,
+            "completed_tasks": [item.get("task") for item in completed]
+            if isinstance(completed, list) else None,
+            "commit": owner.get("current_commit") if isinstance(owner, dict) else None,
+            "tree": owner.get("current_tree") if isinstance(owner, dict) else None,
+            "gate": owner.get("current_gate") if isinstance(owner, dict) else None,
+            "artifact_sha256": owner.get("artifact_sha256")
+            if isinstance(owner, dict) else None,
+            "artifact_object": owner.get("artifact_object")
+            if isinstance(owner, dict) else None,
+        }
+        if account.get("disposition") != "escalate" \
+                or account.get("phase") != "blocker-required" \
+                or account.get("owner_sha256") != hashlib.sha256(json.dumps(
+                    owner, sort_keys=True, separators=(",", ":"),
+                ).encode()).hexdigest() \
+                or not isinstance(data, dict) \
+                or any(data.get(key) != value for key, value in expected_fields.items()) \
+                or not isinstance(data.get("blocker"), dict) \
+                or data["blocker"].get("artifact") != account.get("blocker_path"):
+            fail("the retained-authority escalation changes its rewind owner")
+        event = data
+    elif owner_marker == "correction-rewind-in-progress" and event is None:
         event_base = account.get("event_base")
         if not isinstance(event_base, dict) or not isinstance(data, dict):
             fail("the correction rewind marker has no exact terminal base")
@@ -13248,6 +19852,13 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
     me = whoami()
     context = with_flag_overrides(caller_context(me), args)
     operation = lease_operation or correction_note_operation(args)
+    correction_plan_publication = args.kind == "plan.written" \
+        and correction_escalation_plan_origin(journal_entries(), context.get("lot"))
+    if correction_plan_publication and (
+        lease is None or not isinstance(lease_operation, str)
+        or not lease_operation.startswith("correction-escalation-plan-publication:")
+    ):
+        fail("a Correction escalation plan terminal is owned by plan-commit.sh")
     helper_event = helper_owned_correction_event(args.kind, owner_marker, operation, data)
     if helper_event is not None and (lease is None or data != helper_event):
         fail("the helper-owned correction terminal changes its exact pending operation")
@@ -13299,7 +19910,8 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
     } \
             and isinstance(data, dict) \
             and data.get("check") in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
-        context.update({key: data[key] for key in ("lot", "task", "attempt")})
+        context.update({key: data[key] for key in ("lot", "correction", "task", "attempt")
+                        if key in data})
         if data.get("check") == "diagnostic":
             context.pop("round", None)
     append_event(me["session_id"], "note", kind=args.kind,
@@ -13327,7 +19939,9 @@ def cmd_note_with_lease(args, lease, operation=None, *, owner_marker=None):
 def cmd_note(args):
     data = parse_data(args.data)
     if args.kind in HELPER_OWNED_CORRECTION_NOTE_MARKERS and (
-        args.kind not in {"attempt.failed", "rewind.done", "paused", "aborted"}
+        args.kind not in {
+            "attempt.failed", "attempt.succeeded", "rewind.done", "paused", "aborted",
+        }
         or isinstance(data, dict) and data.get("schema") == 2
         and (args.kind not in {"paused", "aborted"} or isinstance(data.get("attempt"), int))
     ):
@@ -13368,6 +19982,19 @@ def cmd_spec_state_check(args):
 def cmd_pass_verifier_check(args):
     """Authenticate the exact pass and report generation before opening a copy."""
     pass_verifier_state(args.commit, args.report_name)
+
+
+def cmd_product_pass_generation(args):
+    entries = journal_entries()
+    opening_index, _opening, _built, _commit = current_pass_opening(
+        entries, len(entries), "the Product pass-generation account",
+    )
+    if pass_closes(entries, opening_index, len(entries)):
+        fail("the Product pass-generation account belongs to a closed pass")
+    account = authenticated_product_pass_generation(
+        entries, opening_index, args.mandate, "the Product pass-generation account",
+    )
+    print(json.dumps(account, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def cmd_amendment_close_check(args):
@@ -13506,12 +20133,343 @@ def cmd_construction_verdict_check(args):
     print(journal_line_proof(resolution_index))
 
 
+def cmd_construction_checker_source_findings(args):
+    account = correction_checker_source_account(
+        journal_entries(), args.manifest,
+        "the Correction checker source-findings read",
+    )
+    print(json.dumps(account, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def cmd_construction_checker_task_show(args):
+    entries = journal_entries()
+    _opening_index, logical = construction_checker_manifest_generation(
+        entries, args.manifest, "the checker historical-task read",
+    )
+    if not construction_positive_integer(args.task) or args.task >= logical["task"]:
+        fail("the checker historical-task read requires one prior task")
+    path = PurePosixPath(args.path)
+    if not args.path or path.is_absolute() or path.as_posix() != args.path \
+            or ".." in path.parts:
+        fail("the checker historical-task read has no safe repository-relative path")
+    if logical.get("correction") is None:
+        ref_root = f"refs/bwr/{Path(WORKSPACE).name}/{logical['lot']}"
+    else:
+        ref_root = (
+            f"refs/bwr/{Path(WORKSPACE).name}/{logical['lot']}/"
+            f"correction-{logical['correction']}"
+        )
+    result = subprocess.run(
+        ["git", "-C", REPO, "show", f"{ref_root}/task-{args.task}:{args.path}"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        fail("the checker historical-task read has no exact accepted task file",
+             result.stderr.decode("utf-8", "replace"))
+    sys.stdout.buffer.write(result.stdout)
+
+
+def cmd_construction_diagnostic_manifest(args):
+    relative, account = publish_correction_diagnostic_manifest(
+        journal_entries(), args.built, args.correction, args.task, args.attempt,
+    )
+    print(json.dumps({
+        "manifest": relative,
+        "manifest_sha256": sha256_bytes((Path(WORKSPACE) / relative).read_bytes()),
+        **account,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def cmd_construction_diagnostic_account(args):
+    digest, account = correction_diagnostic_manifest_identity(
+        journal_entries(), args.manifest, "the Correction diagnostic account",
+    )
+    print(json.dumps({
+        "manifest": args.manifest, "manifest_sha256": digest, **account,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def cmd_construction_diagnostic_task_show(args):
+    entries = journal_entries()
+    _digest, account = correction_diagnostic_manifest_identity(
+        entries, args.manifest, "the diagnostic historical-task read",
+    )
+    if not construction_positive_integer(args.task) or args.task >= account["task"]:
+        fail("the diagnostic historical-task read requires one prior task")
+    path = PurePosixPath(args.path)
+    if not args.path or path.is_absolute() or path.as_posix() != args.path \
+            or ".." in path.parts:
+        fail("the diagnostic historical-task read has no safe repository-relative path")
+    unit = account["unit"]
+    ref_root = (
+        f"refs/bwr/{Path(WORKSPACE).name}/{unit['built']}/correction-{unit['round']}"
+    )
+    result = subprocess.run(
+        ["git", "-C", REPO, "show", f"{ref_root}/task-{args.task}:{args.path}"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        fail("the diagnostic historical-task read has no exact accepted Correction task file",
+             result.stderr.decode("utf-8", "replace"))
+    sys.stdout.buffer.write(result.stdout)
+
+
 def cmd_construction_origin_check(args):
     proof = validate_construction_lot_origin(
         journal_entries(), len(journal_entries()), args.lot,
         "the construction lot origin",
     )
     print(proof)
+
+
+def cmd_construction_plan_task_manifest(args):
+    journal_entries()
+    if not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", args.lot):
+        fail("the Construction task manifest has a malformed lot")
+    relative = f"docs/plans/{os.path.basename(WORKSPACE)}-{args.lot}-plan.md"
+    subject = f"the {args.lot} Construction task manifest"
+    if args.commit is None:
+        path = real_workspace_file(
+            PurePosixPath("plans", f"{args.lot}-plan.md"), subject,
+        )
+        try:
+            payload = Path(path).read_bytes()
+        except OSError as exc:
+            fail(f"{subject} is unreadable", exc)
+    else:
+        payload = committed_regular_payload(args.commit, relative, subject)
+    account = plan_task_manifest_account(payload, subject)
+    print(f"{account['tasks']} {account['manifest_sha']}")
+
+
+def cmd_construction_plan_publication_check(args):
+    entries = journal_entries()
+    account = correction_escalation_plan_preflight(
+        entries, args.lot, args.tasks,
+        "the Construction escalation plan publication preflight",
+    )
+    if account is None:
+        print("-")
+        return
+    print(json.dumps(
+        account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ))
+
+
+def inherited_correction_lease(args, subject):
+    try:
+        return CorrectionAuthorityLease.inherit(
+            Path(WORKSPACE), args.lease_operation, args.lease_fd,
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"{subject} does not own the shared Correction lease", str(exc))
+
+
+def cmd_construction_correction_authority_scope(args):
+    if correction_escalation_plan_origin(journal_entries(), args.lot):
+        print("correction-escalation")
+    else:
+        print("ordinary")
+
+
+def cmd_construction_correction_lease_check(args):
+    with inherited_correction_lease(
+        args, "the Construction Correction authority owner",
+    ) as lease:
+        lease.verify(args.lease_operation)
+
+
+def cmd_construction_escalation_attempt_admission(args):
+    with inherited_correction_lease(
+        args, "the Construction escalation attempt admission",
+    ) as lease:
+        lease.verify(args.lease_operation)
+        entries = journal_entries()
+        if not correction_escalation_plan_origin(entries, args.lot):
+            fail("the Construction escalation attempt lost its plan origin")
+        require_no_open_correction_escalation_c2(
+            entries, len(entries), args.lot,
+            "the Construction escalation attempt admission",
+        )
+
+
+def cmd_correction_escalation_stop_admission(args):
+    entries = journal_entries()
+    owners = [
+        (index, opening)
+        for index, opening in open_subagent_brackets(entries)
+        if opening.get("kind") == "completeness"
+        and isinstance(note_data(opening), dict)
+        and note_data(opening).get("owner") == "correction-escalation-plan"
+    ]
+    if owners:
+        fail("an open Correction escalation C2 owner blocks this bare stop")
+
+
+def cmd_construction_escalation_baseline_check(args):
+    entries = journal_entries()
+    account = correction_escalation_baseline_result_account(
+        entries, len(entries), args.lot, args.operation, args.commit,
+        "the Construction escalation C2.7 baseline",
+    )
+    print(json.dumps(account, sort_keys=True, separators=(",", ":")))
+
+
+def cmd_construction_plan_publication_account(args):
+    entries = journal_entries()
+    if not correction_escalation_plan_origin(entries, args.lot):
+        if args.preflight_sha256 != "-":
+            fail("an ordinary plan publication carries Correction escalation authority")
+        print(json.dumps(
+            {"tasks": args.tasks, "op": args.operation},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ))
+        return
+    source = correction_escalation_sublot_account(
+        entries, len(entries), args.lot,
+        "the Construction escalation plan publication",
+    )
+    current = outstanding_correction_escalation_sublot_set(
+        entries, len(entries), args.lot,
+        "the Construction escalation plan publication", source=source,
+    )
+    head = subprocess.run(
+        ["git", "-C", project_root(), "rev-parse", "HEAD^{commit}"],
+        capture_output=True, text=True,
+    )
+    if head.returncode != 0:
+        fail("the Construction escalation plan publication has no committed HEAD")
+    account = correction_escalation_plan_written_account(
+        entries, len(entries), args.lot, args.tasks, args.operation,
+        head.stdout.strip(), current, source,
+        "the Construction escalation plan publication", live=True,
+    )
+    if args.preflight_sha256 != account["preflight_sha256"]:
+        fail("the Construction escalation plan publication changed after preflight")
+    print(json.dumps(
+        account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ))
+
+
+def cmd_construction_plan_publication_append(args):
+    with inherited_correction_lease(
+        args, "the Construction escalation plan publication",
+    ) as lease:
+        entries = journal_entries()
+        if not correction_escalation_plan_origin(entries, args.lot):
+            fail("an ordinary plan publication cannot use the Correction append owner")
+        marker_path = os.path.join(WORKSPACE, "plan-commit-in-progress")
+        try:
+            metadata = os.lstat(marker_path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                fail("the plan publication marker is not one real regular file")
+            with open(marker_path, encoding="utf-8") as marker_file:
+                marker_lines = marker_file.read().splitlines()
+        except OSError as exc:
+            fail("the plan publication marker is unavailable", exc)
+        if len(marker_lines) != 4 or marker_lines[0] != args.lot \
+                or marker_lines[2] != args.operation \
+                or marker_lines[3] != args.preflight_sha256 \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", marker_lines[1]):
+            fail("the plan publication marker belongs to another operation")
+        source = correction_escalation_sublot_account(
+            entries, len(entries), args.lot,
+            "the Construction escalation plan publication",
+        )
+        current = outstanding_correction_escalation_sublot_set(
+            entries, len(entries), args.lot,
+            "the Construction escalation plan publication", source=source,
+        )
+        head = subprocess.run(
+            ["git", "-C", project_root(), "rev-parse", "HEAD^{commit}"],
+            capture_output=True, text=True,
+        )
+        if head.returncode != 0:
+            fail("the Construction escalation plan publication has no committed HEAD")
+        account = correction_escalation_plan_written_account(
+            entries, len(entries), args.lot, args.tasks, args.operation,
+            head.stdout.strip(), current, source,
+            "the Construction escalation plan publication", live=True,
+        )
+        if args.preflight_sha256 != account["preflight_sha256"]:
+            fail("the Construction escalation plan publication changed after preflight")
+        me = whoami()
+        context = caller_context(me)
+        if context.get("mode") != "construction" \
+                or context.get("job") != "controller" \
+                or context.get("lot") != args.lot:
+            fail("the Correction escalation plan append has another controller context")
+        note_args = argparse.Namespace(
+            kind="plan.written",
+            data=json.dumps(account, sort_keys=True, separators=(",", ":")),
+            text=None, text_file=None, mandate=None, task=None, round=None,
+        )
+        append_note(note_args, lease, args.lease_operation)
+
+
+def construction_escalation_rewind_lease(args, subject):
+    expected = f"correction-escalation-rewind:{args.lot}:{args.first}:{args.last}"
+    if args.lease_operation != expected:
+        fail(f"{subject} changes its exact shared lease operation")
+    lease = inherited_correction_lease(args, subject)
+    lease.verify(expected)
+    return lease
+
+
+def cmd_construction_escalation_rewind_check(args):
+    with construction_escalation_rewind_lease(
+        args, "the Construction escalation rewind preflight",
+    ):
+        expected = os.path.join(WORKSPACE, "rewind-in-progress.tmp")
+        if os.path.realpath(args.marker) != os.path.realpath(expected) \
+                or args.marker != expected:
+            fail("the Construction escalation rewind preflight has another owner path")
+        marker = correction_escalation_rewind_marker(
+            args.marker, args.lot, args.first, args.last,
+            "the Construction escalation rewind preflight",
+        )
+        correction_escalation_rewind_event(
+            journal_entries(), args.lot, args.first, args.last, marker,
+            "the Construction escalation rewind preflight", pre_mutation=True,
+        )
+
+
+def cmd_construction_escalation_rewind_append(args):
+    with construction_escalation_rewind_lease(
+        args, "the Construction escalation rewind terminal",
+    ) as lease:
+        marker_path = os.path.join(WORKSPACE, "rewind-in-progress")
+        me = whoami()
+        context = caller_context(me)
+        if context.get("mode") != "construction" \
+                or context.get("job") != "controller" \
+                or context.get("lot") != args.lot \
+                or any(context.get(key) is not None for key in (
+                    "correction", "task", "attempt", "round", "mandate",
+                )):
+            fail("the Construction escalation rewind has another controller context")
+
+        def build_terminal(entries):
+            marker = correction_escalation_rewind_marker(
+                marker_path, args.lot, args.first, args.last,
+                "the Construction escalation rewind terminal",
+            )
+            data = correction_escalation_rewind_event(
+                entries, args.lot, args.first, args.last, marker,
+                "the Construction escalation rewind terminal", pre_mutation=False,
+            )
+            generation = hashlib.sha256(json.dumps({
+                "kind": "rewind.done", "context": context, "data": data,
+            }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            try:
+                lease.bind_generation(generation)
+            except (OSError, ValueError) as exc:
+                fail("the Construction escalation rewind changed its lease generation", exc)
+            return event_entry(
+                me["session_id"], "note", kind="rewind.done", data=data, **context,
+            )
+
+        write_validated_line(build_terminal)
 
 
 def cmd_construction_failure_handoff(args):
@@ -13551,6 +20509,67 @@ def cmd_amendment_sweep_check(args):
     print(json.dumps(proof, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
+def correction_amendment_commit_owner(entries, amendment, subject):
+    openings = [
+        (index, entry) for index, entry in amendment_openings(entries, len(entries))
+        if note_data(entry).get("amendment") == amendment
+    ]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact AMENDMENT opening")
+    opening_index, opening = openings[0]
+    data = note_data(opening)
+    if data.get("origin") != "correction-round":
+        validate_amendment_opening_entry(entries, opening_index, opening)
+        return None
+    require_no_current_correction_stop(
+        entries, len(entries), data.get("built"), data.get("correction"), subject,
+    )
+    owner = current_correction_amendment_owner(
+        entries, len(entries), data.get("built"), data.get("correction"), subject,
+    )
+    if owner is None or owner["opening"] != journal_line_proof(opening_index):
+        fail(f"{subject} does not own the active Correction AMENDMENT")
+    return owner
+
+
+def cmd_correction_amendment_commit_scope(args):
+    owner = correction_amendment_commit_owner(
+        journal_entries(), args.amendment, "the AMENDMENT commit scope",
+    )
+    print("correction" if owner is not None else "ordinary")
+
+
+def validate_correction_amendment_commit_lease(args, subject):
+    expected_operation = f"correction-amendment-commit:{args.amendment}"
+    if args.lease_operation != expected_operation:
+        fail(f"{subject} changes its exact lease operation")
+    lease = inherited_correction_lease(args, subject)
+    lease.verify(expected_operation)
+    owner = correction_amendment_commit_owner(journal_entries(), args.amendment, subject)
+    if owner is None:
+        fail(f"{subject} does not belong to a Correction-origin AMENDMENT")
+    return lease, owner
+
+
+def cmd_correction_amendment_commit_lease_check(args):
+    with validate_correction_amendment_commit_lease(
+        args, "the Correction AMENDMENT commit owner",
+    )[0]:
+        return
+
+
+def cmd_correction_amendment_commit_append(args):
+    lease, _owner = validate_correction_amendment_commit_lease(
+        args, "the Correction AMENDMENT commit append",
+    )
+    with lease:
+        note_args = argparse.Namespace(
+            kind="amendment.committed", data=args.data,
+            text=None, text_file=None, mandate=None, task=None, round=None,
+        )
+        cmd_note_with_lease(note_args, lease, args.lease_operation)
+
+
 def cmd_construction_failure_check(args):
     entries = journal_entries()
     validate_construction_verdict_history(entries)
@@ -13565,7 +20584,10 @@ def cmd_construction_failure_check(args):
     )
     if identity.get("correction") is not None:
         print(json.dumps(
-            correction_attempt_failed_account(entries, len(entries), identity, base, report),
+            correction_attempt_failed_account(
+                entries, len(entries), identity, base, report,
+                require_workspace_document=True,
+            ),
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ))
         return
@@ -13604,22 +20626,7 @@ def cmd_notes(args):
     if not os.path.exists(JOURNAL):
         print("No journal yet — nothing has been recorded for this run.")
         return
-    notes, unreadable = [], 0
-    with open(JOURNAL, encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                entry = json.loads(raw)
-            except ValueError:
-                unreadable += 1
-                continue
-            if entry.get("event") == "note":
-                notes.append(entry)
-    if unreadable:
-        print(f"**progress WARNING** · {unreadable} unreadable line(s) skipped")
-        print()
+    notes = [entry for entry in journal_entries() if entry.get("event") == "note"]
     if not notes:
         print("No notes in the journal yet.")
         return
@@ -13710,6 +20717,10 @@ def build_parser():
     sp.add_argument("report_name")
     sp.set_defaults(func=cmd_pass_verifier_check)
 
+    sp = sub.add_parser("product-pass-generation", help=argparse.SUPPRESS)
+    sp.add_argument("mandate", choices=PRODUCT_REVIEW_MANDATES)
+    sp.set_defaults(func=cmd_product_pass_generation)
+
     sp = sub.add_parser("amendment-close-check", help=argparse.SUPPRESS)
     sp.add_argument("amendment", type=positive_int)
     sp.add_argument("spec_path")
@@ -13717,6 +20728,23 @@ def build_parser():
 
     sp = sub.add_parser("amendment-state-check", help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_amendment_state_check)
+
+    sp = sub.add_parser("correction-amendment-commit-scope", help=argparse.SUPPRESS)
+    sp.add_argument("amendment", type=positive_int)
+    sp.set_defaults(func=cmd_correction_amendment_commit_scope)
+
+    sp = sub.add_parser("correction-amendment-commit-lease-check", help=argparse.SUPPRESS)
+    sp.add_argument("amendment", type=positive_int)
+    sp.add_argument("lease_fd", type=int)
+    sp.add_argument("lease_operation")
+    sp.set_defaults(func=cmd_correction_amendment_commit_lease_check)
+
+    sp = sub.add_parser("correction-amendment-commit-append", help=argparse.SUPPRESS)
+    sp.add_argument("amendment", type=positive_int)
+    sp.add_argument("data", metavar="JSON")
+    sp.add_argument("lease_fd", type=int)
+    sp.add_argument("lease_operation")
+    sp.set_defaults(func=cmd_correction_amendment_commit_append)
 
     sp = sub.add_parser("amendment-sweep-check", help=argparse.SUPPRESS)
     sp.add_argument("round", type=positive_int)
@@ -13730,9 +20758,103 @@ def build_parser():
     sp.add_argument("correction", nargs="?", type=positive_int)
     sp.set_defaults(func=cmd_construction_verdict_check)
 
+    sp = sub.add_parser("construction-checker-source-findings", help=argparse.SUPPRESS)
+    sp.add_argument("manifest")
+    sp.set_defaults(func=cmd_construction_checker_source_findings)
+
+    sp = sub.add_parser("construction-checker-task-show", help=argparse.SUPPRESS)
+    sp.add_argument("manifest")
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("path")
+    sp.set_defaults(func=cmd_construction_checker_task_show)
+
+    sp = sub.add_parser("construction-diagnostic-manifest", help=argparse.SUPPRESS)
+    sp.add_argument("built")
+    sp.add_argument("correction", type=positive_int)
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("attempt", type=positive_int)
+    sp.set_defaults(func=cmd_construction_diagnostic_manifest)
+
+    sp = sub.add_parser("construction-diagnostic-task-show", help=argparse.SUPPRESS)
+    sp.add_argument("manifest")
+    sp.add_argument("task", type=positive_int)
+    sp.add_argument("path")
+    sp.set_defaults(func=cmd_construction_diagnostic_task_show)
+
+    sp = sub.add_parser("construction-diagnostic-account", help=argparse.SUPPRESS)
+    sp.add_argument("manifest")
+    sp.set_defaults(func=cmd_construction_diagnostic_account)
+
     sp = sub.add_parser("construction-origin-check", help=argparse.SUPPRESS)
     sp.add_argument("lot")
     sp.set_defaults(func=cmd_construction_origin_check)
+
+    sp = sub.add_parser("construction-plan-task-manifest", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("commit", nargs="?")
+    sp.set_defaults(func=cmd_construction_plan_task_manifest)
+
+    sp = sub.add_parser("construction-plan-publication-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("tasks", type=positive_int)
+    sp.set_defaults(func=cmd_construction_plan_publication_check)
+
+    sp = sub.add_parser("construction-correction-authority-scope", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.set_defaults(func=cmd_construction_correction_authority_scope)
+
+    sp = sub.add_parser("construction-correction-lease-check", help=argparse.SUPPRESS)
+    sp.add_argument("lease_fd", type=int)
+    sp.add_argument("lease_operation")
+    sp.set_defaults(func=cmd_construction_correction_lease_check)
+
+    sp = sub.add_parser("construction-escalation-attempt-admission", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("lease_fd", type=int)
+    sp.add_argument("lease_operation")
+    sp.set_defaults(func=cmd_construction_escalation_attempt_admission)
+
+    sp = sub.add_parser("correction-escalation-stop-admission", help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_correction_escalation_stop_admission)
+
+    sp = sub.add_parser("construction-escalation-baseline-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("operation")
+    sp.add_argument("commit")
+    sp.set_defaults(func=cmd_construction_escalation_baseline_check)
+
+    sp = sub.add_parser("construction-plan-publication-account", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("tasks", type=positive_int)
+    sp.add_argument("operation")
+    sp.add_argument("preflight_sha256")
+    sp.set_defaults(func=cmd_construction_plan_publication_account)
+
+    sp = sub.add_parser("construction-plan-publication-append", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("tasks", type=positive_int)
+    sp.add_argument("operation")
+    sp.add_argument("preflight_sha256")
+    sp.add_argument("lease_fd", type=int)
+    sp.add_argument("lease_operation")
+    sp.set_defaults(func=cmd_construction_plan_publication_append)
+
+    sp = sub.add_parser("construction-escalation-rewind-check", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("first", type=positive_int)
+    sp.add_argument("last", type=positive_int)
+    sp.add_argument("marker")
+    sp.add_argument("lease_fd", type=int)
+    sp.add_argument("lease_operation")
+    sp.set_defaults(func=cmd_construction_escalation_rewind_check)
+
+    sp = sub.add_parser("construction-escalation-rewind-append", help=argparse.SUPPRESS)
+    sp.add_argument("lot")
+    sp.add_argument("first", type=positive_int)
+    sp.add_argument("last", type=positive_int)
+    sp.add_argument("lease_fd", type=int)
+    sp.add_argument("lease_operation")
+    sp.set_defaults(func=cmd_construction_escalation_rewind_append)
 
     sp = sub.add_parser("construction-failure-handoff", help=argparse.SUPPRESS)
     sp.add_argument("lot")
@@ -13761,10 +20883,27 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
-    if args.command != "subagents-open":
+    read_only = {
+        "amendment-state-check",
+        "subagents-open", "product-pass-generation",
+        "construction-checker-source-findings",
+        "construction-checker-task-show",
+        "construction-diagnostic-task-show",
+        "construction-diagnostic-account",
+        "construction-failure-handoff",
+        "construction-plan-task-manifest",
+        "construction-verdict-check",
+        "notes",
+    }
+    self_managed_journal = {"session-status", "session-retired"}
+    if args.command not in read_only | self_managed_journal:
         repair_journal_tail()
-    args.func(args)
-    if args.command != "subagents-open":
+    cache_token = CORRECTION_CONTRACT_STATE_CACHE.set({})
+    try:
+        args.func(args)
+    finally:
+        CORRECTION_CONTRACT_STATE_CACHE.reset(cache_token)
+    if args.command not in read_only:
         refresh_dashboard()
 
 

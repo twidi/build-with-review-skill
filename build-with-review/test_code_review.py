@@ -12,6 +12,7 @@ import traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
 SOURCE = HERE / "prompts" / "construction" / "construction_review.py"
+CORRECTION_ROUND_SOURCE = HERE / "prompts" / "construction" / "correction_round.py"
 TESTS = []
 
 
@@ -32,6 +33,10 @@ class Fixture:
         self.workspace = self.repo / ".superpowers" / "bwr" / "2026-08-20-demo"
         (self.workspace / "prompts" / "construction").mkdir(parents=True)
         shutil.copyfile(SOURCE, self.workspace / "prompts" / "construction" / SOURCE.name)
+        shutil.copyfile(
+            CORRECTION_ROUND_SOURCE,
+            self.workspace / "prompts" / "construction" / CORRECTION_ROUND_SOURCE.name,
+        )
         self.run("git", "init", "-q", cwd=self.repo.parent)
         self.repo.mkdir(exist_ok=True)
         self.run("git", "init", "-q")

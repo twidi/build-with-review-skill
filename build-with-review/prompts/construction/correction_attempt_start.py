@@ -2,6 +2,7 @@
 """Start one Correction Round task attempt from its exact opened authority."""
 
 import argparse
+import contextvars
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from correction_authority import (  # noqa: E402
     CorrectionAuthorityLease,
     WorkspaceFileAnchor,
 )
+from correction_lifecycle import TaskFacts, admit_task  # noqa: E402
 from work_unit import resolve_correction  # noqa: E402
 
 
@@ -37,11 +39,14 @@ CORRECTION_OWNER_MARKERS = {
     "correction-attempt-stop-in-progress",
     "correction-product-authority-in-progress",
     "correction-round-built-in-progress",
+    "correction-terminal-restore-in-progress",
     "correction-round-open-in-progress",
     "correction-round-revision-in-progress",
     "correction-round-void-in-progress",
     "correction-rewind-in-progress",
     "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+    "correction-round-escalation-in-progress",
 }
 
 
@@ -86,21 +91,13 @@ def operation_identity(args):
     ).encode()).hexdigest()
 
 
-def used_attempt(entries, built, round_number, task, attempt):
-    return any(
-        entry.get("kind") in {"attempt.succeeded", "attempt.failed", "paused", "aborted"}
-        and entry.get("lot") == built and entry.get("correction") == round_number
-        and entry.get("task") == task
-        and (entry.get("data") or {}).get("attempt") == attempt
-        for entry in entries
-    )
-
-
 def start_owned(args):
     if args.retry != "-":
         refuse("Correction Round retry obligations are not available at this implementation checkpoint")
     try:
-        resolved = resolve_correction(args.built, args.round, args.task)
+        resolved = resolve_correction(
+            args.built, args.round, args.task, include_rewind_recoveries=True,
+        )
     except (OSError, ValueError) as exc:
         refuse(str(exc))
 
@@ -114,17 +111,18 @@ def start_owned(args):
         refuse(f"the tree is not clean:\n{dirty}")
 
     ref_root = resolved["ref_root"]
-    common_progress = HERE.parent / "common" / "progress.py"
-    verdicts = run(
-        str(common_progress), "construction-verdict-check", "history", check=False,
-    )
-    if verdicts.returncode != 0:
-        refuse("construction has an unsettled checker or diagnostic verdict")
-
     from work_unit import progress  # imported here to keep the CLI error boundary local
     entries = progress.journal_entries()
+    recoveries = resolved.pop("_rewind_success_recoveries")
+    projection = contextvars.copy_context()
+    projection.run(
+        progress.CORRECTION_REWIND_SUCCESS_RECOVERIES.set, tuple(recoveries),
+    )
+    projection.run(progress.CORRECTION_VERDICT_HISTORY_REWIND_PROJECTION.set, True)
     try:
-        stopped = progress.current_correction_stop_state(
+        projection.run(progress.validate_construction_verdict_history, entries)
+        stopped = projection.run(
+            progress.current_correction_stop_state,
             entries, len(entries), "the correction attempt start",
             unit={"kind": "correction", "built": args.built, "round": args.round},
         )
@@ -132,13 +130,29 @@ def start_owned(args):
         refuse(str(exc))
     if stopped is not None:
         refuse("the Correction Round is stopped; resume its exact pause before another attempt")
-    if used_attempt(entries, args.built, args.round, args.task, args.attempt):
-        refuse("the Correction Round attempt number was already used")
     try:
-        attempt_predecessor = progress.correction_attempt_predecessor_account(
+        prior_attempt = projection.run(
+            progress.correction_attempt_sequence_account,
+            entries, len(entries), args.built, args.round, args.task, args.attempt,
+            "the correction attempt start",
+        )
+        attempt_predecessor = projection.run(
+            progress.correction_attempt_predecessor_account,
             entries, len(entries), args.built, args.round, args.task,
             "the correction attempt start", require_first_missing=True,
         )
+        admit_task(TaskFacts(
+            opening_present=True,
+            active_owner=None,
+            accepted_tasks=args.task - 1,
+            task_count=resolved["task_count"],
+            task=args.task,
+            attempt=args.attempt,
+            expected_attempt=args.attempt,
+            retry_available=prior_attempt is not None,
+            retry_used=False,
+            terminal=None,
+        ), "retry" if prior_attempt is not None else "start")
     except ValueError as exc:
         refuse(str(exc))
     if run(
@@ -163,19 +177,21 @@ def start_owned(args):
 
     task = resolved["task"]
     try:
-        outstanding = progress.outstanding_final_checker_set(
+        outstanding = projection.run(
+            progress.outstanding_final_checker_set,
             entries, len(entries), args.built, args.round,
             "the correction attempt start",
         )
-        assigned = progress.assigned_final_checker_obligations(
+        assigned = projection.run(
+            progress.assigned_final_checker_obligations,
             outstanding, resolved["unit"], args.task, task,
             "the correction attempt start",
         )
     except ValueError as exc:
         refuse(str(exc))
     try:
-        _design_authority_index, design_proof_authority = \
-            progress.design_proof_authority_for_assigned_code(
+        _design_authority_index, design_proof_authority = projection.run(
+            progress.design_proof_authority_for_assigned_code,
                 entries, len(entries), outstanding, resolved["unit"], args.task,
                 task, "the correction attempt start",
             )
@@ -189,6 +205,7 @@ def start_owned(args):
         "task": args.task,
         "attempt": args.attempt,
         "attempt_predecessor": attempt_predecessor,
+        "prior_attempt": prior_attempt,
         "document": {
             "path": resolved["workspace_document"],
             "manifest_sha256": resolved["task_manifest_sha256"],
@@ -223,11 +240,15 @@ def start_owned(args):
 
 def start(args):
     operation = operation_identity(args)
+    from work_unit import progress  # imported here to share one command-local replay cache
+    cache_token = progress.CORRECTION_CONTRACT_STATE_CACHE.set({})
     try:
         with CorrectionAuthorityLease.acquire(WORKSPACE, operation):
             start_owned(args)
     except (OSError, ValueError) as exc:
         refuse(str(exc))
+    finally:
+        progress.CORRECTION_CONTRACT_STATE_CACHE.reset(cache_token)
 
 
 def main():

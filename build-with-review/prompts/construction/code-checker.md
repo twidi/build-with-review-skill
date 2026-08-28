@@ -7,9 +7,10 @@ test, every lint, every build the project has — reports nothing.
 prove the code is right: a wrong test over wrong code is green, and so is a test that
 asserts nothing at all.
 
-You are given: the workspace path, one exact workspace-relative finite immutable
-code-review manifest, `<workspace>/prompts/common/review-risk.md`, one private
-risk-filtered history path, and the occurrence label `Code checker round <R>`.
+You are given: the workspace path, the explicit work-unit form `ordinary` or `Correction`,
+one exact workspace-relative finite immutable code-review manifest,
+`<workspace>/prompts/common/review-risk.md`, one exact private risk-filtered history
+path, and the occurrence label `Code checker round <R>`.
 
 ---
 
@@ -17,9 +18,15 @@ risk-filtered history path, and the occurrence label `Code checker round <R>`.
 
 First read **`<workspace>/prompts/common/vocabulary.md`** and
 **`<workspace>/prompts/common/review-risk.md`**. Read the private history when it exists.
-Every logical round and physical regeneration in this attempt uses the same private
-history at
-`reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md`.
+Every logical round and physical regeneration in this attempt uses the same supplied
+private history. Its schemas are:
+
+```text
+reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md
+reports/construction/<built>/correction-<round>/task-<N>-attempt-<K>-code-risk-filtered.md
+```
+
+Do not construct either path. Use the supplied history and manifest paths exactly.
 
 Read the finite member count:
 
@@ -79,11 +86,22 @@ again. New findings carry no prior identity and use ordinary risk admission.
 **Read-only.** Do not change the working tree, the index, or HEAD. To see a file as it
 was at an earlier task, one script prints it without touching anything:
 
+For an ordinary work unit, use the existing schema-1 reader:
+
 ```sh
 <workspace>/prompts/construction/task-show.sh <lot> <N> <path>
 ```
 
-*It runs the equivalent of `git show refs/bwr/<run>/<lot>/task-<N>:<path>`.*
+For a Correction work unit, use only the manifest-bound schema-2 reader:
+
+```sh
+<workspace>/prompts/construction/task-show.sh manifest <manifest> <prior task N> <path>
+```
+
+The second form authenticates the supplied checker manifest through its exact journal
+opening. It derives `refs/bwr/<run>/<built>/correction-<round>` from that frozen
+authority. You never supply or construct that ref. An ordinary ref for the same built
+unit is not a fallback and cannot substitute for it.
 
 ---
 
@@ -223,6 +241,13 @@ Use this exact shape:
   "previous": [],
   "findings": []
 }
+```
+
+The shown manifest is the schema-4 ordinary path. For schema 5, copy the supplied exact
+Correction manifest instead:
+
+```json
+"manifest": "reports/construction/<built>/correction-<round>/task-<N>-attempt-<K>-code-round-<R>-<gate>-manifest.json"
 ```
 
 For an adverse result, use `"verdict":"findings"` and contiguous finding objects:

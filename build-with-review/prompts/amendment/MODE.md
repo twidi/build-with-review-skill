@@ -229,13 +229,46 @@ progress.py note amendment.opened \
   --text-file "$JOURNAL_TEXT_FILE"
 ```
 
-`origin` is exactly `construction` or `product-review`. A construction opening normally
+`origin` is exactly `construction`, `product-review`, or `correction-round`. A construction opening normally
 follows the validated SPEC close and cannot bypass an open product-review pass. A run
 whose one `run.started` begins directly in Construction has no `spec.written`. In that
 case, `progress.py` freezes `construction_source` from that run, the current lot's latest
 `plan.written`, the current committed canonical plan, its one structural root `Spec:`
 line, and both committed document hashes. Do not supply, edit or infer that account.
 A product-review opening consumes the exact current pass and its built lot.
+
+### Correction Round origin
+
+When the durable handoff comes from one active Correction Round, use this branch instead
+of the ordinary Construction and Product branches. Keep the controller context exact:
+`bwr.mode=amendment`, `bwr.job=controller`, `bwr.lot=<built>`, and
+`bwr.correction=<round>`. Do not replace `<built>` with an ordinary lot identity.
+
+Before the opening, authenticate the one current work unit:
+
+```sh
+python3 <workspace>/prompts/construction/work_unit.py resolve-correction <built> <round>
+```
+
+The result freezes the Correction opening, artifact, execution authority, accepted task
+prefix, current retry set, report root, ref root, and current commit/tree. Use the next
+unused Amendment number once. Append only the minimal opening identity:
+
+```sh
+progress.py note amendment.opened \
+  --data '{"amendment":<N>,"origin":"correction-round"}' \
+  --text-file "$JOURNAL_TEXT_FILE"
+```
+
+Do not supply `built`, `correction`, retry-set, artifact, commit, tree, gate, task, or
+execution-authority fields. `progress.py` derives and freezes the complete Correction
+owner. The opening suspends all Correction mutation until one exact return terminal
+consumes it. Do not open a second Amendment for the suspended owner.
+
+The same Amendment writing, fixer, Reach, and consolidation lifecycle follows. A4 uses
+the helper-owned `amendment-commit.sh <N> <spec path> "<subject>" -` path. That helper
+acquires the Correction authority lease before document copy, staging, marker, commit,
+ref, or journal mutation. It retains the lease through its durable terminal and cleanup.
 
 The line is the order's identity and return address. Its text is non-empty and contains
 the complete order plus the exact phase return. Once it exists, the ruling is not
@@ -907,7 +940,10 @@ task, the plan being written; the run resumes where it stood.
    <workspace>/prompts/amendment/amendment-commit.sh <N> <spec path> "<subject>" <lot|->
    ```
 
-   **The last argument is the lot whose attempt is still in flight** — a blocked or
+   For `origin:"correction-round"`, the last argument is exactly `-`. The helper derives
+   the suspended Correction owner and uses its dedicated Correction commit path.
+
+   For ordinary origins, **the last argument is the lot whose attempt is still in flight** — a blocked or
    parked implementer counts — or `-` when nothing is. It is not bookkeeping: **this is
    one of the two commits of this workflow made while an attempt can be in flight** —
    the other is the DECISION channel's in-place spec commit — and both move `HEAD`
@@ -1013,6 +1049,116 @@ task, the plan being written; the run resumes where it stood.
    as it reported.
 
 ---
+
+## Returning to a Correction Round
+
+This section replaces **Going back** when the current opening has
+`origin:"correction-round"`. Keep `bwr.lot=<built>` and `bwr.correction=<round>` through
+the complete return. Do not run ordinary attempt, plan, C2, sub-lot, or ordinary rewind
+commands. Do not open a second Amendment while this owner is active.
+
+First read `<workspace>/prompts/amendment/correction-return-format.md`. Classify every
+source finding exactly once as `absorbed` or `remaining`. Preserve the original finding
+order. Derive the complete preserved, removed, and remaining task projection. Reconcile
+every accepted contribution as preserved or rewound. Reconcile every final-checker
+obligation through the same canonical retry transition.
+
+If any accepted contribution cannot remain exact after the Amendment, run only:
+
+```sh
+<workspace>/prompts/construction/rewind.sh --correction \
+  <built> <round> <earliest affected task> <next attempt> <amendment.committed proof>
+```
+
+The cause proof is the exact current `amendment.committed` journal proof. The helper
+owns the complete `amendment-rebase` rewind, archives moved stable refs, replays ordered
+retained controller authority, and binds each rewound contribution. If it prints
+`BASELINE REQUIRED`, run the exact printed
+`correction-round-baseline.sh <built> <round>` command. Then rerun the same rewind
+command once. Never use the ordinary rewind route for this owner.
+
+Before creating the schema-2 Correction artifact, read
+`<workspace>/prompts/construction/correction-round-format.md` in full. Create the
+artifact with its closed schema-2 grammar and validate its complete identity. Then read
+`<workspace>/prompts/amendment/correction-return-format.md` again and write the one
+canonical JSON return file at its derived path. Perform its bounded self-review once.
+Choose exactly one route:
+
+```sh
+# Remaining findings still form a bounded Correction task graph.
+<workspace>/prompts/construction/correction-round-rebase.sh \
+  <built> <round> <amendment> <earliest remaining task>
+
+# The Amendment absorbed every remaining finding and retry obligation.
+<workspace>/prompts/construction/correction-round-resolve.sh \
+  <built> <round> <amendment>
+
+# Remaining findings require structural sub-lot escalation.
+<workspace>/prompts/construction/correction-round-escalate.sh \
+  <built> <round> <amendment>
+```
+
+For the structural route, also read
+`<workspace>/prompts/amendment/correction-escalation-format.md`. Write its one canonical
+Markdown artifact. It contains every and only the return's remaining findings,
+preserved contributions, blocker, required outcome, and carried consumer requirements.
+
+Each helper owns the nested document-copy lifecycle, the post-document baseline, the
+immutable return object, the optional immutable escalation object, the terminal append,
+and exact marker cleanup. Run only the selected helper. Its output names the next exact
+action. Re-run the same command after each completed action; do not switch routes.
+
+### Bind the controller after the exact Correction return
+
+The Correction-origin AMENDMENT entry annotations remain unchanged through its complete
+return helper and marker cleanup. After that exact terminal, use
+`mcp__twicc__update_session_annotations` on your own exact session before the successor:
+
+- **Rebase** — Set `bwr.mode=construction`, `bwr.job=controller`,
+  `bwr.lot=<built>`, and `bwr.correction=<round>`. Preserve `bwr.schema`,
+  `bwr.feature`, and `bwr.status`. Remove `bwr.task`, `bwr.attempt`, `bwr.round`,
+  `bwr.mandate`, `bwr.position`, `bwr.pass`, and `bwr.generation`. Read the annotations
+  back before any Correction resolver or baseline command.
+- **Resolved** — Set `bwr.mode=product-review`, `bwr.job=controller`, and
+  `bwr.lot=<built>`. Preserve `bwr.schema`, `bwr.feature`, and `bwr.status`. Remove
+  `bwr.correction`, `bwr.task`, `bwr.attempt`, `bwr.round`, `bwr.mandate`,
+  `bwr.position`, `bwr.pass`, and `bwr.generation`. Read the annotations back before
+  the Product successor `pass.opened`.
+- **Structural escalation** — Complete the exact producer-specific structural successor.
+  Resume the earliest missing durable tail. Never repeat a prefix or create a second
+  successor. First finish its one `sublot.allocated` and one `sublot.opened`. Set
+  `bwr.mode=construction`, `bwr.job=controller`, and
+  `bwr.lot=<allocated sub-lot>`. Preserve `bwr.schema`, `bwr.feature`, and
+  `bwr.status`. Remove `bwr.correction`, `bwr.task`, `bwr.attempt`, `bwr.round`,
+  `bwr.mandate`, `bwr.position`, `bwr.pass`, and `bwr.generation`. Read the annotations
+  back before the ordinary plan route. Complete the plan consumer map, run
+  `construction-plan-publication-check`, then run `plan-commit.sh`. Never enter Product
+  or delivery from this `correction.round.escalated` terminal.
+
+Each row is one complete generation. Do not set a task or pass identity on the
+controller. A refused update changes no route authority and permits only the same update.
+
+The Correction return resume boundary is the exact retained owner and helper phase:
+
+| Durable prefix | Exact continuation |
+|---|---|
+| **opening-only**: `amendment.opened` without `amendment.committed` | Resume this Amendment number through A2–A4. Keep the same built and round. |
+| **committed owner** without a Correction return marker | Rebuild the exhaustive return account. Select one route once. Start only that helper. |
+| **prepared / document-copy** | Re-run the selected helper. It authenticates or resumes the exact nested copy owner and finishes it before advancing. |
+| **document commit / baseline opening or terminal** | Run only the baseline command printed by the helper. Then re-run the selected helper. |
+| **return-required** before the **immutable return object** | Write or correct only the canonical return JSON. Re-run the same helper. |
+| **escalation-required** | Write or correct only the canonical structural escalation Markdown. Re-run the same structural helper. |
+| **terminal-ready** before append | Re-run the same helper. It authenticates the frozen marker and appends exactly one terminal. |
+| terminal durable before **marker cleanup** | Re-run the same helper. It validates the terminal at its exact prefix and removes only the completed marker generation. |
+
+Pause, resume, abort, handover, and compaction preserve this exact owner. On resume, run
+`prompts/construction/work_unit.py resolve-correction <built> <round>` only where the helper permits the
+suspended owner. A valid return terminal restores normal Correction work. `rebase`
+continues at its exact current baseline and first missing task. `resolved` enters only
+the Correction PRODUCT REVIEW successor and never delivery directly. Structural
+escalation continues through its exact producer-specific `sublot.allocated`,
+`sublot.opened`, plan consumer map, `construction-plan-publication-check`, and
+`plan-commit.sh` tail. It never enters Product or delivery.
 
 ## Going back
 

@@ -4,7 +4,6 @@
 import argparse
 import hashlib
 import json
-import os
 import pathlib
 import re
 import subprocess
@@ -19,11 +18,15 @@ sys.path.insert(0, str(COMMON))
 import progress  # noqa: E402
 from correction_authority import (  # noqa: E402
     CorrectionAuthorityLease,
+    WorkspaceFileAnchor,
     publish_content_object,
+    replacement_recovery_relative_path,
+    validate_content_object,
 )
 from correction_round import parse_artifact  # noqa: E402
 
 MARKER_NAME = "correction-round-revision-in-progress"
+REVISION_REASON = "task-contract-correction"
 BLOCKING_MARKERS = {
     "attempt-in-flight",
     "gate-check-in-progress",
@@ -38,11 +41,14 @@ BLOCKING_MARKERS = {
     "correction-round-open-in-progress",
     "correction-round-void-in-progress",
     "correction-round-built-in-progress",
+    "correction-terminal-restore-in-progress",
     "correction-attempt-failure-in-progress",
     "correction-rewind-in-progress",
     "correction-attempt-stop-in-progress",
     "correction-product-authority-in-progress",
     "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+    "correction-round-escalation-in-progress",
 }
 
 
@@ -63,7 +69,10 @@ def current_artifact(built, correction):
     return relative.as_posix(), path.read_bytes(), artifact
 
 
-def revision_projection(entries, built, correction, from_task):
+def revision_projection(entries, built, correction, from_task, *, publish_object=True):
+    blocker = progress.correction_revision_blocker_account(
+        entries, len(entries), built, correction, "the Correction Round revision",
+    )
     state = progress.current_correction_contract_state(
         entries, len(entries), built, correction, "the Correction Round revision",
     )
@@ -76,16 +85,23 @@ def revision_projection(entries, built, correction, from_task):
         entries, len(entries), state, projection, "the Correction Round revision",
         artifact=artifact,
     )
-    published = publish_content_object(WORKSPACE, built, payload, ".md")
+    if publish_object:
+        published = publish_content_object(WORKSPACE, built, payload, ".md")
+    else:
+        if hashlib.sha256(payload).hexdigest() != artifact["artifact_sha256"]:
+            fail("the retained Correction Round revision changes its artifact bytes")
+        published = validate_content_object(
+            WORKSPACE, built, artifact["artifact_sha256"], ".md",
+        )
     projection["artifact_object"] = str(published.relative_to(WORKSPACE))
     if relative != state["path"]:
         fail("the Correction Round revision changes its canonical artifact path")
-    return state, relative, artifact, projection, accepted
+    return state, relative, artifact, projection, accepted, blocker
 
 
-def derive_pre_task_event(entries, built, correction, from_task):
-    state, relative, artifact, projection, accepted = revision_projection(
-        entries, built, correction, from_task,
+def derive_pre_task_event(entries, built, correction, from_task, *, publish_object=True):
+    state, relative, artifact, projection, accepted, blocker = revision_projection(
+        entries, built, correction, from_task, publish_object=publish_object,
     )
     if accepted:
         fail("the pre-task revision follows accepted correction work")
@@ -108,12 +124,13 @@ def derive_pre_task_event(entries, built, correction, from_task):
         "revision": state["revision"] + 1,
         "previous": state["proof"],
         "previous_execution_authority_sha256": state["execution_authority_sha256"],
-        "reason": "task-contract-correction",
+        "reason": REVISION_REASON,
         "from_task": from_task,
         "artifact_sha256": projection["artifact_sha256"],
         "artifact_object": projection["artifact_object"],
         "controller_sha256": artifact["controller_sha256"],
         "manifest_sha256": artifact["manifest_sha256"],
+        "blocker": blocker,
         "commit": state["commit"],
         "tree": state["tree"],
         "gate": state["gate"],
@@ -127,9 +144,11 @@ def derive_pre_task_event(entries, built, correction, from_task):
     return event
 
 
-def post_task_static_account(entries, built, correction, from_task, operation, reason_sha256):
-    state, relative, artifact, projection, accepted = revision_projection(
-        entries, built, correction, from_task,
+def post_task_static_account(
+        entries, built, correction, from_task, operation, *, publish_object=True,
+):
+    state, relative, artifact, projection, accepted, blocker = revision_projection(
+        entries, built, correction, from_task, publish_object=publish_object,
     )
     if not accepted:
         fail("the post-task revision has no accepted correction task")
@@ -140,7 +159,7 @@ def post_task_static_account(entries, built, correction, from_task, operation, r
     return {
         "schema": 1,
         "operation": operation,
-        "reason_sha256": reason_sha256,
+        "reason": REVISION_REASON,
         "built": built,
         "round": correction,
         "from_task": from_task,
@@ -151,6 +170,7 @@ def post_task_static_account(entries, built, correction, from_task, operation, r
         "artifact_object": projection["artifact_object"],
         "controller_sha256": artifact["controller_sha256"],
         "manifest_sha256": artifact["manifest_sha256"],
+        "blocker": blocker,
         "document": relative,
         "parent_commit": parent,
         "retry_transition": progress.correction_revision_retry_transition(
@@ -159,13 +179,13 @@ def post_task_static_account(entries, built, correction, from_task, operation, r
     }, state, artifact
 
 
-def operation_identity(built, correction, from_task, reason):
+def operation_identity(built, correction, from_task):
     payload = {
         "kind": "correction-round-revision",
         "built": built,
         "round": correction,
         "from_task": from_task,
-        "reason_sha256": hashlib.sha256(reason.encode()).hexdigest(),
+        "reason": REVISION_REASON,
     }
     return f"correction-revision:{hashlib.sha256(canonical_bytes(payload)).hexdigest()}"
 
@@ -177,53 +197,78 @@ def ensure_no_foreign_owner():
             fail(f"another workflow owner is unfinished: {name}")
 
 
-def atomic_marker(path, account):
-    if path.exists() or path.is_symlink():
-        fail("another Correction Round revision owner is pending")
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    try:
-        payload = canonical_bytes(account) + b"\n"
-        if os.write(descriptor, payload) != len(payload):
-            fail("the Correction Round revision marker had a short write")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
+def marker_anchor(subject="the Correction Round revision owner"):
+    return WorkspaceFileAnchor(WORKSPACE, MARKER_NAME, subject)
 
 
-def read_marker(path):
+def parse_marker_payload(payload):
     try:
-        status = path.lstat()
-        payload = path.read_bytes()
         account = json.loads(payload)
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError) as exc:
         fail(f"the Correction Round revision marker is malformed: {exc}")
-    if path.is_symlink() or not path.is_file() or status.st_nlink < 1 \
-            or canonical_bytes(account) + b"\n" != payload:
-        fail("the Correction Round revision marker is not one canonical real file")
+    if canonical_bytes(account) + b"\n" != payload:
+        fail("the Correction Round revision marker is not canonical")
     return account
 
 
-def replace_marker(path, account):
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
+def read_marker():
+    with marker_anchor() as anchored:
+        return parse_marker_payload(anchored.read_regular())
+
+
+def publish_marker(account):
+    payload = canonical_bytes(account) + b"\n"
     try:
-        payload = canonical_bytes(account) + b"\n"
-        if os.write(descriptor, payload) != len(payload):
-            fail("the Correction Round revision marker had a short replacement write")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
+        with marker_anchor() as anchored:
+            anchored.publish(payload, mode=0o600)
+    except FileExistsError:
+        fail("another Correction Round revision owner is pending")
+
+
+def marker_recovery_generations(operation):
+    pattern = f".{MARKER_NAME}.correction-recovery-*"
+    generations = []
+    for path in sorted(WORKSPACE.glob(pattern)):
+        relative = path.relative_to(WORKSPACE).as_posix()
+        with WorkspaceFileAnchor(
+            WORKSPACE, relative, "a Correction Round revision marker recovery",
+        ) as recovery:
+            payload = recovery.read_regular()
+        account = parse_marker_payload(payload)
+        expected = replacement_recovery_relative_path(MARKER_NAME, payload)
+        if relative != expected.as_posix() or account.get("operation") != operation:
+            fail("the Correction Round revision marker recovery has another owner")
+        generations.append((relative, payload, account))
+    return generations
+
+
+def replace_marker(anchored, predecessor_payload, account):
+    payload = canonical_bytes(account) + b"\n"
+    anchored.replace_exact(
+        hashlib.sha256(predecessor_payload).hexdigest(), payload, mode=0o600,
+    )
+
+
+def validate_marker_recoveries(entries, built, correction, operation):
+    recoveries = marker_recovery_generations(operation)
+    for _relative, _payload, account in recoveries:
+        reproject_marker(entries, account, built, correction, operation)
+    return recoveries
+
+
+def remove_marker(anchored, payload, operation, entries, built, correction):
+    recoveries = validate_marker_recoveries(
+        entries, built, correction, operation,
+    )
+    for relative, recovery_payload, _account in recoveries:
+        with WorkspaceFileAnchor(
+            WORKSPACE, relative, "a completed Correction Round revision recovery",
+        ) as recovery:
+            current = recovery.read_regular()
+            if current != recovery_payload:
+                fail("a Correction Round revision recovery changed before cleanup")
+            recovery.remove_exact(hashlib.sha256(current).hexdigest())
+    anchored.remove_exact(hashlib.sha256(payload).hexdigest())
 
 
 def git_text(*arguments):
@@ -264,6 +309,67 @@ def validate_post_task_marker(account, expected):
             or not isinstance(account.get("event"), dict)
         ):
             fail("the terminal-ready Correction Round revision has no exact event")
+
+
+def retained_marker_identity(account, built, correction):
+    if not isinstance(account, dict) or account.get("reason") != REVISION_REASON:
+        fail("the retained Correction Round revision has malformed owner identity")
+    if "phase" in account:
+        marker_built = account.get("built")
+        marker_round = account.get("round")
+        from_task = account.get("from_task")
+    else:
+        event = account.get("event")
+        if not isinstance(event, dict):
+            fail("the retained Correction Round revision has no event identity")
+        marker_built = event.get("built")
+        marker_round = event.get("round")
+        from_task = event.get("from_task")
+    if marker_built != built or marker_round != correction \
+            or isinstance(from_task, bool) or not isinstance(from_task, int) \
+            or from_task < 1:
+        fail("the retained Correction Round revision belongs to another work unit")
+    operation = operation_identity(built, correction, from_task)
+    if account.get("operation") != operation:
+        fail("the retained Correction Round revision has malformed operation identity")
+    return from_task, operation
+
+
+def reproject_marker(entries, account, built, correction, operation):
+    from_task, current_operation = retained_marker_identity(account, built, correction)
+    if current_operation != operation:
+        fail("the retained Correction Round revision changes its operation")
+    event = account.get("event")
+    if event is not None:
+        terminals = [(index, entry) for index, entry in enumerate(entries)
+                     if entry.get("kind") == "correction.round.revised"
+                     and progress.note_data(entry) == event]
+        if len(terminals) > 1:
+            fail("the retained Correction Round revision terminal is duplicated")
+        if terminals:
+            terminal_index, terminal = terminals[0]
+            progress.validate_correction_round_revision_entry(
+                entries, terminal_index, terminal,
+            )
+            entries = entries[:terminal_index]
+    if "phase" in account:
+        static, _state, _artifact = post_task_static_account(
+            entries, built, correction, from_task, operation, publish_object=False,
+        )
+        validate_post_task_marker(account, static)
+    else:
+        event = derive_pre_task_event(
+            entries, built, correction, from_task, publish_object=False,
+        )
+        expected = {
+            "schema": 1,
+            "operation": operation,
+            "reason": REVISION_REASON,
+            "event": event,
+        }
+        if account != expected:
+            fail("the pending Correction Round revision changes its frozen account")
+    return from_task
 
 
 def document_commit_matches(account):
@@ -366,12 +472,13 @@ def revision_event(account, gate):
         "previous_execution_authority_sha256": account[
             "previous_execution_authority_sha256"
         ],
-        "reason": "task-contract-correction",
+        "reason": REVISION_REASON,
         "from_task": account["from_task"],
         "artifact_sha256": account["artifact_sha256"],
         "artifact_object": account["artifact_object"],
         "controller_sha256": account["controller_sha256"],
         "manifest_sha256": account["manifest_sha256"],
+        "blocker": account["blocker"],
         "commit": account["commit"],
         "tree": account["tree"],
         "gate": gate,
@@ -391,8 +498,29 @@ def note_args(event):
 def run(args):
     entries = progress.journal_entries()
     marker = WORKSPACE / MARKER_NAME
-    operation = operation_identity(args.built, args.round, args.from_task, args.reason)
-    reason_sha256 = hashlib.sha256(args.reason.encode()).hexdigest()
+    marker_exists = marker.exists() or marker.is_symlink()
+    retained_anchor = None
+    retained_payload = None
+    retained_identity = None
+    if args.retained:
+        if not marker_exists:
+            fail("the retained Correction Round revision owner is absent")
+        retained_anchor = marker_anchor()
+        try:
+            retained_anchor.__enter__()
+            retained_payload = retained_anchor.read_regular()
+            retained_status = retained_anchor.status()
+            retained_identity = (retained_status.st_dev, retained_status.st_ino)
+            candidate = parse_marker_payload(retained_payload)
+            from_task, operation = retained_marker_identity(
+                candidate, args.built, args.round,
+            )
+        except BaseException:
+            retained_anchor.close()
+            raise
+    else:
+        from_task = args.from_task
+        operation = operation_identity(args.built, args.round, from_task)
     if not marker.exists() and not marker.is_symlink():
         _, payload, _ = current_artifact(args.built, args.round)
         latest = [(index, entry) for index, entry in enumerate(entries)
@@ -401,122 +529,162 @@ def run(args):
                   and progress.note_data(entry).get("round") == args.round]
         if latest and progress.note_data(latest[-1][1]).get("artifact_sha256") \
                 == hashlib.sha256(payload).hexdigest() \
-                and progress.note_data(latest[-1][1]).get("from_task") == args.from_task:
+                and progress.note_data(latest[-1][1]).get("from_task") == from_task:
             progress.validate_correction_round_revision_entry(
                 entries, latest[-1][0], latest[-1][1],
             )
             print("CORRECTION ROUND REVISION (already recorded)")
             return
-    with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
-        current_entries = progress.journal_entries()
-        progress.require_no_current_correction_stop(
-            current_entries, len(current_entries), args.built, args.round,
-            "the Correction Round revision",
-        )
-        if marker.exists() or marker.is_symlink():
-            account = read_marker(marker)
-            if account.get("operation") != operation \
-                    or account.get("reason_sha256") != reason_sha256:
-                fail("the pending Correction Round revision belongs to another operation")
-        else:
-            ensure_no_foreign_owner()
-            dirty = subprocess.run(
-                ["git", "-C", progress.project_root(), "status", "--porcelain"],
-                capture_output=True, text=True,
-            )
-            if dirty.returncode != 0 or dirty.stdout:
-                fail("a Correction Round revision requires one clean project tree")
+    try:
+        with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
             current_entries = progress.journal_entries()
-            _state, _relative, _artifact, _projection, accepted = revision_projection(
-                current_entries, args.built, args.round, args.from_task,
+            progress.require_no_current_correction_stop(
+                current_entries, len(current_entries), args.built, args.round,
+                "the Correction Round revision",
             )
-            if accepted:
-                static, _state, _artifact = post_task_static_account(
-                    current_entries, args.built, args.round, args.from_task,
-                    operation, reason_sha256,
+            progress.require_no_active_correction_amendment(
+                current_entries, len(current_entries), args.built, args.round,
+                "the Correction Round revision",
+            )
+            if marker.exists() or marker.is_symlink():
+                if retained_anchor is not None:
+                    current_payload = retained_anchor.read_regular()
+                    current_status = retained_anchor.status()
+                    if (current_status.st_dev, current_status.st_ino) != retained_identity \
+                            or current_payload != retained_payload:
+                        fail("the retained Correction Round revision marker was substituted")
+                    account = parse_marker_payload(current_payload)
+                    retained_anchor.close()
+                    retained_anchor = None
+                else:
+                    account = read_marker()
+                retained_from_task, retained_operation = retained_marker_identity(
+                    account, args.built, args.round,
                 )
-                head = git_text("rev-parse", "HEAD")
-                if head != static["parent_commit"]:
-                    fail("the post-task revision is not on its exact accepted predecessor")
-                account = {**static, "phase": "prepared"}
+                if retained_operation != operation or retained_from_task != from_task:
+                    fail("the pending Correction Round revision belongs to another operation")
             else:
-                event = derive_pre_task_event(
-                    current_entries, args.built, args.round, args.from_task,
+                if args.retained:
+                    fail("the retained Correction Round revision owner disappeared")
+                ensure_no_foreign_owner()
+                dirty = subprocess.run(
+                    ["git", "-C", progress.project_root(), "status", "--porcelain"],
+                    capture_output=True, text=True,
                 )
-                account = {
-                    "schema": 1, "operation": operation, "event": event,
-                    "reason_sha256": reason_sha256,
-                }
-            atomic_marker(marker, account)
+                if dirty.returncode != 0 or dirty.stdout:
+                    fail("a Correction Round revision requires one clean project tree")
+                current_entries = progress.journal_entries()
+                (_state, _relative, _artifact, _projection, accepted,
+                 _blocker) = revision_projection(
+                    current_entries, args.built, args.round, from_task,
+                )
+                if accepted:
+                    static, _state, _artifact = post_task_static_account(
+                        current_entries, args.built, args.round, from_task, operation,
+                    )
+                    head = git_text("rev-parse", "HEAD")
+                    if head != static["parent_commit"]:
+                        fail("the post-task revision is not on its exact accepted predecessor")
+                    account = {**static, "phase": "prepared"}
+                else:
+                    event = derive_pre_task_event(
+                        current_entries, args.built, args.round, from_task,
+                    )
+                    account = {
+                        "schema": 1, "operation": operation, "event": event,
+                        "reason": REVISION_REASON,
+                    }
+                publish_marker(account)
 
-        if "phase" in account:
-            static, _state, _artifact = post_task_static_account(
-                progress.journal_entries(), args.built, args.round, args.from_task,
-                operation, reason_sha256,
-            )
-            validate_post_task_marker(account, static)
-            if account["phase"] == "prepared":
-                commit, tree = publish_document_commit(account)
-                account = {
-                    **account,
-                    "phase": "baseline-required",
-                    "commit": commit,
-                    "tree": tree,
-                    "baseline_owner": progress.correction_revision_baseline_owner(
-                        account["built"], account["round"], account["revision"], commit,
-                    ),
-                }
-                replace_marker(marker, account)
-            if account["phase"] == "baseline-required":
-                gate = accepted_revision_baseline(progress.journal_entries(), account)
-                if gate is None:
+            while True:
+                with marker_anchor() as anchored:
+                    marker_payload = anchored.read_regular()
+                    account = parse_marker_payload(marker_payload)
+                    from_task = reproject_marker(
+                        progress.journal_entries(), account, args.built, args.round, operation,
+                    )
+                    validate_marker_recoveries(
+                        progress.journal_entries(), args.built, args.round, operation,
+                    )
+                    if account.get("phase") == "prepared":
+                        commit, tree = publish_document_commit(account)
+                        successor = {
+                            **account,
+                            "phase": "baseline-required",
+                            "commit": commit,
+                            "tree": tree,
+                            "baseline_owner": progress.correction_revision_baseline_owner(
+                                account["built"], account["round"], account["revision"], commit,
+                            ),
+                        }
+                        replace_marker(anchored, marker_payload, successor)
+                        continue
+                    if account.get("phase") == "baseline-required":
+                        gate = accepted_revision_baseline(progress.journal_entries(), account)
+                        if gate is None:
+                            print(
+                                "BASELINE REQUIRED\n"
+                                f"Run correction-round-baseline.sh {args.built} {args.round}, "
+                                "finish its exact baseline gate, then rerun "
+                                f"correction-round-revise.sh {args.built} {args.round}."
+                            )
+                            return
+                        event = revision_event(account, gate)
+                        progress.normalize_correction_round_revision(
+                            progress.journal_entries(), event, "the Correction Round revision",
+                        )
+                        successor = {
+                            **account, "phase": "terminal-ready", "gate": gate, "event": event,
+                        }
+                        replace_marker(anchored, marker_payload, successor)
+                        continue
+                    event = account.get("event")
+                    entries = progress.journal_entries()
+                    matches = [(index, entry) for index, entry in enumerate(entries)
+                               if entry.get("kind") == "correction.round.revised"
+                               and progress.note_data(entry) == event]
+                    if len(matches) > 1:
+                        fail("the Correction Round revision terminal is duplicated")
+                    if matches:
+                        progress.validate_correction_round_revision_entry(
+                            entries, matches[0][0], matches[0][1],
+                        )
+                    else:
+                        progress.normalize_correction_round_revision(
+                            entries, event, "the Correction Round revision",
+                        )
+                        progress.cmd_note_with_lease(
+                            note_args(event), lease, operation, owner_marker=MARKER_NAME,
+                        )
+                    remove_marker(
+                        anchored, marker_payload, operation, entries,
+                        args.built, args.round,
+                    )
                     print(
-                        "BASELINE REQUIRED\n"
-                        f"Run correction-round-baseline.sh {args.built} {args.round}, "
-                        "finish its exact baseline gate, then rerun this command."
+                        f"CORRECTION ROUND REVISED {args.built} {args.round} "
+                        f"revision {event['revision']}"
                     )
                     return
-                event = revision_event(account, gate)
-                progress.normalize_correction_round_revision(
-                    progress.journal_entries(), event, "the Correction Round revision",
-                )
-                account = {
-                    **account, "phase": "terminal-ready", "gate": gate, "event": event,
-                }
-                replace_marker(marker, account)
-            event = account["event"]
-        else:
-            event = account.get("event")
-        entries = progress.journal_entries()
-        matches = [(index, entry) for index, entry in enumerate(entries)
-                   if entry.get("kind") == "correction.round.revised"
-                   and progress.note_data(entry) == event]
-        if len(matches) > 1:
-            fail("the Correction Round revision terminal is duplicated")
-        if matches:
-            progress.validate_correction_round_revision_entry(
-                entries, matches[0][0], matches[0][1],
-            )
-        else:
-            progress.normalize_correction_round_revision(
-                entries, event, "the Correction Round revision",
-            )
-            progress.cmd_note_with_lease(
-                note_args(event), lease, operation, owner_marker=MARKER_NAME,
-            )
-        marker.unlink()
-        print(f"CORRECTION ROUND REVISED {args.built} {args.round} revision {event['revision']}")
+    finally:
+        if retained_anchor is not None:
+            retained_anchor.close()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("built")
     parser.add_argument("round", type=int)
-    parser.add_argument("from_task", type=int)
-    parser.add_argument("reason")
+    parser.add_argument("from_task", type=int, nargs="?")
+    parser.add_argument("reason", nargs="?")
     args = parser.parse_args()
+    args.retained = args.from_task is None
     if not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", args.built) \
-            or args.round < 1 or args.from_task < 1 or not args.reason.strip():
+            or args.round < 1 \
+            or (args.from_task is None and args.reason is not None) \
+            or (args.from_task is not None and (
+                args.from_task < 1
+                or (args.reason is not None and not args.reason.strip())
+            )):
         print("**correction revision ERROR** · malformed revision input", file=sys.stderr)
         raise SystemExit(1)
     try:

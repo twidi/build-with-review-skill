@@ -72,16 +72,22 @@ def source_failure(entries, marker):
         if entry.get("kind") == "attempt.failed" \
                 and entry.get("lot") == marker["work_unit"]["built"] \
                 and entry.get("correction") == marker["work_unit"]["round"] \
-                and entry.get("task") == marker["target_task"] \
-                and hashlib.sha256(canonical_bytes(data)).hexdigest() \
-                == marker["failure_route_sha256"] \
                 and isinstance(additions, list) \
-                and any(item.get("source") == marker["source"] for item in additions):
-            matches.append((index, entry))
+                and any(
+                    isinstance(item, dict)
+                    and isinstance(item.get("assignment"), dict)
+                    and item["assignment"].get("owner") == "task-contract-map"
+                    for item in additions
+                ):
+            expected = failure.historical_map_marker_account(entries, index, entry)
+            if expected.get("operation") == marker.get("operation"):
+                matches.append((index, entry, expected))
     if len(matches) != 1:
         fail("the final-checker map has no one exact source failure")
-    progress.validate_attempt_failed_entry(entries, matches[0][0], matches[0][1])
-    return matches[0]
+    index, entry, expected = matches[0]
+    if marker != expected:
+        fail("the final-checker contract-map owner changes its exact failure account")
+    return index, entry
 
 
 def preservation_transition(current):
@@ -232,7 +238,10 @@ def derive_revision(entries, marker, failure_proof):
     artifact = parse_artifact(path, expected_built=built, expected_round=correction)
     payload = path.read_bytes()
     published = publish_content_object(WORKSPACE, built, payload, ".md")
-    target = artifact["tasks"][task - 1]
+    targets = [candidate for candidate in artifact["tasks"] if candidate["task"] == task]
+    if len(targets) != 1:
+        fail("the final-checker contract-map has no one exact target task")
+    target = targets[0]
     current = progress.outstanding_final_checker_set(
         entries, len(entries), built, correction,
         "the final-checker contract-map document",
@@ -337,8 +346,65 @@ def require_no_foreign_owner():
             fail(f"another workflow owner is unfinished: {name}")
 
 
+def public_document_update(marker):
+    document = marker.get("document")
+    workspace_path = document.get("workspace_path") if isinstance(document, dict) else None
+    try:
+        artifact = pathlib.Path(workspace_path)
+        relative = artifact.relative_to(WORKSPACE)
+    except (TypeError, ValueError):
+        fail("the final-checker contract-map owner has no exact workspace document")
+    ids = marker.get("next_ids")
+    if not isinstance(ids, list) or not ids or any(
+        not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity)
+        for identity in ids
+    ):
+        fail("the final-checker contract-map owner has no exact obligation list")
+    return {
+        "schema": 1,
+        "work_unit": marker["work_unit"],
+        "target_task": marker["target_task"],
+        "artifact": relative.as_posix(),
+        "field": "Consumes final-checker obligations",
+        "obligation_ids": ids,
+        "replacement": "Consumes final-checker obligations: " + ", ".join(ids),
+        "continue": [
+            str(HERE / "final-checker-contract-map.sh"),
+            marker["work_unit"]["built"],
+            str(marker["work_unit"]["round"]),
+        ],
+    }
+
+
+def require_document_update(marker):
+    account = public_document_update(marker)
+    artifact = parse_artifact(
+        WORKSPACE / account["artifact"],
+        expected_built=marker["work_unit"]["built"],
+        expected_round=marker["work_unit"]["round"],
+    )
+    targets = [
+        task for task in artifact["tasks"] if task["task"] == marker["target_task"]
+    ]
+    if len(targets) != 1:
+        fail("the final-checker contract-map has no one exact target task")
+    current = targets[0]["obligation_ids"]
+    if current == marker["next_ids"]:
+        return True
+    if current != marker["prior_ids"]:
+        fail("the final-checker contract-map document changes its obligation authority")
+    print("FINAL CHECKER CONTRACT MAP DOCUMENT UPDATE REQUIRED")
+    print(json.dumps(account, sort_keys=True, separators=(",", ":")))
+    return False
+
+
 def revision_phase(args):
     with CorrectionAuthorityLease.acquire(WORKSPACE, args.operation) as lease:
+        entries = progress.journal_entries()
+        progress.require_no_active_correction_amendment(
+            entries, len(entries), args.built, args.round,
+            "the final-checker contract map",
+        )
         require_no_foreign_owner()
         require_no_live_gate()
         _marker_payload, marker = read_marker()
@@ -360,6 +426,8 @@ def revision_phase(args):
         failure_proof = progress.journal_line_proof(failure_index)
         revision = matching_event(entries, "correction.round.revised", args.operation)
         if revision is None:
+            if not require_document_update(marker):
+                return False
             revision_event = derive_revision(entries, marker, failure_proof)
             revision = append_owned(
                 "correction.round.revised", task, revision_event, args.operation, lease,
@@ -367,10 +435,16 @@ def revision_phase(args):
         progress.validate_correction_round_revision_entry(
             progress.journal_entries(), revision[0], revision[1],
         )
+        return True
 
 
 def mapping_phase(args):
     with CorrectionAuthorityLease.acquire(WORKSPACE, args.operation) as lease:
+        entries = progress.journal_entries()
+        progress.require_no_active_correction_amendment(
+            entries, len(entries), args.built, args.round,
+            "the final-checker contract map",
+        )
         require_no_foreign_owner()
         require_no_live_gate()
         marker_payload, marker = read_marker()
@@ -429,7 +503,15 @@ def mapping_phase(args):
 
 
 def run(args):
-    revision_phase(args)
+    if args.operation is None:
+        _payload, marker = read_marker()
+        if marker.get("work_unit") != {
+            "kind": "correction", "built": args.built, "round": args.round,
+        } or not re.fullmatch(r"[0-9a-f]{64}", str(marker.get("operation"))):
+            fail("the public final-checker contract-map selector found another owner")
+        args.operation = marker["operation"]
+    if not revision_phase(args):
+        return
     mapping_phase(args)
 
 
@@ -437,10 +519,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("built")
     parser.add_argument("round", type=int)
-    parser.add_argument("operation")
+    parser.add_argument("operation", nargs="?")
     args = parser.parse_args()
     if not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", args.built) \
-            or args.round < 1 or not re.fullmatch(r"[0-9a-f]{64}", args.operation):
+            or args.round < 1 or args.operation is not None \
+            and not re.fullmatch(r"[0-9a-f]{64}", args.operation):
         fail("the final-checker contract-map arguments are malformed")
     return args
 

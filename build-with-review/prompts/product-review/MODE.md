@@ -87,10 +87,61 @@ finish.
 reviewer told to write into a directory that does not exist fails on its very last action,
 with all its work already done.
 
+### R1.0 · Select and freeze the Product successor
+
+Select one exact current producer before `pass.opened`:
+
+- an ordinary final task plus `lot.built` opens the ordinary task successor;
+- an ordinary accepted controller baseline opens the ordinary controller successor;
+- `correction.round.built` opens the Correction task successor;
+- `correction.round.resolved` opens the Correction baseline successor.
+
+`correction.round.escalated` is never a Product producer. Return to the Construction
+resume matrix. Finish its producer-specific `sublot.allocated`, `sublot.opened`, complete
+plan consumer map, mechanical `construction-plan-publication-check`, and `plan-commit.sh`
+tail. It does not append `pass.opened`, enter delivery or create a second successor.
+
+Before a Correction terminal's successor `pass.opened`, use
+`mcp__twicc__update_session_annotations` on your own exact controller session. Perform
+one update:
+
+- Set `bwr.mode=product-review`, `bwr.job=controller`, and `bwr.lot=<built lot>`.
+- Preserve `bwr.schema`, `bwr.feature`, and `bwr.status`.
+- Remove `bwr.correction`, `bwr.task`, `bwr.attempt`, `bwr.round`, `bwr.mandate`,
+  `bwr.position`, `bwr.pass`, and `bwr.generation`.
+
+Read the annotations back before `pass.opened`. Continue only when this exact generation
+is visible. This update applies to the Correction task and Correction baseline
+successors. The ordinary task and ordinary controller-successor entries remain unchanged.
+
+For either Correction terminal, read its exact accepted commit and gate. Use those values
+only after the shared restoration preflight:
+
+```sh
+<workspace>/prompts/construction/correction-round-restore.sh <built lot> <round>
+```
+
+The helper authenticates the terminal and its immutable object. It atomically restores
+missing or changed canonical artifact bytes. Rerun only that same helper after an
+interruption. Then use the terminal commit and gate in the minimal command below. Run
+that command once. Do not reconstruct a task, baseline, plan, or second Correction Round.
+
 ```
 progress.py note pass.opened --data \
   '{"built":"<built lot>","commit":"<sha>","gate":"<accepted gate op>"}'
 ```
+
+After the opening, derive each lens's **canonical JSON account**. Never construct its
+paths or pass fields by hand:
+
+```sh
+progress.py product-pass-generation <slug>
+```
+
+The account freezes the pass opening proof, Correction position, generation SHA-256,
+pass ordinal, occurrence label, reviewed commit, gate, mandate, canonical report path,
+and canonical private risk-history path. Schema 1 history retains its built-lot
+occurrence and existing legacy identity.
 
 The gate operation must prove this exact reviewed commit **and its source identity**. A
 last accepted implementer commit uses its task-final operation, whose lot must equal
@@ -105,15 +156,15 @@ pass is open. Product review never substitutes semantic lenses for the technical
 
 ```
 product-review/lot-1/
-├── lot-1-unlooked.md · lot-1-user.md · lot-1-meaning.md · lot-1-quality.md
-│   lot-1-coverage.md           one per lens, five of them
+├── lot-1-c0-p1-unlooked.md · lot-1-c0-p1-user.md · lot-1-c0-p1-meaning.md
+│   lot-1-c0-p1-quality.md · lot-1-c0-p1-coverage.md    one per lens
 ├── lot-1-decision-batch-1-source.md · lot-1-decision-batch-1-actions.md
 │   lot-1-decision-batch-1-recheck-<sha>.md
 │                                rechecks exist only after in-place batch edits
-├── lot-1-confirmed.md          → becomes the Covers: of lot-1.1
-├── lot-1.1-unlooked.md · …
-├── lot-1.1-confirmed.md        → becomes the Covers: of lot-1.2
-└── lot-1.2-unlooked.md · …     no confirmed: that pass found nothing, the lot is done
+├── lot-1-c0-p1-confirmed.md    → Correction source when that route is eligible
+├── lot-1.1-c0-p1-unlooked.md · …
+├── lot-1.1-c0-p1-confirmed.md  → Correction source for that generation
+└── lot-1.2-c0-p1-unlooked.md · … no confirmed: that pass found nothing
 ```
 
 Run-wide conflict pairs live outside one pass's report tree:
@@ -126,7 +177,9 @@ For each lens, `mcp__twicc__create_session`, one call carrying everything:
 - title `- Review: <lens> (<feature>)`
 - annotations: `bwr.schema=1` · `bwr.job=reviewer` · `bwr.mode=product-review` ·
   `bwr.feature=<feature>` · `bwr.lot=<lot>` · `bwr.mandate=<its slug from the table>` ·
-  `bwr.status=working`
+  `bwr.status=working`. For schema 2, also copy the canonical account's exact
+  `bwr.position=<position>` · `bwr.pass=<pass>` ·
+  `bwr.generation=<generation_sha256>` values.
 
 Then, per lens: `progress.py session-started <id>`. That boundary owns the short
 post-creation visibility interval under the shared root rule. A visibility refusal keeps
@@ -138,8 +191,7 @@ its one optional additional prompt
 `<workspace>/additional-prompts/product-review/lens-<slug>.md`,
 **the path to every plan of the subject** — the root lot's and each sub-lot's, since
 `Covers:` is read from all of them — **which lot is the subject**, **the two refs
-below**, and **the path its report goes to** —
-`<workspace>/reports/product-review/<root lot>/<built lot>-<slug>.md`.
+below**, and the exact `report` path from the canonical JSON account.
 Also give it `<workspace>/additional-prompts/global.md`. Tell it to read the global
 additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
@@ -158,10 +210,11 @@ their files may be absent. Always call both helpers. Empty stdout is valid absen
 never a blocker. Non-empty stdout is human instructions. Only a helper refusal blocks.
 Never test either file directly.
 
-Also give it its private, append-only risk-filtered history:
-`<workspace>/reports/product-review/<root lot>/<slug>-risk-filtered.md`, with occurrence
-label `<built lot>`. Every later pass for this root lot gives the same path. Its loss is
-accepted. It never enters a receipt, the journal, or the public report.
+Also give it the exact private, append-only `risk_history` path from that account. Pass
+only the account's exact `occurrence` value as its occurrence label. Every later pass for
+this root lot gives the same path. Its loss is
+accepted. Its path enters the schema-2 generation account. Its bytes never enter a receipt,
+the journal, or the public report.
 
 Open and refill the exact PRODUCT reviewer pool through one read-only checkpoint:
 
@@ -271,9 +324,9 @@ This is the only lens replacement route. Never create the replacement directly.
 
 1. Stop the old lens process.
 2. Record its non-successful retirement.
-3. Move `<built lot>-<slug>.md` to `<built lot>-<slug>-failed.md`. The silent-child rule
-   in `SKILL.md` owns the exact safe gesture. The fixed report path must be free before
-   another writer can exist.
+3. Move the canonical account's exact `report` path to the same basename with
+   `-failed.md`. The silent-child rule in `SKILL.md` owns the exact safe gesture. The
+   fixed report path must be free before another writer can exist.
 4. Run `python3 "<workspace>/prompts/common/review-pool.py" product-review`.
 5. Launch only the assignments listed under `launch now`, in that exact order. Record
    each successful creation with `progress.py session-started <id>`. The failed lens can
@@ -353,10 +406,17 @@ It returns, per finding: **confirmed**, **disproved with what it observed**, or
 
 ```
 progress.py subagent-started finding-verifier --mandate <slug> \
-  --data '{"pass_commit":"<receipt pass_commit>","pass_gate":"<receipt pass_gate>","report_sha256":"<receipt report_sha256>"}'
+  --data '<exact verifier identity from the receipt>'
 progress.py subagent-ended finding-verifier --mandate <slug> \
-  --data '{"pass_commit":"<same pass_commit>","pass_gate":"<same pass_gate>","report_sha256":"<same report_sha256>","confirmed":<N>,"disproved":<N>,"malformed":<N>,"claims":[{"id":"F1","kind":"correction","verdict":"confirmed"},{"id":"F2","kind":"decision","verdict":"disproved"}]}'
+  --data '<same exact verifier identity plus confirmed, disproved, malformed and claims>'
 ```
+
+For schema 2, the verifier identity is the complete canonical JSON account plus the
+receipt's `report_sha256`. It includes `pass_opening`, `built`, `position`,
+`generation_sha256`, `pass`, `pass_commit`, `pass_gate`, `mandate`, `report`, and
+`risk_history`, plus `occurrence`. Copy it exactly. For schema 1 history, retain the
+existing three verifier fields:
+`pass_commit`, `pass_gate`, and `report_sha256`.
 
 `claims` contains every finding in report order. Its local IDs are exactly `F1..F<N>`.
 Its three verdict totals equal the three counts above, and its `decision` count equals
@@ -383,7 +443,7 @@ subagent list.
 
 ```
 progress.py subagent-ended finding-verifier --mandate <slug> \
-  --data '{"pass_commit":"<same pass_commit>","pass_gate":"<same pass_gate>","report_sha256":"<same report_sha256>","unusable":"lost"}'
+  --data '<same exact verifier identity plus {"unusable":"lost"}>'
 ```
 
 `error`, `empty`, `lost`, and `unusable` are the only unusable reasons. One unusable
@@ -850,7 +910,7 @@ One refutation stays yours: **refuting from the spec, with the citation.**
    history. Its source entry and later complete recheck or conflict-resolution artifacts
    are the durable current state.*
 
-### R2.5 · Open the sub-lot
+### R2.5 · Choose and open the correction route
 
 **R2.5 never decides whether human answers coexist.** The run-wide fixed point above
 must already prove that before this phase. `Carries:` preserves work provenance; it is not
@@ -925,7 +985,129 @@ progress.py note decision.batch.closed --data '{"batch":<B>,"outcome":"no-correc
 Then go to *Leaving review*. A batch close never precedes the pass close that proved no
 correction survived.
 
-If anything survives, the corrections become **lot `N.n`** — **`N` the root lot's own
+**Classify the complete actionable set before you allocate a successor.** One complete
+set takes one route. Never split it between a Correction Round and a sub-lot.
+
+- **The empty set keeps the clean `confirmed:0` close** above.
+- **An unfinished grouped AMENDMENT route keeps the R2.4 AMENDMENT branch.** Finish and
+  consume that exact route before this classification. Do not allocate implementation
+  work while the grouped AMENDMENT owner is incomplete.
+- **One structural item sends the complete set through the historical sub-lot route.**
+  This includes an active historical `sublot` answer, a required controller-contract,
+  ownership or global-decomposition change, unbounded coordination, or evidence that the
+  same root cause survived an earlier Correction Round.
+- **An eligible complete implementation-correction set opens one Correction Round.**
+  Every item and the complete set must preserve the current specification, settled human
+  decisions, controller contract, ownership, global decomposition and unrelated original
+  obligations. The work must form a local bounded correction-task graph. Repeated work
+  remains eligible only when concrete evidence proves it is independent or reassessed and
+  bounded.
+
+If the evidence leaves a real workflow choice, use `SKILL.md`'s human-judgment rule.
+Explain the product consequence of each route. Do not ask the human merely to replace a
+classification the durable evidence already decides.
+
+#### Eligible Correction Round route
+
+Use this branch only after the complete-set classification above accepts every item.
+**Never run `sublot.allocated`, `sublot.opened`, or a sub-lot plan command** for this
+eligible branch.
+
+Before any allocation or artifact write, read
+`<workspace>/prompts/construction/correction-round-format.md` in full. It is the closed
+schema-1/schema-2 writing grammar and bounded self-review contract. Do not infer artifact
+bytes from parser code or from an earlier artifact.
+
+1. **Allocate the next Correction identity once.** Its round is the current pass
+   correction position plus one. Reuse the exact current allocation if this pass already
+   has one. Never recompute its number on a retry.
+
+   ```sh
+   progress.py note correction.round.allocated --data \
+     '{"schema":2,"built":"<built lot>","round":<round>,"predecessor_supersession":null,"parent":{"position":<current correction position>,"generation_sha256":"<current generation sha256>","commit":"<correction base commit>","gate":"<correction base gate>"},"pass":{"ordinal":<pass ordinal>,"opening":"<pass.opened proof>","commit":"<reviewed commit>","gate":"<reviewed gate>"},"items":[{"id":"F1","sources":["unlooked/F1","meaning/F2"],"carries":["B2/F1"]}],"refuted":["quality/F1"],"admission":{"items":[{"id":"F1","classification":"implementation-correction","reason":"<concrete bounded reason>"}],"spec":"current-and-settled","human_decisions":"settled","controller_contract":"preserved","ownership":"preserved","decomposition":"preserved","coordination":"bounded","repetition":"independent","reason":"<complete-set reason>"}}'
+   ```
+
+   This is the complete schema-2 account. Use every actual item, source, carry and
+   refutation; the one-item command above shows the closed field grammar. It binds
+   `<built lot>`, round, predecessor supersession, parent generation/commit/gate, pass
+   ordinal/opening/commit/gate, the complete ordered deduplicated item and refutation
+   sets, and the full admission account. Every admission item has its exact `F<N>`, classification
+   `implementation-correction`, and a concrete bounded reason. The complete admission
+   binds `spec:current-and-settled`, `human_decisions:settled`, preserved controller
+   contract, ownership and decomposition, bounded coordination, and repetition
+   `independent` or `reassessed-bounded` with its concrete reason.
+2. **Write the immutable confirmed source from that allocation.** Use
+   `reports/product-review/<root lot>/<built lot>-c<parent position>-p<pass ordinal>-confirmed.md`.
+   Write every allocated `F<N>` exactly once, in order. Its `Sources:` and `Carries:`
+   accounts equal the allocation. Existing bytes are valid only when they equal this
+   reconstruction.
+3. **Write the Correction artifact** at
+   `corrections/<built lot>/round-<round>.md`. Its source path and SHA-256 name the exact
+   confirmed artifact. Its metadata, route account, exhaustive finding coverage and
+   bounded task graph come only from the allocation and current settled authority.
+4. **Validate the complete artifact before publication.** The controller also performs
+   the bounded self-review defined by the Correction artifact contract.
+
+   ```sh
+   python3 <workspace>/prompts/construction/correction_round.py check <built lot> <round>
+   ```
+
+   A bounded wording or grouping defect is corrected before close. A structural result
+   uses `correction-round-supersede.sh` and then the exact sub-lot route. It never silently
+   changes the selected route.
+5. **Close the pass against this exact allocation and both immutable artifacts.** Supply
+   only the confirmed count. `progress.py` derives route `correction`, all proofs, paths,
+   hashes, generation authority, and task manifest. The close publishes and authenticates
+   the content-addressed confirmed and Correction artifact objects before its journal
+   terminal.
+
+   ```sh
+   progress.py note pass.closed --data '{"confirmed":<N>}'
+   ```
+6. **Finish the required batch terminals.** For every current `implementation` answer,
+   write only its missing schema-2 `ruling.applied` terminal with fulfillment
+   `correction`. Then close every fully consumed batch with outcome `correction`. Each
+   terminal derives and consumes the exact allocation, positive pass close and confirmed
+   artifact. Historical `sublot` answers never enter this branch.
+
+   ```sh
+   progress.py note ruling.applied \
+     --data '{"answer":"B<B>/D<N>","batch":<B>,"decision":"D<N>","route":"implementation","fulfillment":"correction","built":"<built lot>","round":<round>}'
+   progress.py note decision.batch.closed \
+     --data '{"batch":<B>,"outcome":"correction","built":"<built lot>","round":<round>}'
+   ```
+7. **Open the exact Correction Round.** The helper consumes the allocation, positive
+   close, immutable artifacts and every required batch terminal. It owns the ref and
+   journal tail.
+
+   ```sh
+   <workspace>/prompts/construction/correction-round-open.sh <built lot> <round>
+   ```
+
+   Continue in MODE CONSTRUCTION at the Correction Round entry. Do not run ordinary C1
+   or AI C2 for the original plan.
+
+The Correction branch resumes only through these exact continuations:
+
+| Durable prefix | Exact continuation |
+|---|---|
+| **Allocation only** | Regenerate the same confirmed artifact from that allocation. Do not allocate. |
+| **Allocation plus confirmed artifact** | Validate those exact bytes, then regenerate the same Correction artifact. |
+| **Allocation plus both artifacts** | Run the exact artifact check and self-review, then append only the positive Correction close. |
+| **Correction close with missing batch terminals** | Write only the missing route-specific `ruling.applied` and `decision.batch.closed` terminals. Do not rewrite artifacts or close the pass again. |
+| **Correction close with complete batch terminals** | Run only `correction-round-open.sh` for the allocated built unit and round. |
+| Opening marker or `task-0` without the opening terminal | Rerun only the same `correction-round-open.sh` call. |
+| `correction.round.opened` | Continue at the Correction Round CONSTRUCTION entry. Nothing in R2.5 repeats. |
+
+**Never allocate another Correction Round identity during any continuation.** A retained
+allocation, artifact, pass close, batch tail or opening owner fixes the only next action.
+An authenticated allocation supersession follows only its recorded `sublot` or
+`reclassify` continuation.
+
+#### Structural sub-lot route
+
+If the complete set is ineligible for Correction Round, the corrections become
+**lot `N.n`** — **`N` the root lot's own
 number, `n` one more than the highest sub-lot identity that reached `sublot.opened` for
 that root.** The pass over `lot-2` opens `lot-2.1`; the pass over `lot-2.1` opens
 `lot-2.2` — never `lot-2.1.1`, the grammar has two levels only, and never a name already
@@ -1243,7 +1425,27 @@ pass whose readings are incomplete, and a non-empty one cannot open a sub-lot ea
 routed or merged again. Its active human answers remain in the run-wide product-answer
 state until a later ready conflict resolution supersedes them.
 
-- **No `pass.closed` and no `sublot.allocated` in the slice** → the pass is in its
+Correction Product-entry recovery has two exact prefixes:
+
+| Durable prefix | Exact continuation |
+|---|---|
+| **Terminal without pass** | Run `correction-round-restore.sh <built lot> <round>` once. Read the exact `correction.round.built` or `correction.round.resolved` commit and gate. Run the minimal `pass.opened` command once. |
+| **Pass opened** | Do not repeat the terminal or pass. Run `product-pass-generation <slug>` and resume the exact reviewer pool. |
+
+A `correction.round.escalated` does not enter this table. Resume only its structural
+successor in MODE CONSTRUCTION. No Correction terminal enters delivery directly.
+
+- **A current `correction.round.allocated` exists with no positive pass close** → resume
+  only the matching Correction prefix row in R2.5. Reconstruct artifacts only from the
+  allocation and its durable inputs. Never allocate, reclassify or enter the sub-lot
+  branch from memory.
+- **A positive `pass.closed route:"correction"` exists without
+  `correction.round.opened`** → finish only its missing batch terminals, then run the
+  exact `correction-round-open.sh <built lot> <round>` call. Never close the pass again.
+- **`correction.round.opened` exists for this pass close** → continue at the Correction
+  Round CONSTRUCTION entry. No allocation, artifact, close, batch terminal or opening
+  repeats.
+- **No `pass.closed`, no `correction.round.allocated` and no `sublot.allocated` in the slice** → the pass is in its
   readings or its adjudication.
   The report table above says which reports stand; a lost verifier verdict is
   regenerated, never remembered; **an identified product ruling is reused, never
@@ -1261,7 +1463,7 @@ state until a later ready conflict resolution supersedes them.
   write `pass.closed` and `sublot.opened` in their prescribed order. **Never allocate
   again.** A partial artifact proves only an interrupted write; the allocation line is
   the identity.
-- **`pass.closed` with `confirmed:<N>`, no `sublot.opened` after it** → the close is
+- **`pass.closed route:"sublot"` with `confirmed:<N>`, no `sublot.opened` after it** → the close is
   done and does not repeat: the confirmed file and the allocated sub-lot's plan file are
   on disk — the lifecycle notes follow the artifacts by design. Finish any missing
   `ruling.applied` and `decision.batch.closed` lines proved by that confirmed file, then
@@ -1292,13 +1494,14 @@ obligation into R2.5 with any new work those readings found.
 **The loop ends on one complete R1 pass that yields nothing.** The lot is delivered.
 
 1. **Report to the human**: what the review found across all passes, what was
-   disproved, and what became a sub-lot.
+   disproved, what became Correction Rounds, and what became sub-lots.
 
    ```
    progress.py note lot.delivered --data '{"sha":"<sha>","passes":<N>}'
    ```
-   `sha` is the reviewed commit in the current `pass.opened`. `passes` counts the
-   ordinary completed passes over this root subject; a voided generation does not count.
+   `sha` is the reviewed commit in the current `pass.opened`. `passes` counts every
+   complete non-voided pass over this root subject, including schema-2 Correction
+   successor passes. A voided generation does not count.
    The script refuses this line without the exact current clean close, after an unfinished
    batch, or when the same delivery already exists.
 2. **Ask what happens next** — one widget call, four questions: the next lot in **a new

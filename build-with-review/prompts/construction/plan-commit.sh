@@ -24,7 +24,7 @@ committed or marked."
 DOCUMENT_COPY="$WORKSPACE/prompts/common/document-copy.sh"
 CONSTRUCTION_REVIEW="$WORKSPACE/prompts/construction/construction_review.py"
 SOURCE_REL="plans/$LOT-plan.md"
-# Authenticate every source component before the first grep or sed reads it.
+# Authenticate every source component before the structural projector reads it.
 SOURCE=$("$DOCUMENT_COPY" source "$SOURCE_REL")
 
 # The workspace's name is the stem of every plan path: one date per feature,
@@ -32,31 +32,34 @@ SOURCE=$("$DOCUMENT_COPY" source "$SOURCE_REL")
 RUN_NAME=$(basename "$WORKSPACE")
 TARGET="docs/plans/$RUN_NAME-$LOT-plan.md"
 
-TASKS=$(grep -c '^## Task ' "$SOURCE" || true)
-[ "$TASKS" -gt 0 ] || die "$SOURCE declares no task — expected '## Task <N>' headings"
-
-# The identities, not only the count. Every number downstream — an implementer,
-# a report path, an annotation, a git ref — is keyed on these headings reading
-# exactly 1..N, once each, in order. A duplicate would give two sections one
-# ref; a gap would make the recorded count disagree with what exists.
-# The whole grammar, not a numeric prefix: '## Task 1.1', '## Task 1foo' and a
-# bare '## Task 1' must all fail here, or the visible identity and the numeric
-# one diverge and the ambiguity this check exists to stop is certified instead.
-mapfile -t IDS < <(sed -n 's/^## Task \([1-9][0-9]*\) - ..*$/\1/p' "$SOURCE")
-[ "${#IDS[@]}" -eq "$TASKS" ] \
-    || die "a '## Task' heading is malformed — every heading reads '## Task <N> - <title>', N a positive integer without leading zeros"
-n=0
-for id in ${IDS[@]+"${IDS[@]}"}; do
-    n=$((n + 1))
-    [ "$id" = "$n" ] \
-        || die "task headings must read 1..$TASKS in order, exactly once each — heading $n says '## Task $id'"
-done
-for id in ${IDS[@]+"${IDS[@]}"}; do
+MANIFEST=$("$PROGRESS" construction-plan-task-manifest "$LOT") \
+    || die "$SOURCE has no exact structural Task 1..T manifest"
+read -r TASKS PLAN_ID MANIFEST_EXTRA <<< "$MANIFEST"
+[[ $TASKS =~ ^[1-9][0-9]*$ ]] && [[ $PLAN_ID =~ ^[0-9a-f]{40,64}$ ]] \
+    && [ -z "$MANIFEST_EXTRA" ] \
+    || die "$SOURCE returned a malformed structural task manifest account"
+for ((id = 1; id <= TASKS; id++)); do
     python3 "$CONSTRUCTION_REVIEW" plan-state "$LOT" "$id" >/dev/null \
         || die "$SOURCE Task $id has no valid controller/implementer ownership boundary. Nothing was copied, staged, committed or marked."
 done
 
+CORRECTION_SCOPE=$("$PROGRESS" construction-correction-authority-scope "$LOT") \
+    || die "the plan publication cannot derive its Correction authority scope. Nothing was copied, staged, committed or marked."
+[[ $CORRECTION_SCOPE = ordinary || $CORRECTION_SCOPE = correction-escalation ]] \
+    || die "the plan publication returned a malformed Correction authority scope. Nothing was copied, staged, committed or marked."
+
 cd "$REPO"
+CORRECTION_LEASE_FD=
+CORRECTION_LEASE_OPERATION=
+if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+    CORRECTION_LEASE_OPERATION="correction-escalation-plan-publication:$LOT"
+    exec {CORRECTION_LEASE_FD}<>"$WORKSPACE/correction-authority.lock"
+    flock -x "$CORRECTION_LEASE_FD" \
+        || die "the Correction escalation plan publication cannot acquire its shared authority lease. Nothing was copied, staged, committed or marked."
+    "$PROGRESS" construction-correction-lease-check \
+        "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION" \
+        || die "the Correction escalation plan publication does not own its exact shared authority lease. Nothing was copied, staged, committed or marked."
+fi
 # The pending marker is the operation's identity AND its prepared payload,
 # published atomically. "HEAD touches the plan copy" cannot be an identity —
 # every task commit republishes that same copy — and the index is what tells
@@ -65,9 +68,13 @@ cd "$REPO"
 # or the index empty — the commit landed, and only the tail remains.
 PENDING="$WORKSPACE/plan-commit-in-progress"
 JOURNAL="$WORKSPACE/progress.jsonl"
-marker_read() { P_ID=; P_TREE=; P_OP=; { read -r P_ID; read -r P_TREE; read -r P_OP; } < "$PENDING" || true
-    [ -n "$P_ID" ] || die "the pending marker is unreadable — remove it (rm -f $PENDING)
+marker_read() { P_ID=; P_TREE=; P_OP=; P_PREFLIGHT=; { read -r P_ID; read -r P_TREE; read -r P_OP; read -r P_PREFLIGHT; } < "$PENDING" || true
+    [ -n "$P_ID" ] && [[ $P_PREFLIGHT = - || $P_PREFLIGHT =~ ^[0-9a-f]{64}$ ]] \
+        || die "the pending marker is unreadable — remove it (rm -f $PENDING)
 and take the state to the human. Nothing was done."; }
+preflight_sha256() {
+    if [ "$1" = - ]; then printf '%s\n' -; else printf '%s' "$1" | sha256sum | cut -d' ' -f1; fi
+}
 # The marker's fate is settled FIRST. A marker whose operation already carries
 # its completion note is an ORPHAN — the kill fell between the note and the
 # marker's removal — and this call is then a later operation, never a retry:
@@ -86,7 +93,7 @@ if [ -f "$PENDING" ]; then
        && awk -v k='"kind":"plan.written"' -v o="\"op\":\"$P_OP\"" \
               'index($0,k) && index($0,o) {found=1; exit} END {exit !found}' "$JOURNAL"; then
         rm -f "$PENDING"
-        P_ID=; P_TREE=; P_OP=
+        P_ID=; P_TREE=; P_OP=; P_PREFLIGHT=
     else
         [ "$P_ID" = "$LOT" ] || die "an interrupted plan commit is pending for \`$P_ID\`,
 not \`$LOT\` — the tail belongs to the call that opened it. Rerun with \`$P_ID\`.
@@ -100,6 +107,16 @@ fi
 if [ ! -f "$PENDING" ] && ! controller_operation_refuse_pending "$WORKSPACE" gate-check; then
     die "$CONTROLLER_OPERATION_ERROR. This fresh plan commit cannot pass the frozen gate candidate. Nothing was copied, staged or committed."
 fi
+if [ ! -f "$PENDING" ]; then
+    PLAN_PREFLIGHT=$("$PROGRESS" construction-plan-publication-check "$LOT" "$TASKS") \
+        || die "the plan is not an authenticated Correction escalation map or re-cut. Nothing was copied, staged, committed or marked."
+    PLAN_PREFLIGHT_SHA=$(preflight_sha256 "$PLAN_PREFLIGHT")
+elif ! git diff --cached --quiet -- "$TARGET"; then
+    CURRENT_PREFLIGHT=$("$PROGRESS" construction-plan-publication-check "$LOT" "$TASKS") \
+        || die "the interrupted plan commit no longer has its authenticated publication authority. Nothing was copied or committed."
+    [ "$(preflight_sha256 "$CURRENT_PREFLIGHT")" = "$P_PREFLIGHT" ] \
+        || die "the plan publication authority changed after its interrupted preflight. Nothing was copied or committed."
+fi
 # The shared copy boundary revalidates the source and every repository
 # component, writes a real same-directory temporary, then renames atomically.
 "$DOCUMENT_COPY" copy "$SOURCE_REL" "$TARGET" replace
@@ -112,12 +129,23 @@ if ! git diff --cached --quiet -- "$TARGET"; then
         [ "$P_TREE" = "$TREE" ] || die "the prepared content changed since the interrupted
 call — what is staged now is not what that call meant to commit, and merging the two is
 nobody's to decide but the human's. Nothing was committed; the new content sits staged."
+        CURRENT_PREFLIGHT=$("$PROGRESS" construction-plan-publication-check "$LOT" "$TASKS") \
+            || die "the interrupted plan commit no longer has its authenticated publication authority. Nothing was committed."
+        [ "$(preflight_sha256 "$CURRENT_PREFLIGHT")" = "$P_PREFLIGHT" ] \
+            || die "the plan publication authority changed after its interrupted preflight. Nothing was committed."
         # same operation, same payload, commit never landed: retry the commit
         OP_NONCE=$P_OP
     else
         OP_NONCE="$(date +%s%N).$$"
-        printf '%s\n%s\n%s\n' "$LOT" "$TREE" "$OP_NONCE" > "$PENDING.tmp"
+        P_PREFLIGHT=$PLAN_PREFLIGHT_SHA
+        printf '%s\n%s\n%s\n%s\n' "$LOT" "$TREE" "$OP_NONCE" "$P_PREFLIGHT" > "$PENDING.tmp"
         mv "$PENDING.tmp" "$PENDING"
+    fi
+    if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+        CURRENT_PREFLIGHT=$("$PROGRESS" construction-plan-publication-check "$LOT" "$TASKS") \
+            || die "the Correction escalation plan lost its authenticated authority after marker publication. Nothing was committed."
+        [ "$(preflight_sha256 "$CURRENT_PREFLIGHT")" = "$P_PREFLIGHT" ] \
+            || die "the Correction escalation plan authority changed after marker publication. Nothing was committed."
     fi
     # Workflow-owned document commits do not run project hooks. A successful
     # hook can replace the exact staged bytes after the controller accepted
@@ -176,8 +204,16 @@ fi
 # happened. Finish, say the real state, and hand back the one retryable line.
 # The note carries the operation's own mark: it is what lets a later call
 # tell this completed operation's orphan marker from a live interrupted one.
-NOTE=("$PROGRESS" note plan.written --data "{\"tasks\":$TASKS,\"op\":\"$OP_NONCE\"}")
 JOURNAL_MISSING=
+if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+    NOTE=("$PROGRESS" construction-plan-publication-append "$LOT" "$TASKS" \
+          "$OP_NONCE" "$P_PREFLIGHT" "$CORRECTION_LEASE_FD" \
+          "$CORRECTION_LEASE_OPERATION")
+else
+    PLAN_ACCOUNT=$("$PROGRESS" construction-plan-publication-account "$LOT" "$TASKS" "$OP_NONCE" "$P_PREFLIGHT") \
+        || die "the committed plan cannot produce its exact publication account. The commit and pending marker remain; rerun this same call."
+    NOTE=("$PROGRESS" note plan.written --data "$PLAN_ACCOUNT")
+fi
 "${NOTE[@]}" || JOURNAL_MISSING=$(printf '%q ' "${NOTE[@]}")
 # The marker lives until the whole tail is durable — the journal line included.
 [ -n "$JOURNAL_MISSING" ] || rm -f "$PENDING"
@@ -185,11 +221,17 @@ printf 'COMMITTED %s\nTASKS %s\ntask-0 %s%s\n' "$TARGET" "$TASKS" "$START" "$KEP
 if [ -n "$JOURNAL_MISSING" ]; then
     {
         printf '**script WARNING** · everything above IS done, but its journal line is missing.\n'
-        printf 'The git work does not repeat. Retry the line alone and then remove the marker —\n\n'
-        printf '    %s\n' "$JOURNAL_MISSING"
-        printf '    rm -f %q\n' "$PENDING"
-        printf '\n— or run this same call again: the pending marker is still in place, and the\n'
-        printf 'script then finishes only this tail.\n'
+        if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+            printf 'The inherited Correction lease cannot be replayed as a detached command.\n'
+            printf 'Run this same plan-commit.sh call again. Its pending marker preserves the\n'
+            printf 'operation, and the helper finishes only the authenticated journal tail.\n'
+        else
+            printf 'The git work does not repeat. Retry the line alone and then remove the marker —\n\n'
+            printf '    %s\n' "$JOURNAL_MISSING"
+            printf '    rm -f %q\n' "$PENDING"
+            printf '\n— or run this same call again: the pending marker is still in place, and the\n'
+            printf 'script then finishes only this tail.\n'
+        fi
     } >&2
     exit 1
 fi

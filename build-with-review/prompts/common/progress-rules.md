@@ -185,8 +185,9 @@ Correction Round allocation void is helper-owned: its recoverable
 owner moves every present canonical confirmed and correction artifact before appending
 the exact physical close account. A `reclassify` supersession reuses its authenticated
 moved account, and a null correction predecessor moves nothing. `lot.delivered` consumes
-only the current clean close, its reviewed SHA, the
-exact ordinary-pass count and every required batch-close tail.
+only the current clean close, its reviewed SHA, every complete non-voided pass over the
+root subject — including schema-2 Correction successor passes and excluding every voided
+generation — and every required batch-close tail.
 
 `sublot.opened` consumes one exact positive close and its exact allocation. It is the
 sub-lot's only CONSTRUCTION origin. Plan publication, attempt start, `lot.built` and the

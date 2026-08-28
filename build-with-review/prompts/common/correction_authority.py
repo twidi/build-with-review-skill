@@ -33,6 +33,7 @@ ADMISSION_KEYS = {
 EMPTY_FINAL_CHECKER_SET = empty_set()
 EMPTY_FINAL_CHECKER_SET_SHA256 = EMPTY_SET_SHA256
 RENAME_NOREPLACE = 1
+RENAME_EXCHANGE = 2
 CORRECTION_LOCK_NAME = "correction-authority.lock"
 
 
@@ -48,6 +49,14 @@ def empty_retry_transition():
 def recovery_relative_path(relative):
     relative = pathlib.PurePosixPath(relative)
     return relative.with_name(f".{relative.name}.correction-recovery")
+
+
+def replacement_recovery_relative_path(relative, payload):
+    relative = pathlib.PurePosixPath(relative)
+    digest = hashlib.sha256(payload).hexdigest()
+    return relative.with_name(
+        f".{relative.name}.correction-recovery-{digest}",
+    )
 
 
 class WorkspaceFileAnchor:
@@ -227,10 +236,11 @@ class WorkspaceFileAnchor:
             raise ValueError(f"{self.subject} linked another source inode")
 
     def remove_exact(self, digest):
-        payload = self.read_regular()
-        if hashlib.sha256(payload).hexdigest() != digest:
-            raise ValueError(f"{self.subject} changes its exact cleanup bytes")
+        if self._accepted_descriptor is None:
+            self.read_regular()
         accepted = self._accepted_status()
+        if self._accepted_sha256 != digest:
+            raise ValueError(f"{self.subject} changes its exact cleanup bytes")
         current = self.status()
         if current is None or (current.st_dev, current.st_ino) \
                 != (accepted.st_dev, accepted.st_ino):
@@ -290,6 +300,176 @@ class WorkspaceFileAnchor:
         os.fsync(self._descriptor)
         if destination._descriptor != self._descriptor:
             os.fsync(destination._descriptor)
+
+    def replace_over(self, destination):
+        """Atomically move this accepted file over one absent or regular destination."""
+        self.verify()
+        destination.verify()
+        accepted = self._accepted_status()
+        current = self.status()
+        if current is None or (current.st_dev, current.st_ino) != self._accepted_identity:
+            raise ValueError(f"{self.subject} source inode changed before replacement")
+        prior = destination.status()
+        if prior is not None and (
+            not stat.S_ISREG(prior.st_mode) or prior.st_nlink < 1
+        ):
+            raise ValueError(f"{destination.subject} is not one real regular file")
+        if prior is not None:
+            accepted_prior = destination._accepted_status()
+            if (prior.st_dev, prior.st_ino) != (accepted_prior.st_dev, accepted_prior.st_ino):
+                raise ValueError(f"{destination.subject} changed before replacement")
+        current_destination = destination.status()
+        if (prior is None) != (current_destination is None) or (
+            prior is not None and (
+                prior.st_dev,
+                prior.st_ino,
+                prior.st_mode,
+                prior.st_nlink,
+            ) != (
+                current_destination.st_dev,
+                current_destination.st_ino,
+                current_destination.st_mode,
+                current_destination.st_nlink,
+            )
+        ):
+            raise ValueError(f"{destination.subject} changed before replacement")
+        os.replace(
+            self.name, destination.name,
+            src_dir_fd=self._descriptor, dst_dir_fd=destination._descriptor,
+        )
+        published = destination.status()
+        identity = (accepted.st_dev, accepted.st_ino)
+        if published is None or (published.st_dev, published.st_ino) != identity \
+                or hashlib.sha256(_read_descriptor(self._accepted_descriptor)).hexdigest() \
+                != self._accepted_sha256:
+            raise ValueError(f"{self.subject} published another destination generation")
+        if self.status() is not None:
+            raise ValueError(f"{self.subject} pathname remained after replacement")
+        self.verify()
+        destination.verify()
+        os.fsync(self._descriptor)
+        if destination._descriptor != self._descriptor:
+            os.fsync(destination._descriptor)
+
+    def replace_exact(self, digest, payload, mode=0o600):
+        """Atomically replace only the exact accepted current file generation."""
+        if self._accepted_descriptor is None:
+            self.read_regular()
+        accepted = self._accepted_status()
+        if self._accepted_sha256 != digest:
+            raise ValueError(f"{self.subject} changes its predecessor generation")
+        accepted_identity = (accepted.st_dev, accepted.st_ino)
+        temporary_flag = getattr(os, "O_TMPFILE", None)
+        if temporary_flag is None:
+            raise OSError(errno.ENOSYS, "O_TMPFILE is unavailable")
+        replacement_descriptor = os.open(
+            ".", os.O_RDWR | temporary_flag, mode, dir_fd=self._descriptor,
+        )
+        temporary = f".{self.name}.exchange-{os.getpid()}-{os.urandom(16).hex()}"
+        replacement_identity = None
+        consumed_predecessor = False
+        try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(replacement_descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("short anchored workspace replacement write")
+                offset += written
+            os.fchmod(replacement_descriptor, mode)
+            os.fsync(replacement_descriptor)
+            replacement = os.fstat(replacement_descriptor)
+            replacement_identity = (replacement.st_dev, replacement.st_ino)
+            self.verify()
+            with WorkspaceFileAnchor(
+                self.workspace,
+                replacement_recovery_relative_path(self.relative, payload),
+                f"{self.subject} replacement recovery",
+            ) as recovery:
+                recovery_status = recovery.status()
+                if recovery_status is None:
+                    recovery.publish(payload, mode=mode)
+                elif recovery.read_regular() != payload:
+                    raise ValueError(
+                        f"{self.subject} has another replacement recovery generation",
+                    )
+            _link_descriptor_without_replace(
+                replacement_descriptor, self._descriptor, temporary,
+            )
+            _rename_exchange_at(
+                self._descriptor, temporary, self._descriptor, self.name,
+            )
+            retired = os.stat(
+                temporary, dir_fd=self._descriptor, follow_symlinks=False,
+            )
+            if (retired.st_dev, retired.st_ino) != accepted_identity:
+                _rename_exchange_at(
+                    self._descriptor, temporary, self._descriptor, self.name,
+                )
+                restored = self.status()
+                if restored is None or (restored.st_dev, restored.st_ino) != (
+                    retired.st_dev, retired.st_ino
+                ):
+                    raise ValueError(
+                        f"{self.subject} could not restore its changed predecessor",
+                    )
+                raise ValueError(f"{self.subject} predecessor changed before replacement")
+            consumed_predecessor = True
+            published = self.status()
+            if published is None or (published.st_dev, published.st_ino) \
+                    != replacement_identity:
+                raise ValueError(f"{self.subject} published generation changed")
+            if hashlib.sha256(_read_descriptor(replacement_descriptor)).hexdigest() \
+                    != hashlib.sha256(payload).hexdigest():
+                raise ValueError(f"{self.subject} replacement bytes changed")
+            retired = os.stat(
+                temporary, dir_fd=self._descriptor, follow_symlinks=False,
+            )
+            if (retired.st_dev, retired.st_ino) != accepted_identity:
+                raise ValueError(f"{self.subject} predecessor changed before retirement")
+            os.unlink(temporary, dir_fd=self._descriptor)
+            self.verify()
+            os.fsync(self._descriptor)
+            completed = self.status()
+            if completed is None or (completed.st_dev, completed.st_ino) \
+                    != replacement_identity \
+                    or hashlib.sha256(_read_descriptor(replacement_descriptor)).hexdigest() \
+                    != hashlib.sha256(payload).hexdigest():
+                raise ValueError(f"{self.subject} changed before replacement completion")
+        finally:
+            if not consumed_predecessor:
+                try:
+                    temporary_status = os.stat(
+                        temporary, dir_fd=self._descriptor, follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    temporary_status = None
+                current = self.status()
+                if temporary_status is not None \
+                        and replacement_identity is not None \
+                        and (temporary_status.st_dev, temporary_status.st_ino) \
+                        != replacement_identity \
+                        and current is not None \
+                        and (current.st_dev, current.st_ino) == replacement_identity:
+                    try:
+                        _rename_exchange_at(
+                            self._descriptor, temporary, self._descriptor, self.name,
+                        )
+                    except OSError:
+                        pass
+            try:
+                temporary_status = os.stat(
+                    temporary, dir_fd=self._descriptor, follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                temporary_status = None
+            replacement = os.fstat(replacement_descriptor)
+            if temporary_status is not None:
+                temporary_identity = (temporary_status.st_dev, temporary_status.st_ino)
+                if temporary_identity in {
+                    (replacement.st_dev, replacement.st_ino), accepted_identity,
+                }:
+                    os.unlink(temporary, dir_fd=self._descriptor)
+            os.close(replacement_descriptor)
 
     def publish(self, payload, mode=0o444):
         if self.status() is not None:
@@ -351,6 +531,36 @@ class CorrectionAuthorityLease:
             return cls(workspace, operation, descriptor, (opened.st_dev, opened.st_ino))
         except BaseException:
             os.close(descriptor)
+            raise
+
+    @classmethod
+    def inherit(cls, workspace, operation, descriptor):
+        """Authenticate one lock descriptor retained by an official shell owner."""
+        workspace = pathlib.Path(workspace)
+        if not workspace.is_absolute():
+            raise ValueError("the correction authority workspace is not absolute")
+        if not isinstance(descriptor, int) or isinstance(descriptor, bool) or descriptor < 0:
+            raise ValueError("the inherited correction authority descriptor is malformed")
+        _lstat_real_directory(workspace, "the correction authority workspace")
+        path = workspace / CORRECTION_LOCK_NAME
+        try:
+            inherited = os.dup(descriptor)
+        except OSError as exc:
+            raise ValueError("the inherited correction authority descriptor is unavailable") from exc
+        try:
+            opened = os.fstat(inherited)
+            current = path.lstat()
+            if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) \
+                    or not stat.S_ISREG(opened.st_mode) \
+                    or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise ValueError("the inherited correction authority lock has another identity")
+            lease = cls(
+                workspace, operation, inherited, (opened.st_dev, opened.st_ino),
+            )
+            lease.verify(operation)
+            return lease
+        except BaseException:
+            os.close(inherited)
             raise
 
     def __enter__(self):
@@ -596,6 +806,57 @@ def private_risk_history_path(built, mandate):
     )
 
 
+def product_pass_generation_account(opening_proof, opening, mandate):
+    """Return one closed lens identity for an authenticated pass opening."""
+    if not isinstance(opening, dict):
+        raise ValueError("the product pass generation has no opening account")
+    built = opening.get("built")
+    commit = opening.get("commit")
+    gate = opening.get("gate")
+    if not isinstance(built, str) or not LOT_RE.fullmatch(built) \
+            or not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)) \
+            or not HASH_RE.fullmatch(str(gate)) or mandate not in MANDATES:
+        raise ValueError("the product pass generation has malformed authority")
+    risk_history = str(private_risk_history_path(built, mandate))
+    if opening.get("schema") != 2:
+        root = built.split(".", 1)[0]
+        return {
+            "schema": 1,
+            "built": built,
+            "occurrence": built,
+            "pass_commit": commit,
+            "pass_gate": gate,
+            "mandate": mandate,
+            "report": str(pathlib.PurePosixPath(
+                "reports", "product-review", root, f"{built}-{mandate}.md",
+            )),
+            "risk_history": risk_history,
+        }
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*):[0-9a-f]{64}", str(opening_proof)):
+        raise ValueError("the product pass generation has no exact opening proof")
+    position = opening.get("position")
+    pass_ordinal = opening.get("pass")
+    generation = opening.get("generation_sha256")
+    _positive_integer(position, "the correction position", allow_zero=True)
+    _positive_integer(pass_ordinal, "the product pass ordinal")
+    if not HASH_RE.fullmatch(str(generation)):
+        raise ValueError("the product pass generation has no generation digest")
+    return {
+        "schema": 2,
+        "pass_opening": opening_proof,
+        "built": built,
+        "position": position,
+        "generation_sha256": generation,
+        "pass": pass_ordinal,
+        "occurrence": occurrence_label(position, pass_ordinal),
+        "pass_commit": commit,
+        "pass_gate": gate,
+        "mandate": mandate,
+        "report": str(product_report_path(built, position, pass_ordinal, mandate)),
+        "risk_history": risk_history,
+    }
+
+
 def occurrence_label(position, pass_ordinal):
     _positive_integer(position, "the correction position", allow_zero=True)
     _positive_integer(pass_ordinal, "the product pass ordinal")
@@ -608,6 +869,76 @@ def generation_sha256(account):
         return hashlib.sha256(
             json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode(),
         ).hexdigest()
+    if isinstance(account, dict) and account.get("kind") == "correction":
+        expected_keys = {
+            "schema", "kind", "built", "position", "parent", "opening",
+            "authorities", "artifact", "tasks", "terminal", "commit", "gate",
+            "final_checker_set_sha256",
+        }
+        if set(account) != expected_keys or account.get("schema") != 1:
+            raise ValueError("the correction generation has an invalid preimage")
+        built = account.get("built")
+        position = account.get("position")
+        if not isinstance(built, str) or not LOT_RE.fullmatch(built):
+            raise ValueError("the correction generation has an invalid built unit")
+        _positive_integer(position, "the correction generation position")
+        parent = account.get("parent")
+        if not isinstance(parent, dict) or set(parent) != {
+            "position", "generation_sha256", "commit",
+        } or parent.get("position") != position - 1 \
+                or not HASH_RE.fullmatch(str(parent.get("generation_sha256"))) \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(parent.get("commit"))):
+            raise ValueError("the correction generation has an invalid parent")
+        proof_pattern = r"(?:0|[1-9][0-9]*):[0-9a-f]{64}"
+        if not re.fullmatch(proof_pattern, str(account.get("opening"))):
+            raise ValueError("the correction generation has an invalid opening")
+        authorities = account.get("authorities")
+        if not isinstance(authorities, list):
+            raise ValueError("the correction generation has invalid authority history")
+        for authority in authorities:
+            if not isinstance(authority, dict) or set(authority) != {"kind", "proof"} \
+                    or authority.get("kind") not in {"revision", "rebase", "rewind"} \
+                    or not re.fullmatch(proof_pattern, str(authority.get("proof"))):
+                raise ValueError("the correction generation has malformed authority history")
+        artifact = account.get("artifact")
+        if not isinstance(artifact, dict) or set(artifact) != {
+            "workspace", "repository", "controller_sha256", "final_sha256", "final_object",
+        } or any(
+            not isinstance(artifact.get(key), str)
+            or pathlib.PurePosixPath(artifact[key]).is_absolute()
+            or ".." in pathlib.PurePosixPath(artifact[key]).parts
+            for key in ("workspace", "repository", "final_object")
+        ) or not HASH_RE.fullmatch(str(artifact.get("controller_sha256"))) \
+                or not HASH_RE.fullmatch(str(artifact.get("final_sha256"))):
+            raise ValueError("the correction generation has invalid artifact authority")
+        tasks = account.get("tasks")
+        if not isinstance(tasks, list):
+            raise ValueError("the correction generation has invalid task authority")
+        for ordinal, task in enumerate(tasks, 1):
+            if not isinstance(task, dict) or set(task) != {
+                "task", "attempt", "commit", "gate", "success",
+            } or task.get("task") != ordinal:
+                raise ValueError("the correction generation tasks are not exact and sequential")
+            _positive_integer(task.get("attempt"), f"the correction task {ordinal} attempt")
+            if not re.fullmatch(r"[0-9a-f]{40,64}", str(task.get("commit"))) \
+                    or not HASH_RE.fullmatch(str(task.get("gate"))) \
+                    or not re.fullmatch(proof_pattern, str(task.get("success"))):
+                raise ValueError("the correction generation has malformed task authority")
+        terminal = account.get("terminal")
+        if not isinstance(terminal, dict) or set(terminal) != {"kind", "sha256"} \
+                or terminal.get("kind") not in {"built", "amendment-resolved"} \
+                or not HASH_RE.fullmatch(str(terminal.get("sha256"))) \
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(account.get("commit"))) \
+                or not HASH_RE.fullmatch(str(account.get("gate"))) \
+                or account.get("final_checker_set_sha256") != EMPTY_FINAL_CHECKER_SET_SHA256:
+            raise ValueError("the correction generation has invalid terminal authority")
+        if terminal["kind"] == "built" and (
+            not tasks or account["commit"] != tasks[-1]["commit"]
+            or account["gate"] != tasks[-1]["gate"]
+        ):
+            raise ValueError("the built correction generation changes its final task")
+        payload = json.dumps(account, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).hexdigest()
     expected_keys = {
         "schema", "kind", "built", "position", "origin", "plan", "tasks",
         "terminal", "commit", "gate", "final_checker_set_sha256",
@@ -763,6 +1094,23 @@ def _rename_without_replace_at(source_directory, source, target_directory, targe
         source_directory, os.fsencode(source),
         target_directory, os.fsencode(target),
         RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), target)
+
+
+def _rename_exchange_at(source_directory, source, target_directory, target):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        source_directory, os.fsencode(source),
+        target_directory, os.fsencode(target),
+        RENAME_EXCHANGE,
     )
     if result != 0:
         error = ctypes.get_errno()

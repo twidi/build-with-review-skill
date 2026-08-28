@@ -198,10 +198,43 @@ def validate_assignment(value, *, materialized):
                 or value["phase"] != "publish-post-amendment-return" \
                 or "consumer_requirement" in value:
             raise ValueError("the amendment return assignment has an invalid owner account")
-    elif owner in {"escalation-tail", "sublot-plan"}:
-        raise ValueError(
-            f"the {owner} assignment is reserved until its exact producer grammar exists"
+    elif owner == "escalation-tail":
+        unit = value["unit"]
+        if not isinstance(unit, dict) or unit.get("kind") != "correction-escalation" \
+                or unit.get("producer") not in {
+                    "ordinary", "post-amendment-return", "retained-authority-rewind",
+                }:
+            raise ValueError("the escalation-tail unit has an invalid producer")
+        producer = unit["producer"]
+        authority_key = {
+            "ordinary": "authority",
+            "post-amendment-return": "amendment",
+            "retained-authority-rewind": "rewind_owner_sha256",
+        }[producer]
+        require_exact_keys(
+            unit, {"kind", "built", "round", "producer", authority_key},
+            "the escalation-tail unit",
         )
+        if not isinstance(unit["built"], str) or not LOT_RE.fullmatch(unit["built"]):
+            raise ValueError("the escalation-tail unit has an invalid built unit")
+        require_positive(unit["round"], "the escalation-tail correction round")
+        if authority_key in {"authority", "amendment"}:
+            require_proof(unit[authority_key], "the escalation-tail journal authority")
+        else:
+            require_hash(unit[authority_key], "the escalation-tail producer authority")
+        validate_consumer_requirement(value.get("consumer_requirement"))
+        if value["task"] is not None or value["phase"] != "sublot-plan-consumer-map":
+            raise ValueError("the escalation-tail assignment has an invalid owner account")
+    elif owner == "sublot-plan":
+        unit = value["unit"]
+        require_exact_keys(unit, {"kind", "lot", "source"}, "the sublot-plan unit")
+        if unit["kind"] != "sublot-plan" \
+                or not isinstance(unit["lot"], str) or not LOT_RE.fullmatch(unit["lot"]):
+            raise ValueError("the sublot-plan unit has an invalid identity")
+        require_proof(unit["source"], "the sublot-plan escalation source")
+        validate_consumer_requirement(value.get("consumer_requirement"))
+        if value["task"] is not None or value["phase"] != "publish-consumer-map":
+            raise ValueError("the sublot-plan assignment has an invalid owner account")
     else:
         raise ValueError("the final-checker assignment has an unsupported owner")
 
@@ -213,6 +246,108 @@ def validate_assignment(value, *, materialized):
     if materialized:
         require_hash(value["mapping_proof"], "the assignment mapping proof")
     return copy.deepcopy(value)
+
+
+def validate_consumer_requirement(value):
+    keys = {
+        "obligation_id", "checker", "manifest_phase", "remaining_outcome",
+        "escalation_item",
+    }
+    require_exact_keys(value, keys, "the final-checker consumer requirement")
+    require_hash(value["obligation_id"], "the consumer requirement obligation")
+    if value["checker"] not in {"design", "code"} \
+            or value["manifest_phase"] != f"first-{value['checker']}-manifest":
+        raise ValueError("the consumer requirement has an invalid checker phase")
+    if not isinstance(value["remaining_outcome"], str) \
+            or not value["remaining_outcome"].strip() \
+            or value["remaining_outcome"] != value["remaining_outcome"].strip():
+        raise ValueError("the consumer requirement has no exact remaining outcome")
+    if not isinstance(value["escalation_item"], str) \
+            or not re.fullmatch(r"F[1-9][0-9]*", value["escalation_item"]):
+        raise ValueError("the consumer requirement has no exact escalation item")
+    return copy.deepcopy(value)
+
+
+def _assignment_consumer_task(assignment):
+    if not isinstance(assignment, dict):
+        return None
+    if assignment.get("owner") == "task":
+        return assignment.get("task")
+    unit = assignment.get("unit")
+    if assignment.get("owner") == "task-contract-map" and isinstance(unit, dict):
+        return unit.get("target_task")
+    return None
+
+
+def consumer_task_for_member(member):
+    if not isinstance(member, dict):
+        raise ValueError("the final-checker member is not one object")
+    source_account(member.get("source"))
+    assignments = [member.get("assignment")]
+    transfers = member.get("transfers")
+    if not isinstance(transfers, list):
+        raise ValueError("the final-checker member has no transfer history")
+    for transfer in reversed(transfers):
+        if not isinstance(transfer, dict):
+            raise ValueError("the final-checker member has a malformed transfer")
+        assignments.extend((transfer.get("to"), transfer.get("from")))
+    for assignment in assignments:
+        task = _assignment_consumer_task(assignment)
+        if isinstance(task, int) and not isinstance(task, bool) and task > 0:
+            return task
+    raise ValueError("the final-checker member has no exact consumer task authority")
+
+
+def escalation_item_for_member(member, items):
+    if not isinstance(items, list) or not items:
+        raise ValueError("the escalation has no item task authority")
+    expected_ids = [f"F{index}" for index in range(1, len(items) + 1)]
+    actual_ids = []
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict) or set(item) != {"id", "tasks"}:
+            raise ValueError("an escalation item has malformed task authority")
+        tasks = item["tasks"]
+        if not isinstance(tasks, list) or tasks != sorted(set(tasks)) \
+                or any(not isinstance(task, int) or isinstance(task, bool) or task < 1
+                       for task in tasks):
+            raise ValueError("an escalation item has malformed consumer tasks")
+        actual_ids.append(item["id"])
+        normalized.append({"id": item["id"], "tasks": tasks})
+    if actual_ids != expected_ids:
+        raise ValueError("the escalation item task authority is not contiguous")
+    task = consumer_task_for_member(member)
+    matches = [item["id"] for item in normalized if task in item["tasks"]]
+    if len(matches) != 1:
+        raise ValueError("the final-checker member has no one exact escalation item")
+    return matches[0]
+
+
+def consumer_requirement_for_member(member):
+    source = source_account(member.get("source") if isinstance(member, dict) else None)
+    assignments = [member.get("assignment")]
+    transfers = member.get("transfers")
+    if not isinstance(transfers, list):
+        raise ValueError("the final-checker member has no transfer history")
+    for transfer in transfers:
+        if not isinstance(transfer, dict):
+            raise ValueError("the final-checker member has a malformed transfer")
+        assignments.extend((transfer.get("from"), transfer.get("to")))
+    requirements = []
+    for assignment in assignments:
+        requirement = assignment.get("consumer_requirement") \
+            if isinstance(assignment, dict) else None
+        if requirement is not None:
+            requirements.append(validate_consumer_requirement(requirement))
+    if not requirements or any(requirement != requirements[0]
+                               for requirement in requirements[1:]):
+        raise ValueError("the final-checker member has no one immutable consumer requirement")
+    requirement = requirements[0]
+    if requirement["obligation_id"] != source["obligation_id"] \
+            or requirement["checker"] != source["checker"] \
+            or requirement["manifest_phase"] != source["required_consumer_phase"]:
+        raise ValueError("the final-checker consumer requirement changes its source authority")
+    return requirement
 
 
 def semantic_assignment(value):

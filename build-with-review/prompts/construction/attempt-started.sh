@@ -40,6 +40,26 @@ LOT=$1 N=$2 K=$3 RETRY_REPORT=${4:--}
 positive pass close and sublot.opened terminal before an attempt can start. Nothing was
 marked and no session exists."
 
+CORRECTION_SCOPE=$("$PROGRESS" construction-correction-authority-scope "$LOT") \
+    || die "the attempt cannot derive its Correction authority scope. Nothing was marked and no session exists."
+[[ $CORRECTION_SCOPE = ordinary || $CORRECTION_SCOPE = correction-escalation ]] \
+    || die "the attempt returned a malformed Correction authority scope. Nothing was marked and no session exists."
+CORRECTION_LEASE_FD=
+if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+    CORRECTION_LEASE_OPERATION="correction-escalation-attempt-start:$LOT:$N:$K"
+    exec {CORRECTION_LEASE_FD}<>"$WORKSPACE/correction-authority.lock"
+    flock -x "$CORRECTION_LEASE_FD" \
+        || die "the attempt cannot acquire its shared Correction authority lease. Nothing was marked and no session exists."
+    "$PROGRESS" construction-correction-lease-check \
+        "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION" \
+        || die "the attempt does not own its exact shared Correction authority lease. Nothing was marked and no session exists."
+    "$PROGRESS" construction-escalation-attempt-admission \
+        "$LOT" "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION" \
+        || die "an open Correction escalation C2 owner blocks this attempt. Nothing was marked and no session exists."
+    [ ! -e "$WORKSPACE/plan-commit-in-progress" ] \
+        || die "a Correction escalation plan publication is unfinished. Resume that exact plan owner before another attempt. Nothing was marked and no session exists."
+fi
+
 RUN="refs/bwr/$(basename "$WORKSPACE")"   # this run's own ref namespace — see vocabulary.md
 
 cd "$REPO"
@@ -68,22 +88,14 @@ fi
 # shared attempt mark moves, so a typo or stale task number creates no state.
 PLAN="$WORKSPACE/plans/$LOT-plan.md"
 [ -f "$PLAN" ] || die "no current plan exists at $PLAN — task $N cannot start"
-TASKS=$(grep -c '^## Task ' "$PLAN" || true)
-[ "$TASKS" -gt 0 ] \
-    || die "$PLAN declares no task — expected '## Task <N>' headings"
-mapfile -t HEADINGS < <(grep '^## Task ' "$PLAN" || true)
-mapfile -t IDS < <(sed -n 's/^## Task \([1-9][0-9]*\) - ..*$/\1/p' "$PLAN")
-[ "${#IDS[@]}" -eq "$TASKS" ] \
-    || die "a '## Task' heading is malformed — every heading reads '## Task <N> - <title>', N a positive integer without leading zeros"
-t=0
-for id in ${IDS[@]+"${IDS[@]}"}; do
-    t=$((t + 1))
-    [ "$id" = "$t" ] \
-        || die "task headings must read 1..$TASKS in order, exactly once each — heading $t says '## Task $id'"
-done
+MANIFEST=$("$PROGRESS" construction-plan-task-manifest "$LOT") \
+    || die "$PLAN has no exact structural Task 1..T manifest"
+read -r TASKS PLAN_ID MANIFEST_EXTRA <<< "$MANIFEST"
+[[ $TASKS =~ ^[1-9][0-9]*$ ]] && [[ $PLAN_ID =~ ^[0-9a-f]{40,64}$ ]] \
+    && [ -z "$MANIFEST_EXTRA" ] \
+    || die "$PLAN returned a malformed structural task manifest account"
 [ "$N" -le "$TASKS" ] \
     || die "task $N does not exist in the current $LOT plan — it has tasks 1..$TASKS"
-PLAN_ID=$(printf '%s\n' "${HEADINGS[@]}" | git hash-object --stdin)
 PLAN_STATE=$(python3 "$CONSTRUCTION_REVIEW" plan-state "$LOT" "$N") \
     || die "the current task has no exact controller-owned plan state"
 CONTRACT_ID=$(printf '%s\n' "$PLAN_STATE" \
@@ -103,9 +115,12 @@ OWNERSHIP_ID=$(printf '%s\n' "$PLAN_STATE" \
 PLANCOPY="docs/plans/$(basename "$WORKSPACE")-$LOT-plan.md"
 git cat-file -e "HEAD:$PLANCOPY" 2>/dev/null \
     || die "HEAD has no committed plan copy at $PLANCOPY — task $N cannot start"
-mapfile -t COMMITTED_HEADINGS < <(git show "HEAD:$PLANCOPY" | grep '^## Task ' || true)
-COMMITTED_TASKS=${#COMMITTED_HEADINGS[@]}
-COMMITTED_PLAN_ID=$(printf '%s\n' "${COMMITTED_HEADINGS[@]}" | git hash-object --stdin)
+HEAD_COMMIT=$(git rev-parse HEAD)
+COMMITTED_MANIFEST=$("$PROGRESS" construction-plan-task-manifest "$LOT" "$HEAD_COMMIT") \
+    || die "$PLANCOPY has no exact committed structural Task 1..T manifest"
+read -r COMMITTED_TASKS COMMITTED_PLAN_ID COMMITTED_MANIFEST_EXTRA <<< "$COMMITTED_MANIFEST"
+[ -z "$COMMITTED_MANIFEST_EXTRA" ] \
+    || die "$PLANCOPY returned a malformed committed structural task manifest account"
 [ "$COMMITTED_TASKS" = "$TASKS" ] && [ "$COMMITTED_PLAN_ID" = "$PLAN_ID" ] \
     || die "the workspace plan's Task 1..T manifest is not the current committed
 controller-owned manifest in $PLANCOPY. An implementer may write its own Design, but
@@ -164,10 +179,14 @@ This branch omits validated work. Nothing was marked and no session exists."
 # For later tasks it consumes the predecessor task's accepted final gate. A
 # spec or amendment commit above either proof invalidates it until the
 # controller runs one new baseline gate.
-bash "$WORKSPACE/prompts/construction/gate-check.sh" require-current >/dev/null \
+CURRENT_GATE=$(bash "$WORKSPACE/prompts/construction/gate-check.sh" require-current) \
     || die "the current HEAD has no accepted green gate proof for the current gate.md.
 Run one controller baseline gate for this exact clean HEAD before creating an implementer.
 Nothing was marked and no session exists."
+if [ "$CORRECTION_SCOPE" = correction-escalation ] && [ "$N" -eq 1 ]; then
+    "$PROGRESS" construction-escalation-baseline-check "$LOT" "$CURRENT_GATE" "$(git rev-parse HEAD)" >/dev/null \
+        || die "the current baseline does not consume one exact clean C2 result for this escalation plan. Nothing was marked and no session exists."
+fi
 
 # An attempt number is never reused. The try ref and the failure report carry
 # a preserved attempt's K — but every closer that leaves neither still

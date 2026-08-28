@@ -38,11 +38,14 @@ BLOCKING_MARKERS = {
     "correction-round-open-in-progress",
     "correction-round-void-in-progress",
     "correction-round-revision-in-progress",
+    "correction-terminal-restore-in-progress",
     "correction-attempt-failure-in-progress",
     "correction-rewind-in-progress",
     "correction-attempt-stop-in-progress",
     "correction-product-authority-in-progress",
     "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+    "correction-round-escalation-in-progress",
 }
 
 
@@ -158,6 +161,10 @@ def run(args):
             current_entries, len(current_entries), args.built, args.round,
             "the Correction Round completion",
         )
+        progress.require_no_active_correction_amendment(
+            current_entries, len(current_entries), args.built, args.round,
+            "the Correction Round completion",
+        )
         if marker.exists() or marker.is_symlink():
             account = read_marker(marker)
             current_entries = progress.journal_entries()
@@ -187,6 +194,10 @@ def run(args):
                 capture_output=True, text=True,
             ).stdout:
                 fail("the Correction Round completion requires one clean tree")
+            progress.correction_round_built_implementer_preflight(
+                current_entries, len(current_entries), args.built, args.round,
+                "the Correction Round completion",
+            )
             publish_final_artifact(args.built, args.round)
             account = derive_account(args.built, args.round, operation)
             head = subprocess.run(

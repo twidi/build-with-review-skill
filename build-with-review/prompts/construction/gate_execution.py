@@ -51,16 +51,20 @@ CORRECTION_OWNER_MARKERS = {
     "correction-attempt-stop-in-progress",
     "correction-product-authority-in-progress",
     "correction-round-built-in-progress",
+    "correction-terminal-restore-in-progress",
     "correction-round-open-in-progress",
     "correction-round-revision-in-progress",
     "correction-round-void-in-progress",
     "correction-rewind-in-progress",
     "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+    "correction-round-escalation-in-progress",
 }
 CORRECTION_BASELINE_OWNER_MARKERS = {
     "correction-round-revision-in-progress",
     "correction-rewind-in-progress",
     "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
 }
 
 COMMON = WORKSPACE / "prompts" / "common"
@@ -744,6 +748,16 @@ def validate_correction_gate_owner(marker, entries):
         "the correction gate admission",
     )
     living = current_correction_owner_markers()
+    return_baseline = marker["scope"] == "correction-baseline" \
+        and living and all(name in {
+            "correction-rewind-in-progress",
+            "correction-amendment-return-in-progress",
+        } for name in living)
+    if not return_baseline:
+        progress.require_no_active_correction_amendment(
+            entries, len(entries), marker["lot"], int(marker["correction"]),
+            "the correction gate admission",
+        )
     if marker["scope"] != "correction-baseline":
         if living:
             refuse(f"the correction gate follows unfinished owner {living[0]}")
@@ -774,6 +788,57 @@ def correction_baseline_authority(marker):
         "execution_authority_sha256": state["execution_authority_sha256"],
         "final_checker_set_sha256": progress.final_checker_set_sha256(current_set),
     }
+
+
+def correction_escalation_gate_lot(marker, entries):
+    lot = marker["lot"] if marker["scope"] in {"task", "review"} else None
+    if marker["scope"] == "baseline":
+        match = re.fullmatch(
+            r"plan/(lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?)/([0-9a-f]{40,64})",
+            marker["owner"],
+        )
+        if match is not None and match.group(2) == marker["head"]:
+            lot = match.group(1)
+        if lot is None:
+            candidates = []
+            for entry in entries:
+                data = progress.note_data(entry)
+                candidate_lot = entry.get("lot")
+                if entry.get("kind") == "plan.written" \
+                        and data.get("schema") == 2 \
+                        and data.get("origin") == "correction-round" \
+                        and data.get("commit") == marker["head"] \
+                        and progress.correction_escalation_plan_origin(entries, candidate_lot):
+                    candidates.append(candidate_lot)
+            if len(set(candidates)) == 1:
+                lot = candidates[0]
+    if lot is None or not progress.correction_escalation_plan_origin(entries, lot):
+        return None
+    return lot
+
+
+def validate_correction_escalation_gate(marker, entries, lot):
+    progress.require_no_open_correction_escalation_c2(
+        entries, len(entries), lot, "the Correction escalation gate admission",
+    )
+    if marker["scope"] != "baseline":
+        return
+    progress.correction_escalation_require_quiescent(
+        entries, len(entries), lot, "the Correction escalation C2.7 baseline",
+        live=True,
+    )
+    clean_c2 = progress.correction_escalation_clean_c2_account(
+        entries, len(entries), lot, "the Correction escalation C2.7 baseline",
+    )
+    commit = clean_c2["plan_account"]["commit"]
+    parent = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", f"{commit}^"],
+        capture_output=True, text=True,
+    )
+    if marker["owner"] != f"plan/{lot}/{commit}" \
+            or marker["head"] != commit or parent.returncode != 0 \
+            or marker["base"] != parent.stdout.strip():
+        refuse("the Correction escalation baseline changes its plan or predecessor authority")
 
 
 def gate_event_data(marker, execution_hash):
@@ -976,13 +1041,31 @@ def open_marker(source):
                     marker, encoded["sha256"], lease, operation,
                 )
     else:
-        with gate_authority():
-            refuse_live_marker("opening another gate")
-            verify_frozen(marker)
-            encoded = encode_execution(configured_execution())
-            payload = "".join(f"{key} {marker[key]}\n" for key in MARKER_KEYS)
-            payload += f"execution {encoded['token']}\n"
-            atomic_publish(MARKER, payload.encode(), replace=False)
+        entries = progress.journal_entries()
+        escalation_lot = correction_escalation_gate_lot(marker, entries)
+
+        def publish_ordinary():
+            nonlocal encoded
+            with gate_authority():
+                refuse_live_marker("opening another gate")
+                verify_frozen(marker)
+                encoded = encode_execution(configured_execution())
+                payload = "".join(f"{key} {marker[key]}\n" for key in MARKER_KEYS)
+                payload += f"execution {encoded['token']}\n"
+                atomic_publish(MARKER, payload.encode(), replace=False)
+
+        encoded = None
+        if escalation_lot is None:
+            publish_ordinary()
+        else:
+            operation = f"correction-escalation-gate:{marker['op']}"
+            try:
+                with CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+                    entries = progress.journal_entries()
+                    validate_correction_escalation_gate(marker, entries, escalation_lot)
+                    publish_ordinary()
+            except (OSError, ValueError) as exc:
+                refuse(f"the Correction escalation gate lease failed: {exc}")
     print(f"FROZEN {encoded['sha256']}")
 
 

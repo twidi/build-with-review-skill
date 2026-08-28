@@ -14,7 +14,7 @@ WORKSPACE = HERE.parent.parent
 REPO = WORKSPACE.parent.parent.parent.resolve()
 
 from correction_round import parse_artifact, parse_artifact_bytes
-from work_unit import resolve_correction
+from work_unit import progress, resolve_correction
 
 
 def refuse(message):
@@ -57,7 +57,8 @@ def publish(args):
             or active.get("unit_authority_sha256") != resolved["authority"]["sha256"]:
         refuse("the active attempt belongs to another work unit")
     document = active.get("document") or {}
-    selected = current["tasks"][task - 1] if task <= len(current["tasks"]) else {}
+    matches = [candidate for candidate in current["tasks"] if candidate["task"] == task]
+    selected = matches[0] if len(matches) == 1 else {}
     if current["controller_sha256"] != document.get("controller_sha256") \
             or current["manifest_sha256"] != document.get("manifest_sha256") \
             or selected.get("task_contract_sha256") != document.get("task_contract_sha256"):
@@ -65,12 +66,12 @@ def publish(args):
 
     relative = resolved["repository_document"]
     committed = git("show", f"HEAD:{relative}", check=False)
-    if task == 1:
-        if committed.returncode == 0:
-            refuse("Task 1 cannot replace a predecessor repository artifact")
-    else:
-        if committed.returncode != 0:
+    if committed.returncode != 0:
+        if task != 1:
             refuse("a later correction task has no predecessor repository artifact")
+    else:
+        if task == 1 and current.get("task_projection") is None:
+            refuse("Task 1 cannot replace a predecessor repository artifact")
         try:
             predecessor = parse_artifact_bytes(
                 committed.stdout, expected_built=args.built, expected_round=args.round,
@@ -80,9 +81,11 @@ def publish(args):
         if predecessor["controller_sha256"] != current["controller_sha256"] \
                 or predecessor["manifest_sha256"] != current["manifest_sha256"]:
             refuse("the repository and workspace artifacts have different controller authority")
-        for earlier in range(task - 1):
-            old = predecessor["tasks"][earlier]
-            new = current["tasks"][earlier]
+        predecessor_tasks = {item["task"]: item for item in predecessor["tasks"]}
+        for new in (item for item in current["tasks"] if item["task"] < task):
+            old = predecessor_tasks.get(new["task"])
+            if old is None:
+                refuse("the current task invents an earlier active task")
             if any(old[key] != new[key] for key in (
                 "task_contract_sha256", "design_sha256", "disagreement_sha256",
             )):
@@ -116,7 +119,11 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?", args.built) or args.round < 1:
         refuse("the Correction Round identity is malformed")
-    publish(args)
+    cache_token = progress.CORRECTION_CONTRACT_STATE_CACHE.set({})
+    try:
+        publish(args)
+    finally:
+        progress.CORRECTION_CONTRACT_STATE_CACHE.reset(cache_token)
 
 
 if __name__ == "__main__":

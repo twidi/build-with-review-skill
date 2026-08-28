@@ -184,9 +184,45 @@ bare_stop_owner_inspect() {
 }
 
 bare_stop_allocate() {
-    local marker=$1 mode=$2 program=$3 nonce
+    local marker=$1 mode=$2 program=$3 nonce workspace journal progress lease_fd lease_operation result
     shift 3
     bare_stop_call_identity "$mode" "$program" "$@"
+    workspace=${marker%/*}
+    journal="$workspace/progress.jsonl"
+    progress="$workspace/prompts/common/progress.py"
+    lease_operation="bare-stop-allocate:$mode:$BARE_STOP_EXPECTED_HASH"
+    exec {lease_fd}<>"$workspace/correction-authority.lock" || {
+        BARE_STOP_ERROR="the bare stop cannot open the shared Correction authority lock"
+        return 2
+    }
+    flock -x "$lease_fd" || {
+        BARE_STOP_ERROR="the bare stop cannot acquire the shared Correction authority lock"
+        exec {lease_fd}>&-
+        return 2
+    }
+    if ! python3 "$progress" construction-correction-lease-check \
+            "$lease_fd" "$lease_operation"; then
+        BARE_STOP_ERROR="the bare stop does not own the shared Correction authority lease"
+        exec {lease_fd}>&-
+        return 2
+    fi
+    # The caller's earlier inspection was provisional. Another official owner
+    # can finish while this stop waits for the shared lease. Rederive the exact
+    # marker owner under the lease before this operation publishes anything.
+    if ! bare_stop_owner_inspect "$marker" "$journal" "$mode" "$program" "$@"; then
+        exec {lease_fd}>&-
+        return 2
+    fi
+    if [ "$BARE_STOP_OWNER_STATE" != fresh ]; then
+        BARE_STOP_ERROR="another bare stop acquired the workspace before this allocation"
+        exec {lease_fd}>&-
+        return 2
+    fi
+    if ! python3 "$progress" correction-escalation-stop-admission; then
+        BARE_STOP_ERROR="an open Correction escalation C2 owner blocks this bare stop"
+        exec {lease_fd}>&-
+        return 2
+    fi
     nonce=$(printf '%s\0' "$mode" "$BARE_STOP_EXPECTED_HASH" "$(date +%s%N)" "$$" "$RANDOM" \
         | sha256sum | cut -d' ' -f1)
     {
@@ -198,7 +234,13 @@ bare_stop_allocate() {
         printf 'report -\n'
     } > "$marker.tmp"
     mv "$marker.tmp" "$marker"
-    bare_stop_marker_read "$marker"
+    if bare_stop_marker_read "$marker"; then
+        result=0
+    else
+        result=$?
+    fi
+    exec {lease_fd}>&-
+    return "$result"
 }
 
 bare_stop_settle_tree() {

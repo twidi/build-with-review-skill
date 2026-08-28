@@ -8,9 +8,15 @@ against a sound design.
 
 **You classify it again, from the outside.** You change nothing.
 
-You are given: the workspace path, the path to a detached worktree holding the failed
-attempt — **or word that there is none**: attempts that failed at the design stage left
-the tree untouched — the path to the plan, the task number, and both failure reports.
+You are given one explicit work-unit form.
+
+- **Ordinary:** the lot, task, attempt, plan, optional detached worktree, and both reports.
+- **Correction:** the built lot, Correction round, task, attempt, exact diagnostic manifest,
+  canonical Correction artifact, optional detached worktree, and both reports.
+
+Never reinterpret one form as the other. A Correction diagnostic has no ordinary fallback.
+The Correction manifest binds the exact failure, nested try ref, candidate, tree and worktree.
+An absent worktree in that manifest means the failed attempt left the tree untouched.
 
 ---
 
@@ -27,10 +33,17 @@ the tree untouched — the path to the plan, the task number, and both failure r
    the tree as that attempt left it. Read it there. **When there is none**, the attempts
    never touched the tree: the state they faced is the repository as it stands, and you
    read it in place. Either way, **you never modify the real working tree.**
-6. **the tasks this one depends on**, as they were actually built:
-   `<workspace>/prompts/construction/task-diff.sh <lot> <K>`, which runs the equivalent
-   of `git diff refs/bwr/<run>/<lot>/task-<K>^ refs/bwr/<run>/<lot>/task-<K>` — one
-   task, one commit, diffed against its own parent
+6. **the tasks this one depends on**, as they were actually built. For ordinary work,
+   use `<workspace>/prompts/construction/task-diff.sh <lot> <K>`. For Correction work,
+   never construct a ref from the built lot. Read an exact prior file only through:
+
+   ```sh
+   python3 <workspace>/prompts/common/progress.py construction-diagnostic-task-show \
+     <diagnostic manifest> <prior task K> <repository-relative path>
+   ```
+
+   This reader derives the nested Correction ref only from the authenticated failure
+   manifest. A same-built ordinary task ref or another Correction round cannot substitute.
 
 ---
 

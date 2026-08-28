@@ -39,12 +39,15 @@ BLOCKING_MARKERS = {
     "correction-artifact-in-progress",
     "correction-product-authority-in-progress",
     "correction-round-built-in-progress",
+    "correction-terminal-restore-in-progress",
     "correction-round-open-in-progress",
     "correction-round-revision-in-progress",
     "correction-round-void-in-progress",
     "correction-rewind-in-progress",
     "correction-attempt-stop-in-progress",
     "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+    "correction-round-escalation-in-progress",
 }
 CLASSIFICATIONS = {"C3.9a", "C3.9b", "C3.9c", "C3.9d"}
 
@@ -239,6 +242,13 @@ def map_marker_account(args, event, attempt_payload, attempt_marker, resolved):
         "consumer_account_sha256": next_consumer,
     })).hexdigest()
     document = attempt_marker["document"]
+    pre_map_document = event.get("pre_map_document")
+    if not isinstance(pre_map_document, dict) or pre_map_document != {
+        "schema": 1,
+        "path": resolved.get("workspace_document"),
+        "sha256": pre_map_document.get("sha256"),
+    } or not re.fullmatch(r"[0-9a-f]{64}", str(pre_map_document.get("sha256"))):
+        fail("the final-checker source has no exact pre-map document generation")
     account = {
         "schema": 1,
         "operation": operation,
@@ -255,7 +265,7 @@ def map_marker_account(args, event, attempt_payload, attempt_marker, resolved):
             "workspace_path": str(WORKSPACE / document["path"]),
             "repository_path": resolved.get("repository_document"),
             "authority": resolved["authority"],
-            "sha256": resolved["artifact_sha256"],
+            "sha256": pre_map_document["sha256"],
             "controller_sha256": document["controller_sha256"],
             "manifest_sha256": document["manifest_sha256"],
             "design_contract_sha256": document["design_contract_sha256"],
@@ -272,6 +282,94 @@ def map_marker_account(args, event, attempt_payload, attempt_marker, resolved):
         "next_task_contract_sha256": next_contract,
         "phase": "prepared",
     }
+    return account
+
+
+def historical_map_marker_account(entries, index, entry):
+    """Rebuild one map owner from its durable failure prefix."""
+    progress.validate_attempt_failed_entry(entries, index, entry)
+    event = progress.note_data(entry)
+    built = entry.get("lot")
+    round_number = entry.get("correction")
+    task_number = entry.get("task")
+    attempt_number = event.get("attempt")
+    state = progress.current_correction_contract_state(
+        entries, index, built, round_number,
+        "the historical final-checker map attempt",
+    )
+    task = progress.correction_artifact_task(
+        state["artifact"], task_number, "the historical final-checker map attempt",
+    )
+    current = progress.outstanding_final_checker_set(
+        entries, index, built, round_number,
+        "the historical final-checker map attempt",
+    )
+    unit = {"kind": "correction", "built": built, "round": round_number}
+    assigned = progress.assigned_final_checker_obligations(
+        current, unit, task_number, task,
+        "the historical final-checker map attempt",
+    )
+    _authority_index, design_proof_authority = \
+        progress.design_proof_authority_for_assigned_code(
+            entries, index, current, unit, task_number, task,
+            "the historical final-checker map attempt",
+        )
+    predecessor = progress.correction_attempt_predecessor_account(
+        entries, index, built, round_number, task_number,
+        "the historical final-checker map attempt",
+    )
+    tree_authority = {
+        "rewind": state.get("rewind_proof"),
+        "commit": state["execution_commit"]
+        if "execution_commit" in state else state["commit"],
+        "tree": state["execution_tree"]
+        if "execution_tree" in state else state["tree"],
+        "gate": state.get("execution_gate"),
+    }
+    attempt_marker = {
+        "schema": 2,
+        "unit": unit,
+        "unit_authority_sha256": state["authority_sha256"],
+        "tree_authority": tree_authority,
+        "task": task_number,
+        "attempt": attempt_number,
+        "prior_attempt": event["prior_attempt"],
+        "attempt_predecessor": predecessor,
+        "document": {
+            "path": state["path"],
+            "manifest_sha256": state["artifact"]["manifest_sha256"],
+            "controller_sha256": state["controller_sha256"],
+            "design_contract_sha256": task["design_contract_sha256"],
+            "consumer_account_sha256": task["consumer_account_sha256"],
+            "task_contract_sha256": task["task_contract_sha256"],
+            "design_sha256": task["design_sha256"],
+            "disagreement_sha256": task["disagreement_sha256"],
+        },
+        "retry": "-",
+        "design_proof_authority": design_proof_authority,
+        "outstanding_final_checker_set_sha256": progress.final_checker_set_sha256(current),
+        "assigned_final_checker_obligations": assigned,
+    }
+    attempt_payload = canonical_bytes(attempt_marker) + b"\n"
+    resolved = {
+        "unit": unit,
+        "authority": {
+            "kind": state["kind"],
+            "proof": state["proof"],
+            "sha256": state["authority_sha256"],
+        },
+        "tree_authority": tree_authority,
+        "workspace_document": state["path"],
+        "repository_document": state["path"],
+        "artifact_sha256": state["artifact_sha256"],
+        "task": task,
+    }
+    args = SimpleNamespace(
+        built=built, round=round_number, task=task_number, attempt=attempt_number,
+    )
+    account = map_marker_account(args, event, attempt_payload, attempt_marker, resolved)
+    if account is None:
+        fail("the durable failure has no final-checker contract-map owner")
     return account
 
 
@@ -328,6 +426,26 @@ def require_matching_failure_terminal(terminals, args):
         fail("the correction attempt already has another terminal outcome")
 
 
+def print_next(args, terminals):
+    if len(terminals) != 1:
+        fail("the correction attempt failure has no exact public continuation proof")
+    if args.classification == "C3.9d":
+        proof = progress.journal_line_proof(terminals[0][0])
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*):[0-9a-f]{64}", str(proof)):
+            fail("the correction attempt failure has no exact public escalation proof")
+        print(
+            "NEXT "
+            f"{HERE / 'correction-round-escalate.sh'} "
+            f"{args.built} {args.round} {proof}"
+        )
+    elif (WORKSPACE / FINAL_MAP_MARKER).is_file():
+        print(
+            "NEXT "
+            f"{HERE / 'final-checker-contract-map.sh'} "
+            f"{args.built} {args.round}"
+        )
+
+
 def preserve_and_reset(account):
     candidate = account["candidate_commit"]
     try_ref = account["try_ref"]
@@ -363,6 +481,18 @@ def preserve_and_reset(account):
     if git_output("rev-parse", "HEAD") != account["base_commit"] \
             or temporary_index_tree(spares) != account["base_tree"]:
         fail("the correction attempt did not return to its exact attempt base")
+
+
+def open_diagnostic(args):
+    result = run(
+        str(HERE / "diagnostic-open.sh"), "--correction", args.built,
+        str(args.round), str(args.task), str(args.attempt), check=False,
+    )
+    if result.returncode != 0:
+        fail(result.stderr.strip() or result.stdout.strip()
+             or "the Correction diagnostic checkout could not open")
+    if result.stdout:
+        print(result.stdout, end="")
 
 
 def failure_event(args):
@@ -440,7 +570,8 @@ def validate_completed_attempt_marker(
     unit = {"kind": "correction", "built": args.built, "round": args.round}
     required = {
         "schema", "unit", "unit_authority_sha256", "tree_authority", "task", "attempt",
-        "attempt_predecessor", "document", "retry", "design_proof_authority",
+        "attempt_predecessor", "prior_attempt", "document", "retry",
+        "design_proof_authority",
         "outstanding_final_checker_set_sha256", "assigned_final_checker_obligations",
     }
     document = marker.get("document") if isinstance(marker, dict) else None
@@ -477,7 +608,8 @@ def validate_completed_attempt_marker(
             or marker.get("assigned_final_checker_obligations") \
             != event.get(assignments_key) \
             or marker.get("design_proof_authority") != event.get("design_proof_authority") \
-            or marker.get("attempt_predecessor") != predecessor:
+            or marker.get("attempt_predecessor") != predecessor \
+            or marker.get("prior_attempt") != event.get("prior_attempt"):
         fail("the completed correction attempt marker changes its frozen authority")
     base_ref = f"{resolved['ref_root']}/attempt-base"
     if git_output("rev-parse", "--verify", f"{base_ref}^{{commit}}") \
@@ -517,6 +649,7 @@ def close(args):
             if git_output("rev-parse", "HEAD") != static["base_commit"] \
                     or temporary_index_tree() != static["base_tree"]:
                 fail("the recorded correction failure no longer has its exact reset tree")
+            open_diagnostic(args)
             remove_exact(
                 "attempt-in-flight", attempt_payload,
                 "the completed correction attempt identity",
@@ -525,6 +658,7 @@ def close(args):
                 f"CORRECTION ATTEMPT FAILED {args.built} c{args.round} "
                 f"task {args.task} (already recorded)"
             )
+            print_next(args, existing_terminals)
             return
         current = derive_live(args)
         if current["operation"] != operation:
@@ -574,6 +708,7 @@ def close(args):
             progress.journal_entries(), terminals[0][0], terminals[0][1],
         )
         preserve_and_reset(account)
+        open_diagnostic(args)
         remove_exact(
             MARKER_NAME, marker_payload, "the completed correction attempt failure owner",
         )
@@ -581,6 +716,7 @@ def close(args):
             "attempt-in-flight", attempt_payload, "the completed correction attempt identity",
         )
     print(f"CORRECTION ATTEMPT FAILED {args.built} c{args.round} task {args.task}")
+    print_next(args, terminals)
 
 
 def main():

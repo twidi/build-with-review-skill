@@ -12,6 +12,7 @@ import stat
 import sys
 import tempfile
 import traceback
+from types import SimpleNamespace
 
 HERE = pathlib.Path(__file__).resolve().parent
 CONSTRUCTION = HERE / "prompts" / "construction"
@@ -123,9 +124,9 @@ def schema_two_artifact(*, state="active"):
     )
     raw = raw.replace("F1: task 1\nF2: task 1", "F1: tasks 1, 3\nF2: task 2", 1)
     absorbed = f"F2: 9:{'6' * 64}"
-    remaining = "F1: task 1"
+    remaining = "F1: task 2"
     removed = "2"
-    task_projection = "Task 1: prior task 3 · findings F1\n"
+    task_projection = "Task 2: prior task 3 · findings F1\n"
     if state == "resolved":
         absorbed = f"F1: 9:{'6' * 64}\nF2: 11:{'a' * 64}"
         remaining = ""
@@ -151,11 +152,206 @@ Removed: {removed}
 """
     raw = raw.replace("---\n\n## Task 1", projection + "---\n\n## Task 1", 1)
     raw = raw.replace("Covers: F1, F2", "Covers: F1", 1)
+    raw = raw.replace("## Task 1 - Correct both accepted findings",
+                      "## Task 2 - Correct both accepted findings", 1)
     if state != "active":
+        raw = raw.replace("State: active", f"State: {state}", 1)
+        start = raw.index("---\n\n## Task 2")
+        raw = raw[:start]
+    return raw.encode()
+
+
+def post_amendment_return_artifact(*, state="active"):
+    raw = valid_artifact(task_2=True).decode()
+    raw = raw.replace(
+        "Schema: 1\n",
+        "Schema: 2\n"
+        "State: active\n"
+        "Amendment: 1\n"
+        f"Amendment opening: 7:{'4' * 64}\n"
+        f"Amendment commit: 8:{'5' * 64}\n",
+        1,
+    )
+    absorbed = f"F2: 9:{'6' * 64}"
+    remaining = "F1: task 1"
+    removed = "-"
+    projected = "Task 1: prior tasks 1, 2 · findings F1\n"
+    if state == "resolved":
+        absorbed = f"F1: 11:{'a' * 64}\nF2: 9:{'6' * 64}"
+        remaining = ""
+        removed = "1, 2"
+        projected = ""
+    elif state == "escalating":
+        removed = "1, 2"
+        projected = ""
+    projection = f"""## Absorbed findings
+{absorbed}
+
+## Remaining finding coverage
+{remaining}
+
+## Accepted contributions
+
+## Task projection
+Preserved: -
+Removed: {removed}
+{projected}
+
+"""
+    raw = raw.replace("---\n\n## Task 1", projection + "---\n\n## Task 1", 1)
+    raw = raw.replace("Covers: F1, F2", "Covers: F1", 1)
+    second = raw.find("\n\n---\n\n## Task 2")
+    raw = raw[:second] + "\n" if second >= 0 else raw
+    if state in {"resolved", "escalating"}:
         raw = raw.replace("State: active", f"State: {state}", 1)
         start = raw.index("---\n\n## Task 1")
         raw = raw[:start]
     return raw.encode()
+
+
+def escalation_artifact(*, schema):
+    if schema == 1:
+        identity = (
+            "Schema: 1\n"
+            "Built unit: lot-1.1\n"
+            "Correction round: 1\n"
+            f"Correction authority: 1:{'a' * 64}\n"
+            f"Current commit: {'b' * 40}\n"
+            f"Structural blocker: 2:{'c' * 64}\n"
+        )
+        contributions = (
+            f"Task 1: {'d' * 40} · {'e' * 64} · satisfies F2, F10\n"
+        )
+    else:
+        identity = (
+            "Schema: 2\n"
+            "Producer: post-amendment-return\n"
+            "Built unit: lot-1.1\n"
+            "Correction round: 1\n"
+            f"Correction opening: 1:{'a' * 64}\n"
+            f"Previous authority: 2:{'b' * 64}\n"
+            f"AMENDMENT opening: 3:{'c' * 64}\n"
+            f"AMENDMENT commit: 4:{'d' * 64}\n"
+            f"Return SHA-256: {'e' * 64}\n"
+            f"Current commit: {'f' * 40}\n"
+            f"Current tree: {'1' * 40}\n"
+            f"Current gate: {'2' * 64}\n"
+            f"Correction artifact SHA-256: {'3' * 64}\n"
+            f"Structural blocker: 5:{'4' * 64}\n"
+        )
+        contributions = ""
+    return (
+        "# Demo — lot-1.1 correction round 1 escalation\n\n"
+        f"{identity}\n"
+        "## Accepted contributions\n"
+        f"{contributions}\n"
+        "## Unresolved account\n\n"
+        "### F1 - Publish the structural correction.\n"
+        "Origins: correction/c1/F2, correction/c1/F10\n"
+        "Sources: unlooked/F2, unlooked/F10, coverage/F1\n"
+        "Accepted contributions: task 2, task 10\n"
+        f"Blocker: 2:{'c' * 64}\n"
+        "Required outcome: Publish the structural correction.\n\n"
+        "## Required sub-lot outcome\n"
+        "Publish the structural correction.\n\n"
+        "## Final-checker consumer requirements\n"
+    ).encode()
+
+
+def post_amendment_return_account(return_module, obligations_module, *, route="rebase"):
+    parser = load_module(
+        f"correction_round_return_{route}", CONSTRUCTION / "correction_round.py",
+    )
+    previous = parser.parse_artifact_bytes(valid_artifact(task_2=True))
+    state = {"rebase": "active", "resolved": "resolved", "sublot": "escalating"}[route]
+    current = parser.parse_artifact_bytes(post_amendment_return_artifact(state=state))
+    transition, _ = obligations_module.materialize_transition(
+        obligations_module.empty_set(), additions=[], dispositions=[],
+        transfer_kind="amendment-return",
+    )
+    absorbed = {"F2": f"9:{'6' * 64}"}
+    findings = [
+        {"id": "F1", "outcome": "remaining", "amendment_item": None},
+        {"id": "F2", "outcome": "absorbed", "amendment_item": absorbed["F2"]},
+    ]
+    projection = {
+        "preserved": [],
+        "removed": [],
+        "remaining": [{"task": 1, "prior_tasks": [1, 2], "findings": ["F1"]}],
+    }
+    if route == "resolved":
+        absorbed = {
+            "F1": f"11:{'a' * 64}",
+            "F2": f"9:{'6' * 64}",
+        }
+        findings = [
+            {"id": finding, "outcome": "absorbed", "amendment_item": absorbed[finding]}
+            for finding in ("F1", "F2")
+        ]
+        projection = {
+            "preserved": [],
+            "removed": [
+                {"task": 1, "reason": "absorbed"},
+                {"task": 2, "reason": "absorbed"},
+            ],
+            "remaining": [],
+        }
+    elif route == "sublot":
+        projection = {
+            "preserved": [],
+            "removed": [
+                {"task": 1, "reason": "structural-escalation"},
+                {"task": 2, "reason": "structural-escalation"},
+            ],
+            "remaining": [],
+        }
+    account = {
+        "schema": 1,
+        "built": "lot-1.1",
+        "round": 1,
+        "previous_authority": f"6:{'3' * 64}",
+        "previous_execution_authority_sha256": "b" * 64,
+        "amendment": {
+            "opening": f"7:{'4' * 64}",
+            "committed": f"8:{'5' * 64}",
+            "artifact_sha256": "c" * 64,
+            "spec_path": "docs/plans/demo-design.md",
+            "spec_sha256": "d" * 64,
+        },
+        "tree_transition": {
+            "pre_amendment_rewind": None,
+            "rewind": None,
+            "reland": None,
+        },
+        "input_artifact": {
+            "sha256": previous["artifact_sha256"],
+            "object": (
+                "corrections/lot-1.1/objects/"
+                f"sha256-{previous['artifact_sha256']}.md"
+            ),
+        },
+        "current": {
+            "artifact_sha256": current["artifact_sha256"],
+            "artifact_object": (
+                "corrections/lot-1.1/objects/"
+                f"sha256-{current['artifact_sha256']}.md"
+            ),
+            "commit": "e" * 40,
+            "tree": "f" * 40,
+            "gate": "1" * 64,
+        },
+        "findings": findings,
+        "task_projection": projection,
+        "accepted_contributions": [],
+        "blocker": f"12:{'b' * 64}" if route == "sublot" else None,
+        "required_sublot_outcome": (
+            "Publish the remaining correction through one sub-lot."
+            if route == "sublot" else None
+        ),
+        "retry_transition": transition,
+        "route": route,
+    }
+    return account, previous, current
 
 
 @test
@@ -443,8 +639,9 @@ def schema_two_projection_is_exhaustive_and_state_specific():
     active = module.parse_artifact_bytes(schema_two_artifact())
     check(active["schema"] == 2 and active["state"] == "active", active)
     check(active["absorbed_findings"] == {"F2": f"9:{'6' * 64}"}, active)
-    check(active["finding_coverage"] == {"F1": [1]}, active)
+    check(active["finding_coverage"] == {"F1": [2]}, active)
     check(active["accepted_contributions"][0]["outcome"] == "preserved", active)
+    check([task["task"] for task in active["tasks"]] == [2], active)
     check(active["task_projection"]["remaining"][0]["prior_tasks"] == [3], active)
 
     resolved = module.parse_artifact_bytes(schema_two_artifact(state="resolved"))
@@ -452,7 +649,7 @@ def schema_two_projection_is_exhaustive_and_state_specific():
     check(set(resolved["absorbed_findings"]) == {"F1", "F2"}, resolved)
     escalating = module.parse_artifact_bytes(schema_two_artifact(state="escalating"))
     check(escalating["state"] == "escalating" and not escalating["tasks"], escalating)
-    check(escalating["finding_coverage"] == {"F1": [1]}, escalating)
+    check(escalating["finding_coverage"] == {"F1": [2]}, escalating)
 
     invalid_resolved = schema_two_artifact(state="resolved").replace(
         b"## Remaining finding coverage\n\n",
@@ -474,6 +671,386 @@ def schema_two_projection_is_exhaustive_and_state_specific():
         pass
     else:
         raise AssertionError("accepted one finding as both absorbed and remaining")
+
+
+@test
+def escalation_numeric_identities_use_field_specific_canonical_order():
+    module = load_module(
+        "correction_escalation_numeric_order",
+        CONSTRUCTION / "correction_escalation.py",
+    )
+    for schema in (1, 2):
+        raw = escalation_artifact(schema=schema)
+        account = module.parse_artifact_bytes(
+            raw, expected_built="lot-1.1", expected_round=1,
+        )
+        check(
+            account["items"][0]["origins"]
+            == ["correction/c1/F2", "correction/c1/F10"],
+            account,
+        )
+        check(
+            account["items"][0]["accepted_contributions"] == [2, 10],
+            account,
+        )
+        for old, new in (
+            (
+                b"Origins: correction/c1/F2, correction/c1/F10",
+                b"Origins: correction/c1/F10, correction/c1/F2",
+            ),
+            (
+                b"Accepted contributions: task 2, task 10",
+                b"Accepted contributions: task 10, task 2",
+            ),
+        ):
+            try:
+                module.parse_artifact_bytes(raw.replace(old, new))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(
+                    f"schema {schema} accepted reverse numeric identity order",
+                )
+
+    schema_one = escalation_artifact(schema=1)
+    parsed = module.parse_artifact_bytes(schema_one)
+    check(parsed["accepted_contributions"][0]["satisfies"] == ["F2", "F10"], parsed)
+    try:
+        module.parse_artifact_bytes(
+            schema_one.replace(b"satisfies F2, F10", b"satisfies F10, F2"),
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("schema 1 accepted reverse finding identity order")
+
+    check(
+        module.canonical_source_identities(
+            ["coverage/F1", "unlooked/F10", "unlooked/F2"],
+            "the product source order fixture",
+        ) == ["unlooked/F2", "unlooked/F10", "coverage/F1"],
+        "product sources stopped using mandate-plus-numeric order",
+    )
+
+
+@test
+def post_amendment_return_account_owns_one_exhaustive_projection():
+    return_module = load_module(
+        "correction_amendment_return",
+        CONSTRUCTION / "correction_amendment_return.py",
+    )
+    obligations_module = load_module(
+        "final_checker_obligations_return",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    for route in ("rebase", "resolved", "sublot"):
+        account, previous, current = post_amendment_return_account(
+            return_module, obligations_module, route=route,
+        )
+        validated = return_module.validate_return_account(
+            account,
+            previous_artifact=previous,
+            current_artifact=current,
+            input_set=obligations_module.empty_set(),
+        )
+        check(validated == account, validated)
+
+        if route == "sublot":
+            structural_mutations = []
+            omitted = json.loads(json.dumps(account))
+            omitted["findings"].pop()
+            structural_mutations.append(("omitted", omitted))
+            reordered = json.loads(json.dumps(account))
+            reordered["findings"].reverse()
+            structural_mutations.append(("reordered", reordered))
+            foreign = json.loads(json.dumps(account))
+            foreign["findings"][0]["id"] = "F3"
+            structural_mutations.append(("foreign", foreign))
+            for label, mutation in structural_mutations:
+                try:
+                    return_module.validate_return_account(
+                        mutation,
+                        previous_artifact=previous,
+                        current_artifact=current,
+                        input_set=obligations_module.empty_set(),
+                    )
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"the structural return accepted an {label} remaining finding",
+                    )
+
+        mutations = []
+        missing_finding = json.loads(json.dumps(account))
+        missing_finding["findings"].pop()
+        mutations.append(missing_finding)
+        overlapping_finding = json.loads(json.dumps(account))
+        overlapping_finding["findings"][0]["outcome"] = "absorbed"
+        overlapping_finding["findings"][0]["amendment_item"] = f"12:{'2' * 64}"
+        mutations.append(overlapping_finding)
+        changed_projection = json.loads(json.dumps(account))
+        changed_projection["task_projection"]["preserved"] = [1]
+        mutations.append(changed_projection)
+        changed_artifact = json.loads(json.dumps(account))
+        changed_artifact["current"]["artifact_sha256"] = "3" * 64
+        mutations.append(changed_artifact)
+        changed_transition = json.loads(json.dumps(account))
+        changed_transition["retry_transition"]["output_sha256"] = "4" * 64
+        mutations.append(changed_transition)
+        changed_route = json.loads(json.dumps(account))
+        changed_route["route"] = "resolved" if route == "sublot" else "sublot"
+        mutations.append(changed_route)
+        invented_rewind = json.loads(json.dumps(account))
+        invented_rewind["tree_transition"]["rewind"] = f"13:{'7' * 64}"
+        mutations.append(invented_rewind)
+        invented_reland = json.loads(json.dumps(account))
+        invented_reland["tree_transition"]["rewind"] = f"13:{'7' * 64}"
+        invented_reland["tree_transition"]["reland"] = f"13:{'7' * 64}"
+        mutations.append(invented_reland)
+        for mutation in mutations:
+            try:
+                return_module.validate_return_account(
+                    mutation,
+                    previous_artifact=previous,
+                    current_artifact=current,
+                    input_set=obligations_module.empty_set(),
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted changed {route} return account: {mutation}")
+
+
+@test
+def post_amendment_rebase_owns_every_task_obligation_exactly_once():
+    return_module = load_module(
+        "correction_amendment_return_task_obligations",
+        CONSTRUCTION / "correction_amendment_return.py",
+    )
+    obligations_module = load_module(
+        "final_checker_obligations_return_task_obligations",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    sources = [
+        correction_obligation_source(
+            obligations_module,
+            checker="code" if identity == 2 else "design",
+            accepted_ids=[identity],
+        )
+        for identity in (1, 2, 3)
+    ]
+    sources.sort(key=lambda source: source["obligation_id"])
+    amendment_assignment = {
+        "unit": {"kind": "amendment", "number": 1},
+        "task": None,
+        "phase": "publish-post-amendment-return",
+        "owner": "amendment-return",
+    }
+    _opening, input_set = obligations_module.materialize_transition(
+        obligations_module.empty_set(),
+        additions=[
+            {"source": source, "assignment": amendment_assignment}
+            for source in sources
+        ],
+        dispositions=[],
+        transfer_kind="amendment-opening",
+    )
+    task_contracts = {1: "1" * 64, 2: "2" * 64}
+    dispositions = []
+    expected = {1: [], 2: []}
+    for index, source in enumerate(sources):
+        task = 1 if index < 2 else 2
+        expected[task].append(source["obligation_id"])
+        dispositions.append({
+            "obligation_id": source["obligation_id"],
+            "outcome": "deferred",
+            "assignment": {
+                "unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+                "task": task,
+                "phase": source["required_consumer_phase"],
+                "owner": "task",
+                "task_contract_sha256": task_contracts[task],
+            },
+            "evidence": None,
+        })
+    transition, output = obligations_module.materialize_transition(
+        input_set,
+        additions=[],
+        dispositions=dispositions,
+        transfer_kind="amendment-return",
+    )
+    artifact = {
+        "built": "lot-1.1",
+        "round": 1,
+        "tasks": [
+            {
+                "task": task,
+                "task_contract_sha256": task_contracts[task],
+                "obligation_ids": expected[task],
+            }
+            for task in (1, 2)
+        ],
+    }
+    check(
+        return_module.validate_retry_transition(
+            transition, input_set, "rebase", artifact, set(),
+        ) == output,
+        "the exact multi-task rebase did not validate",
+    )
+
+    mutations = []
+    foreign = json.loads(json.dumps(artifact))
+    foreign["tasks"][0]["obligation_ids"] = sorted(
+        foreign["tasks"][0]["obligation_ids"] + ["f" * 64],
+    )
+    mutations.append(("foreign", foreign))
+    duplicate = json.loads(json.dumps(artifact))
+    duplicate["tasks"][1]["obligation_ids"] = sorted(
+        duplicate["tasks"][1]["obligation_ids"] + [expected[1][0]],
+    )
+    mutations.append(("cross-task duplicate", duplicate))
+    omitted = json.loads(json.dumps(artifact))
+    omitted["tasks"][0]["obligation_ids"] = expected[1][1:]
+    mutations.append(("omitted", omitted))
+    reordered = json.loads(json.dumps(artifact))
+    reordered["tasks"][0]["obligation_ids"] = list(reversed(expected[1]))
+    mutations.append(("reordered", reordered))
+    for label, mutation in mutations:
+        try:
+            return_module.validate_retry_transition(
+                transition, input_set, "rebase", mutation, set(),
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted a {label} rebased obligation projection")
+
+    for checker, wrong_phase in (
+        ("code", "first-design-manifest"),
+        ("design", "first-code-manifest"),
+    ):
+        source = next(item for item in sources if item["checker"] == checker)
+        wrong_dispositions = json.loads(json.dumps(dispositions))
+        disposition = next(
+            item for item in wrong_dispositions
+            if item["obligation_id"] == source["obligation_id"]
+        )
+        disposition["assignment"]["phase"] = wrong_phase
+        wrong, _wrong_output = obligations_module.materialize_transition(
+            input_set,
+            additions=[],
+            dispositions=wrong_dispositions,
+            transfer_kind="amendment-return",
+        )
+        try:
+            return_module.validate_retry_transition(
+                wrong, input_set, "rebase", artifact, set(),
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted {checker} obligation through {wrong_phase}")
+
+
+@test
+def post_amendment_return_validates_before_immutable_publication():
+    runner = load_module(
+        "correction_round_return_prepublication",
+        CONSTRUCTION / "correction_round_return.py",
+    )
+    return_module = load_module(
+        "correction_amendment_return_prepublication",
+        CONSTRUCTION / "correction_amendment_return.py",
+    )
+    obligations_module = load_module(
+        "final_checker_obligations_return_prepublication",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    value, previous, current = post_amendment_return_account(
+        return_module, obligations_module, route="rebase",
+    )
+    source = correction_obligation_source(
+        obligations_module, checker="code", accepted_ids=[1],
+    )
+    amendment_assignment = {
+        "unit": {"kind": "amendment", "number": 1},
+        "task": None,
+        "phase": "publish-post-amendment-return",
+        "owner": "amendment-return",
+    }
+    _opening, input_set = obligations_module.materialize_transition(
+        obligations_module.empty_set(),
+        additions=[{"source": source, "assignment": amendment_assignment}],
+        dispositions=[],
+        transfer_kind="amendment-opening",
+    )
+    wrong_assignment = {
+        "unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+        "task": 1,
+        "phase": "first-design-manifest",
+        "owner": "task",
+        "task_contract_sha256": current["tasks"][0]["task_contract_sha256"],
+    }
+    wrong_transition, _output = obligations_module.materialize_transition(
+        input_set,
+        additions=[],
+        dispositions=[{
+            "obligation_id": source["obligation_id"],
+            "outcome": "deferred",
+            "assignment": wrong_assignment,
+            "evidence": None,
+        }],
+        transfer_kind="amendment-return",
+    )
+    value["retry_transition"] = wrong_transition
+    current["tasks"][0]["obligation_ids"] = [source["obligation_id"]]
+    current["artifact_sha256"] = "3" * 64
+    value["current"]["artifact_sha256"] = current["artifact_sha256"]
+    value["current"]["artifact_object"] = (
+        "corrections/lot-1.1/objects/"
+        f"sha256-{current['artifact_sha256']}.md"
+    )
+    published = []
+
+    with tempfile.TemporaryDirectory() as temporary:
+        workspace = pathlib.Path(temporary)
+        runner.WORKSPACE = workspace
+        account = {
+            "built": "lot-1.1",
+            "round": 1,
+            "amendment": 1,
+            "artifact_sha256": current["artifact_sha256"],
+            "artifact_object": value["current"]["artifact_object"],
+        }
+        path = runner.return_path(account)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(runner.canonical_bytes(value) + b"\n")
+        runner.progress.journal_entries = lambda: []
+        runner.progress.current_correction_contract_state = (
+            lambda *_args, **_kwargs: {"artifact": previous}
+        )
+        runner.progress.outstanding_final_checker_set = (
+            lambda *_args, **_kwargs: input_set
+        )
+        runner.progress.load_correction_amendment_return_validator = lambda: return_module
+        runner.validate_content_object = (
+            lambda *_args, **_kwargs: workspace / account["artifact_object"]
+        )
+        runner.parse_artifact = lambda *_args, **_kwargs: current
+
+        def publish(*_args, **_kwargs):
+            published.append(True)
+            return workspace / "corrections/lot-1.1/objects/foreign.json"
+
+        runner.publish_content_object = publish
+        try:
+            runner.consume_return(account)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("published an invalid immutable return account")
+    check(not published, "validated the return only after immutable publication")
 
 
 @test
@@ -843,7 +1420,448 @@ def final_checker_transition_composes_assignment_and_consumption():
 
 
 @test
-def future_final_checker_assignment_owners_refuse_until_their_producers_exist():
+def escalation_item_authority_uses_the_current_consumer_task_exactly_once():
+    module = load_module(
+        "final_checker_obligations_escalation_item",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    source = correction_obligation_source(module)
+    _addition, mapped = module.materialize_transition(
+        module.empty_set(),
+        additions=[{
+            "source": source,
+            "assignment": correction_contract_map_assignment(module),
+        }],
+        dispositions=[],
+        transfer_kind="final-checker-source",
+    )
+    obligation_id = source["obligation_id"]
+    _assignment, assigned = module.materialize_transition(
+        mapped,
+        additions=[],
+        dispositions=[{
+            "obligation_id": obligation_id,
+            "outcome": "deferred",
+            "assignment": {
+                "unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+                "task": 2,
+                "phase": source["required_consumer_phase"],
+                "owner": "task",
+                "task_contract_sha256": "4" * 64,
+            },
+            "evidence": None,
+        }],
+        transfer_kind="contract-mapped",
+    )
+    member = assigned["entries"][0]
+    check(
+        module.escalation_item_for_member(
+            member,
+            [{"id": "F1", "tasks": [1]}, {"id": "F2", "tasks": [2]}],
+        ) == "F2",
+        "the escalation item followed the immutable source task instead of its consumer",
+    )
+    for items in (
+        [{"id": "F1", "tasks": [1]}],
+        [{"id": "F1", "tasks": [2]}, {"id": "F2", "tasks": [2]}],
+    ):
+        try:
+            module.escalation_item_for_member(member, items)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a retained escalation accepted zero or multiple items")
+
+
+@test
+def retained_authority_live_escalation_uses_the_current_consumer_task():
+    obligations = load_module(
+        "final_checker_obligations_retained_live",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    runner = load_module(
+        "correction_rewind_retained_live",
+        CONSTRUCTION / "correction_rewind.py",
+    )
+    source = correction_obligation_source(obligations)
+    _source_transition, mapped = obligations.materialize_transition(
+        obligations.empty_set(),
+        additions=[{
+            "source": source,
+            "assignment": correction_contract_map_assignment(obligations),
+        }],
+        dispositions=[],
+        transfer_kind="final-checker-source",
+    )
+    _task_transition, current = obligations.materialize_transition(
+        mapped,
+        additions=[],
+        dispositions=[{
+            "obligation_id": source["obligation_id"],
+            "outcome": "deferred",
+            "assignment": {
+                "unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
+                "task": 1,
+                "phase": source["required_consumer_phase"],
+                "owner": "task",
+                "task_contract_sha256": "4" * 64,
+            },
+            "evidence": None,
+        }],
+        transfer_kind="contract-mapped",
+    )
+    coverage = {"F1": [2], "F2": [1]}
+    owner = {
+        "built": "lot-1.1", "round": 1,
+        "opening": f"1:{'1' * 64}",
+        "latest_authority": f"2:{'2' * 64}",
+        "previous_rewind": None,
+        "cause": f"3:{'3' * 64}",
+        "target": {"base_commit": "5" * 40},
+        "crossed_authorities": [],
+        "failed_transition": {
+            "proof": f"4:{'4' * 64}",
+            "transition_sha256": "6" * 64,
+            "reason": "the retained transition has no exact conflict-free Git projection",
+        },
+        "current_set_sha256": obligations.set_sha256(current),
+        "completed": [{"task": 1}],
+        "current_commit": "7" * 40,
+        "current_tree": "8" * 40,
+        "current_gate": "9" * 64,
+        "artifact_sha256": "a" * 64,
+        "artifact_object": "corrections/lot-1.1/objects/sha256-a.json",
+    }
+    account = {
+        "owner": owner,
+        "owner_sha256": "b" * 64,
+        "blocker_path": "corrections/lot-1.1/round-1-rewind-preservation.md",
+    }
+    blocker = {
+        "owner_sha256": account["owner_sha256"],
+        "opening": owner["opening"],
+        "latest_authority": owner["latest_authority"],
+        "previous_rewind": owner["previous_rewind"],
+        "cause": owner["cause"],
+        "target_commit": owner["target"]["base_commit"],
+        "failed_transition": owner["failed_transition"]["proof"],
+        "failed_transition_sha256": owner["failed_transition"]["transition_sha256"],
+        "failure_reason": owner["failed_transition"]["reason"],
+        "current_commit": owner["current_commit"],
+        "current_tree": owner["current_tree"],
+        "current_gate": owner["current_gate"],
+        "items": [
+            {
+                "id": finding,
+                "origin": f"correction/c1/{finding}",
+                "accepted_contributions": [task for task in tasks if task == 1],
+            }
+            for finding, tasks in coverage.items()
+        ],
+        "required_outcome": "Publish the retained structural correction.",
+    }
+
+    with tempfile.TemporaryDirectory() as temporary:
+        runner.WORKSPACE = pathlib.Path(temporary)
+        blocker_path = runner.WORKSPACE / account["blocker_path"]
+        blocker_path.parent.mkdir(parents=True)
+        blocker_path.write_bytes(b"retained blocker\n")
+        runner.parse_rewind_blocker = lambda *_args, **_kwargs: blocker
+        runner.progress.journal_entries = lambda: []
+        runner.progress.current_correction_contract_state = (
+            lambda *_args, **_kwargs: {
+                "artifact": {"source_finding_coverage": coverage},
+            }
+        )
+        runner.progress.outstanding_final_checker_set = (
+            lambda *_args, **_kwargs: current
+        )
+        runner.progress.final_checker_set_sha256 = obligations.set_sha256
+        runner.progress.materialize_final_checker_transition = obligations.materialize_transition
+        runner.escalation_terminal = lambda *_args: None
+        published = []
+        appended = []
+
+        def publish(_workspace, _built, payload, _suffix):
+            published.append(payload)
+            return runner.content_object_path(
+                runner.WORKSPACE, "lot-1.1", hashlib.sha256(payload).hexdigest(), ".md",
+            )
+
+        def normalize(_entries, event, _subject):
+            output = obligations.validate_transition(
+                current,
+                event["retry_transition"],
+                transfer_kind="retained-authority-escalation",
+            )
+            requirement = output["entries"][0]["assignment"]["consumer_requirement"]
+            check(requirement["escalation_item"] == "F2", requirement)
+            appended.append(event)
+
+        runner.publish_content_object = publish
+        runner.progress.normalize_correction_round_escalated = normalize
+        runner.progress.cmd_note_with_lease = lambda *_args, **_kwargs: None
+        runner.remove_marker = lambda *_args: None
+        runner.finish_escalation(
+            SimpleNamespace(built="lot-1.1", round=1),
+            "retained-authority-test", object(), b"marker\n", account,
+        )
+        check(len(published) == 1 and len(appended) == 1, (published, appended))
+
+        for label, changed_coverage in (
+            ("absent", {"F1": [2], "F2": [2]}),
+            ("ambiguous", {"F1": [1], "F2": [1]}),
+        ):
+            coverage.clear()
+            coverage.update(changed_coverage)
+            blocker["items"] = [
+                {
+                    "id": finding,
+                    "origin": f"correction/c1/{finding}",
+                    "accepted_contributions": [task for task in tasks if task == 1],
+                }
+                for finding, tasks in coverage.items()
+            ]
+            published.clear()
+            appended.clear()
+            try:
+                runner.finish_escalation(
+                    SimpleNamespace(built="lot-1.1", round=1),
+                    "retained-authority-test", object(), b"marker\n", account,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"published an {label} retained consumer item")
+            check(
+                not published and not appended,
+                f"the {label} retained consumer item mutated durable authority",
+            )
+
+
+@test
+def retained_authority_terminal_cleanup_authenticates_the_complete_marker_owner():
+    runner = load_module(
+        "correction_rewind_retained_terminal_cleanup",
+        CONSTRUCTION / "correction_rewind.py",
+    )
+    owner = {
+        "built": "lot-1.1", "round": 1,
+        "opening": f"1:{'1' * 64}",
+        "latest_authority": f"2:{'2' * 64}",
+        "previous_rewind": None,
+        "cause": f"3:{'3' * 64}",
+        "target": {"base_commit": "4" * 40},
+        "crossed_authorities": [],
+        "failed_transition": {
+            "proof": f"4:{'4' * 64}",
+            "transition_sha256": "5" * 64,
+            "reason": "the retained transition has no exact conflict-free Git projection",
+        },
+        "current_set_sha256": runner.progress.EMPTY_FINAL_CHECKER_SET_SHA256,
+        "completed": [{
+            "task": 1, "success": f"5:{'7' * 64}",
+            "commit": "8" * 40, "gate": "9" * 64,
+        }],
+        "current_commit": "a" * 40,
+        "current_tree": "b" * 40,
+        "current_gate": "c" * 64,
+        "artifact_sha256": "d" * 64,
+        "artifact_object": "corrections/lot-1.1/objects/sha256-d.md",
+        "current_authority_sha256": "e" * 64,
+        "current_execution_authority_sha256": "f" * 64,
+    }
+    owner_sha256 = hashlib.sha256(
+        json.dumps(owner, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    account = {
+        "schema": 1,
+        "operation": "retained-authority-terminal-cleanup",
+        "disposition": "escalate",
+        "phase": "blocker-required",
+        "owner": owner,
+        "owner_sha256": owner_sha256,
+        "blocker_path": "corrections/lot-1.1/round-1-rewind-preservation.md",
+    }
+    blocker_data = {
+        "artifact": account["blocker_path"],
+        "sha256": "0" * 64,
+        "object": "corrections/lot-1.1/objects/sha256-0.md",
+    }
+    event = {
+        "schema": 3,
+        "producer": "retained-authority-rewind",
+        "built": owner["built"],
+        "round": owner["round"],
+        "route": "sublot",
+        "opening": owner["opening"],
+        "latest_authority": owner["latest_authority"],
+        "previous_rewind": owner["previous_rewind"],
+        "cause": owner["cause"],
+        "target": owner["target"],
+        "crossed_authorities": [],
+        "blocker": blocker_data,
+        "completed_tasks": [1],
+        "commit": owner["current_commit"],
+        "tree": owner["current_tree"],
+        "gate": owner["current_gate"],
+        "artifact_sha256": owner["artifact_sha256"],
+        "artifact_object": owner["artifact_object"],
+        "items": [],
+        "retry_transition": {},
+    }
+    terminal = {"kind": "correction.round.escalated", "data": event}
+
+    with tempfile.TemporaryDirectory() as temporary:
+        runner.WORKSPACE = pathlib.Path(temporary)
+        object_path = runner.WORKSPACE / blocker_data["object"]
+        object_path.parent.mkdir(parents=True)
+        object_path.write_bytes(b"immutable blocker\n")
+        runner.progress.journal_entries = lambda: [terminal]
+        runner.progress.validate_correction_round_escalated_entry = lambda *_args: None
+        runner.validate_content_object = lambda *_args, **_kwargs: object_path
+        runner.parse_rewind_blocker = lambda *_args, **_kwargs: {
+            "owner_sha256": owner_sha256,
+        }
+        runner.validate_escalation_marker(
+            SimpleNamespace(built="lot-1.1", round=1),
+            account["operation"], account,
+        )
+        removed = []
+        runner.remove_marker = lambda payload: removed.append(payload)
+        runner.finish_escalation(
+            SimpleNamespace(built="lot-1.1", round=1),
+            account["operation"], object(), b"exact marker\n", account,
+        )
+        check(removed == [b"exact marker\n"], removed)
+
+        mutations = []
+        changed_set = json.loads(json.dumps(account))
+        changed_set["owner"]["current_set_sha256"] = "1" * 64
+        mutations.append(("current set", changed_set))
+        changed_failure = json.loads(json.dumps(account))
+        changed_failure["owner"]["failed_transition"]["transition_sha256"] = "2" * 64
+        mutations.append(("failed transition", changed_failure))
+        changed_success = json.loads(json.dumps(account))
+        changed_success["owner"]["completed"][0]["success"] = f"6:{'3' * 64}"
+        mutations.append(("completed success", changed_success))
+        for field, digest in (
+            ("current_authority_sha256", "4" * 64),
+            ("current_execution_authority_sha256", "5" * 64),
+        ):
+            changed = json.loads(json.dumps(account))
+            changed["owner"][field] = digest
+            mutations.append((field, changed))
+
+        for label, changed in mutations:
+            changed["owner_sha256"] = hashlib.sha256(
+                json.dumps(
+                    changed["owner"], sort_keys=True, separators=(",", ":"),
+                ).encode(),
+            ).hexdigest()
+            try:
+                runner.validate_escalation_marker(
+                    SimpleNamespace(built="lot-1.1", round=1),
+                    changed["operation"], changed,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"removed a marker with changed {label}")
+
+
+
+@test
+def post_amendment_return_rejects_an_existing_item_owned_by_another_task():
+    return_module = load_module(
+        "correction_amendment_return_item_authority",
+        CONSTRUCTION / "correction_amendment_return.py",
+    )
+    obligations_module = load_module(
+        "final_checker_obligations_return_item_authority",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    source = correction_obligation_source(obligations_module)
+    _addition, input_set = obligations_module.materialize_transition(
+        obligations_module.empty_set(),
+        additions=[{
+            "source": source,
+            "assignment": correction_contract_map_assignment(obligations_module),
+        }],
+        dispositions=[],
+        transfer_kind="final-checker-source",
+    )
+    obligation_id = source["obligation_id"]
+    amendment_commit = f"8:{'5' * 64}"
+    current_artifact = {
+        "built": "lot-1.1",
+        "round": 1,
+        "source_finding_coverage": {"F1": [1], "F2": [2]},
+    }
+
+    def transition_for(item):
+        transition, _output = obligations_module.materialize_transition(
+            input_set,
+            additions=[],
+            dispositions=[{
+                "obligation_id": obligation_id,
+                "outcome": "carried",
+                "assignment": {
+                    "unit": {
+                        "kind": "correction-escalation",
+                        "built": "lot-1.1",
+                        "round": 1,
+                        "producer": "post-amendment-return",
+                        "amendment": amendment_commit,
+                    },
+                    "task": None,
+                    "phase": "sublot-plan-consumer-map",
+                    "owner": "escalation-tail",
+                    "consumer_requirement": {
+                        "obligation_id": obligation_id,
+                        "checker": source["checker"],
+                        "manifest_phase": source["required_consumer_phase"],
+                        "remaining_outcome": "new sub-lot",
+                        "escalation_item": item,
+                    },
+                },
+                "evidence": None,
+            }],
+            transfer_kind="amendment-return",
+        )
+        return transition
+
+    exact = transition_for("F2")
+    return_module.validate_retry_transition(
+        exact,
+        input_set,
+        "sublot",
+        current_artifact,
+        set(),
+        amendment_commit=amendment_commit,
+        required_sublot_outcome="new sub-lot",
+        remaining_findings=["F1", "F2"],
+    )
+
+    try:
+        return_module.validate_retry_transition(
+            transition_for("F1"),
+            input_set,
+            "sublot",
+            current_artifact,
+            set(),
+            amendment_commit=amendment_commit,
+            required_sublot_outcome="new sub-lot",
+            remaining_findings=["F1", "F2"],
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a post-AMENDMENT return accepted another task's item")
+
+
+@test
+def structural_final_checker_assignment_owners_use_closed_producer_grammars():
     module = load_module(
         "final_checker_obligations_future_owners",
         HERE / "prompts" / "common" / "final_checker_obligations.py",
@@ -980,6 +1998,54 @@ def future_final_checker_assignment_owners_refuse_until_their_producers_exist():
         else:
             raise AssertionError(f"replayed future {assignment['owner']} transition")
 
+    requirement = {
+        "obligation_id": source["obligation_id"],
+        "checker": "design",
+        "manifest_phase": "first-design-manifest",
+        "remaining_outcome": "Publish the structural correction.",
+        "escalation_item": "F1",
+    }
+    escalation = {
+        "unit": {
+            "kind": "correction-escalation", "built": "lot-1.1", "round": 1,
+            "producer": "post-amendment-return", "amendment": f"12:{'a' * 64}",
+        },
+        "task": None,
+        "phase": "sublot-plan-consumer-map",
+        "owner": "escalation-tail",
+        "consumer_requirement": requirement,
+    }
+    opened, escalation_set = module.materialize_transition(
+        empty,
+        additions=[{"source": source, "assignment": escalation}],
+        dispositions=[],
+        transfer_kind="amendment-return",
+    )
+    check(module.validate_transition(
+        empty, opened, transfer_kind="amendment-return",
+    ) == escalation_set, opened)
+    sublot = {
+        "unit": {
+            "kind": "sublot-plan", "lot": "lot-1.2", "source": f"13:{'b' * 64}",
+        },
+        "task": None,
+        "phase": "publish-consumer-map",
+        "owner": "sublot-plan",
+        "consumer_requirement": requirement,
+    }
+    allocated, sublot_set = module.materialize_transition(
+        escalation_set,
+        additions=[],
+        dispositions=[{
+            "obligation_id": source["obligation_id"],
+            "outcome": "carried", "assignment": sublot, "evidence": None,
+        }],
+        transfer_kind="sublot-allocation",
+    )
+    check(module.validate_transition(
+        escalation_set, allocated, transfer_kind="sublot-allocation",
+    ) == sublot_set, allocated)
+
     compatible = [
         {
             "unit": {"kind": "correction", "built": "lot-1.1", "round": 1},
@@ -1107,6 +2173,169 @@ def amendment_return_consumer_requirement_refuses_until_its_producer_defines_it(
         module.validate_assignment(compatible, materialized=False) == compatible,
         compatible,
     )
+
+
+@test
+def repeated_amendments_compose_every_pending_and_new_obligation():
+    module = load_module(
+        "final_checker_obligations_repeated_amendments",
+        HERE / "prompts" / "common" / "final_checker_obligations.py",
+    )
+    first_source = correction_obligation_source(module, accepted_ids=[1])
+    second_source = correction_obligation_source(
+        module, checker="code", accepted_ids=[2],
+    )
+    third_source = correction_obligation_source(module, accepted_ids=[3])
+    unit = {"kind": "correction", "built": "lot-1.1", "round": 1}
+
+    task_assignments = [
+        {
+            "unit": unit,
+            "task": 1,
+            "phase": first_source["required_consumer_phase"],
+            "owner": "task",
+            "task_contract_sha256": "1" * 64,
+        },
+        {
+            "unit": unit,
+            "task": 2,
+            "phase": second_source["required_consumer_phase"],
+            "owner": "task",
+            "task_contract_sha256": "2" * 64,
+        },
+    ]
+    initial_additions = [
+        {"source": first_source, "assignment": correction_contract_map_assignment(module)},
+        {"source": second_source, "assignment": correction_contract_map_assignment(module)},
+    ]
+    initial_additions.sort(key=lambda item: item["source"]["obligation_id"])
+    assignments_by_id = {
+        first_source["obligation_id"]: task_assignments[0],
+        second_source["obligation_id"]: task_assignments[1],
+    }
+    _initial_transition, initial = module.materialize_transition(
+        module.empty_set(),
+        additions=initial_additions,
+        dispositions=[],
+        transfer_kind="final-checker-failure",
+    )
+    _mapped_transition, mapped = module.materialize_transition(
+        initial,
+        additions=[],
+        dispositions=[{
+            "obligation_id": member["source"]["obligation_id"],
+            "outcome": "deferred",
+            "assignment": assignments_by_id[member["source"]["obligation_id"]],
+            "evidence": None,
+        } for member in initial["entries"]],
+        transfer_kind="contract-mapped",
+    )
+
+    first_return_owner = {
+        "unit": {"kind": "amendment", "number": 1},
+        "task": None,
+        "phase": "publish-post-amendment-return",
+        "owner": "amendment-return",
+    }
+    first_opening, first_suspended = module.materialize_transition(
+        mapped,
+        additions=[],
+        dispositions=[{
+            "obligation_id": member["source"]["obligation_id"],
+            "outcome": "carried",
+            "assignment": first_return_owner,
+            "evidence": None,
+        } for member in mapped["entries"]],
+        transfer_kind="amendment-opening",
+    )
+    check(module.validate_transition(
+        mapped, first_opening, transfer_kind="amendment-opening",
+    ) == first_suspended, first_opening)
+    first_return, first_rebased = module.materialize_transition(
+        first_suspended,
+        additions=[],
+        dispositions=[{
+            "obligation_id": member["source"]["obligation_id"],
+            "outcome": "deferred",
+            "assignment": assignments_by_id[member["source"]["obligation_id"]],
+            "evidence": None,
+        } for member in first_suspended["entries"]],
+        transfer_kind="amendment-return",
+    )
+    check(module.validate_transition(
+        first_suspended, first_return, transfer_kind="amendment-return",
+    ) == first_rebased, first_return)
+
+    second_return_owner = {
+        "unit": {"kind": "amendment", "number": 2},
+        "task": None,
+        "phase": "publish-post-amendment-return",
+        "owner": "amendment-return",
+    }
+    second_opening, second_suspended = module.materialize_transition(
+        first_rebased,
+        additions=[{"source": third_source, "assignment": second_return_owner}],
+        dispositions=[{
+            "obligation_id": member["source"]["obligation_id"],
+            "outcome": "carried",
+            "assignment": second_return_owner,
+            "evidence": None,
+        } for member in first_rebased["entries"]],
+        transfer_kind="amendment-opening",
+    )
+    check(module.validate_transition(
+        first_rebased, second_opening, transfer_kind="amendment-opening",
+    ) == second_suspended, second_opening)
+    members = {entry["source"]["obligation_id"]: entry for entry in second_suspended["entries"]}
+    dispositions = []
+    for source, task_number, digest in (
+        (first_source, 1, "5" * 64),
+        (third_source, 2, "6" * 64),
+    ):
+        dispositions.append({
+            "obligation_id": source["obligation_id"],
+            "outcome": "deferred",
+            "assignment": {
+                "unit": unit,
+                "task": task_number,
+                "phase": source["required_consumer_phase"],
+                "owner": "task",
+                "task_contract_sha256": digest,
+            },
+            "evidence": None,
+        })
+    dispositions.append({
+        "obligation_id": second_source["obligation_id"],
+        "outcome": "absorbed",
+        "assignment": None,
+        "evidence": {"amendment_item": f"42:{'7' * 64}"},
+    })
+    dispositions.sort(key=lambda item: item["obligation_id"])
+    second_return, output = module.materialize_transition(
+        second_suspended,
+        additions=[],
+        dispositions=dispositions,
+        transfer_kind="amendment-return",
+    )
+    check(module.validate_transition(
+        second_suspended, second_return, transfer_kind="amendment-return",
+    ) == output, second_return)
+    check(len(output["entries"]) == 2, output)
+    check(first_source["obligation_id"] in members
+          and len(next(entry for entry in output["entries"]
+                       if entry["source"] == first_source)["transfers"]) == 6,
+          output)
+
+    incomplete = json.loads(json.dumps(second_opening))
+    incomplete["dispositions"] = incomplete["dispositions"][:-1]
+    try:
+        module.validate_transition(
+            first_rebased, incomplete, transfer_kind="amendment-opening",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a repeated AMENDMENT dropped one pending obligation")
 
 
 def main():

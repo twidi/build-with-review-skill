@@ -286,6 +286,51 @@ def closed_form_session_messages_carry_the_complete_runtime_identity():
 
 
 @test
+def correction_c3_launches_carry_the_exact_work_unit_form():
+    launch = section(
+        "prompts/construction/MODE.md", "### Launching an attempt", "### What comes back"
+    )
+    ordinary_annotations = launch.split(
+        "#### Ordinary implementer launch annotations", 1,
+    )[1].split("#### Correction implementer launch annotations", 1)[0]
+    correction_annotations = launch.split(
+        "#### Correction implementer launch annotations", 1,
+    )[1].split("The message starts with this fixed block", 1)[0]
+    ordinary_inputs = launch.split(
+        "#### Ordinary implementer role inputs", 1,
+    )[1].split("#### Correction implementer role inputs", 1)[0]
+    correction_inputs = launch.split(
+        "#### Correction implementer role inputs", 1,
+    )[1].split("#### Retry inputs for both forms", 1)[0]
+
+    check("`bwr.correction` is absent" in ordinary_annotations,
+          "the ordinary implementer annotations admit a Correction identity")
+    check("`bwr.correction=<round>`" in correction_annotations,
+          "the Correction implementer annotations omit the round")
+    check("work-unit form `ordinary`" in ordinary_inputs,
+          "the ordinary implementer message omits its work-unit form")
+    check("complete canonical resolver JSON account" in correction_inputs
+          and "work-unit form `Correction`" in correction_inputs,
+          "the Correction implementer message omits its complete resolver authority")
+    for field in ("workspace_document", "report_root", "ref_root"):
+        check(f"`{field}`" in correction_inputs,
+              f"the Correction implementer message omits resolved {field}")
+    for forbidden in ("<workspace>/plans/<lot>-plan.md", "task-diff.sh", "paths from the lot"):
+        check(forbidden not in correction_inputs,
+              f"the Correction implementer message infers an ordinary path: {forbidden}")
+    check("<workspace>/plans/<lot>-plan.md" in ordinary_inputs and "task-diff.sh" in ordinary_inputs,
+          "the ordinary implementer message lost its ordinary path contract")
+
+    for checker, end in (("Design checker", "## Implement"),
+                         ("Code checker", "## Final gate surface")):
+        body = section("prompts/construction/implementer.md", f"## {checker}", end)
+        check("work-unit form `ordinary` or `Correction`" in body,
+              f"the actual {checker} launch omits the explicit work-unit form")
+        check("manifest path" in body and "private history" in body and "occurrence label" in body,
+              f"the actual {checker} launch lost a frozen checker input")
+
+
+@test
 def every_child_launch_carries_its_one_exact_additional_prompt():
     launch_sections = [
         ("SPEC reviewer", "prompts/spec/MODE.md", "### S3.2", "### S3.3",

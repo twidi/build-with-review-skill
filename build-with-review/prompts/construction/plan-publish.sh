@@ -20,6 +20,7 @@ fi
 LOT=$1
 [[ $LOT =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "the lot must read lot-<N> or lot-<N>.<M> — positive integers, no leading zeros — got \`$LOT\`"
 DOCUMENT_COPY="$WORKSPACE/prompts/common/document-copy.sh"
+PROGRESS="$WORKSPACE/prompts/common/progress.py"
 CONSTRUCTION_REVIEW="$WORKSPACE/prompts/construction/construction_review.py"
 SOURCE_REL="plans/$LOT-plan.md"
 # The source is authenticated before this script accepts it as the plan.
@@ -45,9 +46,11 @@ F_LOT=; F_N=; F_K=; F_PLAN=; F_PLAN_ID=; F_TASKS=; F_OWNERSHIP=; F_OWNERSHIP_ID=
     && [ "$F_RETRY" = retry ] && [[ $F_RETRY_PROOF = - || $F_RETRY_PROOF =~ ^[0-9]+:[0-9a-f]{64}$ ]] \
     && [ -z "$F_EXTRA" ] \
     || die "the attempt identity has no valid frozen plan manifest on line 2 — no plan was published"
-mapfile -t CURRENT_HEADINGS < <(grep '^## Task ' "$SOURCE" || true)
-CURRENT_TASKS=${#CURRENT_HEADINGS[@]}
-CURRENT_PLAN_ID=$(printf '%s\n' "${CURRENT_HEADINGS[@]}" | git -C "$REPO" hash-object --stdin)
+CURRENT_MANIFEST=$("$PROGRESS" construction-plan-task-manifest "$LOT") \
+    || die "the workspace plan has no exact structural Task 1..T manifest. Nothing was copied."
+read -r CURRENT_TASKS CURRENT_PLAN_ID CURRENT_MANIFEST_EXTRA <<< "$CURRENT_MANIFEST"
+[ -z "$CURRENT_MANIFEST_EXTRA" ] \
+    || die "the workspace plan returned a malformed structural task manifest account. Nothing was copied."
 [ "$CURRENT_TASKS" = "$F_TASKS" ] && [ "$CURRENT_PLAN_ID" = "$F_PLAN_ID" ] \
     || die "the workspace plan's Task 1..T manifest changed after this attempt started.
 The implementer may write its own Design, but may not change task headings or

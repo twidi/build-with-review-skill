@@ -211,9 +211,10 @@ def correction_state(built, correction, task):
         artifact = parse_artifact(path, expected_built=built, expected_round=correction)
     except ValueError as exc:
         refuse(str(exc))
-    if artifact["state"] != "active" or task > len(artifact["tasks"]):
+    matches = [candidate for candidate in artifact["tasks"] if candidate["task"] == task]
+    if artifact["state"] != "active" or len(matches) != 1:
         refuse("the Correction Round has no active requested task")
-    selected = artifact["tasks"][task - 1]
+    selected = matches[0]
     projection = {
         "schema": 1,
         "controller_sha256": artifact["controller_sha256"],
@@ -243,11 +244,14 @@ def correction_attempt_assurance(built, correction, task, attempt):
     unit = {"kind": "correction", "built": built, "round": int(correction)}
     assigned = marker.get("assigned_final_checker_obligations")
     attempt_predecessor = marker.get("attempt_predecessor")
+    prior_attempt = marker.get("prior_attempt")
     if marker.get("schema") != 2 or marker.get("unit") != unit \
             or marker.get("task") != int(task) or marker.get("attempt") != int(attempt) \
             or not isinstance(attempt_predecessor, dict) \
             or attempt_predecessor.get("unit") != unit \
             or attempt_predecessor.get("task") != int(task) \
+            or int(attempt) == 1 and prior_attempt is not None \
+            or int(attempt) > 1 and not isinstance(prior_attempt, dict) \
             or not re.fullmatch(
                 r"[0-9a-f]{40,64}", str(attempt_predecessor.get("commit")),
             ) \
@@ -261,6 +265,7 @@ def correction_attempt_assurance(built, correction, task, attempt):
         refuse("the correction attempt assurance is malformed")
     return {
         "attempt_predecessor": attempt_predecessor,
+        "prior_attempt": prior_attempt,
         "final_checker_set_sha256": marker["outstanding_final_checker_set_sha256"],
         "assigned_final_checker_obligations": assigned,
         "design_proof_authority": marker["design_proof_authority"],
@@ -629,7 +634,7 @@ def load_design_manifest(relative):
     }
     correction_required = required | {
         "unit", "unit_authority_sha256", "execution_authority_sha256", "correction",
-        "attempt_predecessor",
+        "attempt_predecessor", "prior_attempt",
         "final_checker_set_sha256", "assigned_final_checker_obligations",
         "design_proof_authority", "design_contract_sha256", "consumer_account_sha256",
     }
@@ -679,7 +684,7 @@ def load_manifest(relative):
     }
     correction_required = required | {
         "unit", "unit_authority_sha256", "execution_authority_sha256", "correction",
-        "attempt_predecessor",
+        "attempt_predecessor", "prior_attempt",
         "final_checker_set_sha256", "assigned_final_checker_obligations",
         "design_proof_authority", "design_contract_sha256", "consumer_account_sha256",
     }

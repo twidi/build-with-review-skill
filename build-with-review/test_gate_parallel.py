@@ -15,6 +15,14 @@ import traceback
 
 
 HERE = pathlib.Path(__file__).resolve().parent
+COMMON_RUNTIME_FILES = (
+    "progress.py",
+    "authority_precedence.py",
+    "correction_authority.py",
+    "correction_lifecycle.py",
+    "final_checker_obligations.py",
+    "journal_context.py",
+)
 TESTS = []
 
 
@@ -37,6 +45,10 @@ class Fixture:
         self.prompts.mkdir(parents=True)
         for name in ("gate_file.py", "gate_execution.py", "gate_report.py", "ordinary_gate.py"):
             shutil.copy2(HERE / "prompts" / "construction" / name, self.prompts / name)
+        common = self.workspace / "prompts" / "common"
+        common.mkdir()
+        for name in COMMON_RUNTIME_FILES:
+            shutil.copy2(HERE / "prompts" / "common" / name, common / name)
         self.run("git", "init", "-q", cwd=self.repo)
         self.run("git", "config", "user.email", "test@example.invalid", cwd=self.repo)
         self.run("git", "config", "user.name", "Gate Parallel Test", cwd=self.repo)

@@ -2354,7 +2354,9 @@ def controller_document_commits_bypass_mutating_project_hooks():
         fixture.progress.write_text(
             "#!/usr/bin/env python3\n"
             "import sys\n"
-            "if sys.argv[1] == 'amendment-close-check':\n"
+            "if sys.argv[1:] == ['correction-amendment-commit-scope', '1']:\n"
+            "    print('ordinary')\n"
+            "elif sys.argv[1] == 'amendment-close-check':\n"
             "    print('a' * 64)\n"
             "    print('b' * 64)\n"
             "    print('c' * 64)\n"

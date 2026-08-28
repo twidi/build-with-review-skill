@@ -53,7 +53,10 @@ def main():
         workspace = root / "repo" / ".superpowers" / "bwr" / "run"
         common = workspace / "prompts" / "common"
         common.mkdir(parents=True)
-        for name in ("watchdog.py", "progress.py", "authority_precedence.py"):
+        for name in (
+            "watchdog.py", "progress.py", "authority_precedence.py",
+            "correction_authority.py", "final_checker_obligations.py", "journal_context.py",
+        ):
             shutil.copyfile(COMMON / name, common / name)
         fake = root / "fake_twicc.py"
         fake.write_text(FAKE_TWICC, encoding="utf-8")
@@ -101,6 +104,34 @@ def main():
               active.stdout)
         check("resume it now" not in active.stdout, active.stdout)
 
+        correction_openings = []
+        for correction in (1, 2):
+            correction_openings.append({
+                "ts": f"2026-08-21T10:0{correction}:00Z",
+                "by": OWNER,
+                "event": "subagent-started",
+                "kind": "diagnostic",
+                "mode": "construction",
+                "lot": "lot-1",
+                "correction": correction,
+                "task": 1,
+                "attempt": 1,
+                "job": "implementer",
+                "data": {"scope": "diagnostic"},
+            })
+        (workspace / "progress.jsonl").write_text(
+            "".join(json.dumps(opening, separators=(",", ":")) + "\n"
+                    for opening in correction_openings),
+            encoding="utf-8",
+        )
+        correction = run_watchdog(workspace, fake)
+        check(correction.returncode == 0, correction.stdout + correction.stderr)
+        check("OPEN PROVIDER SUBAGENTS — 2" in correction.stdout, correction.stdout)
+        check("lot=lot-1 · correction=1 · task=1 · attempt=1" in correction.stdout,
+              "the watchdog dropped or reordered Correction round 1")
+        check("lot=lot-1 · correction=2 · task=1 · attempt=1" in correction.stdout,
+              "the watchdog collapsed Correction round 2")
+
         skill = (HERE / "SKILL.md").read_text(encoding="utf-8")
         worker = (COMMON / "worker.md").read_text(encoding="utf-8")
         rules = (COMMON / "progress-rules.md").read_text(encoding="utf-8")
@@ -117,6 +148,10 @@ def main():
                   f"{subject} omits the immediate opening reminder")
             check("TwiCC process wait" in text,
                   f"{subject} omits the process-wait prohibition")
+        check("`bwr.correction`" in skill and "positive Correction Round ordinal" in skill,
+              "the common annotation grammar omits the Correction Round identity")
+        check("Correction work-unit sessions" in skill,
+              "the common annotation grammar does not restrict bwr.correction")
         check("subagents-open" in rules and "read-only" in rules,
               "progress rules omit the exact open-bracket query")
         check("open provider-subagent" in watchdog_prompt and "RESUME CHECK" in watchdog_prompt,

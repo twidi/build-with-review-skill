@@ -14,6 +14,7 @@ COMMON = WORKSPACE / "prompts" / "common"
 sys.path.insert(0, str(COMMON))
 
 import progress  # noqa: E402
+from correction_round_return import baseline_account as correction_return_baseline_account  # noqa: E402
 
 
 def fail(message):
@@ -248,6 +249,26 @@ def pending_rewind(args, entries):
 
 def run(args):
     entries, opening, close = exact_opening(args)
+    return_marker = WORKSPACE / "correction-amendment-return-in-progress"
+    if return_marker.exists() or return_marker.is_symlink():
+        account = correction_return_baseline_account(args)
+        task_zero = exact_task_zero(args, opening["base_commit"])
+        selected = current_gate()
+        gate = selected_correction_baseline(
+            entries, selected, account["baseline_owner"], account["commit"],
+            account["commit"], "the Correction AMENDMENT return baseline",
+        )
+        print(json.dumps({
+            "schema": 1,
+            "built": args.built,
+            "round": args.round,
+            "base_commit": account["commit"],
+            "task_zero": task_zero,
+            "mode": "fresh" if gate is not None else "required",
+            "gate": gate,
+            "owner": account["baseline_owner"],
+        }, sort_keys=True, separators=(",", ":")))
+        return
     rewind = pending_rewind(args, entries)
     if rewind is not None:
         task_zero = exact_task_zero(args, opening["base_commit"])

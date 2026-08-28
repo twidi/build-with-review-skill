@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Parse and authenticate one Correction Round artifact."""
 
+import argparse
+import contextlib
 import hashlib
+import io
 import json
 import pathlib
 import re
+import sys
 
 LOT_RE = re.compile(r"lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -46,8 +50,8 @@ ROUTE_FIXED = {
     "Ownership": "preserved",
     "Decomposition": "preserved",
     "Coordination": "bounded",
-    "Repetition": "independent",
 }
+REPETITION_VALUES = {"independent", "reassessed-bounded"}
 
 
 def sha256(payload):
@@ -247,11 +251,14 @@ def parse_schema_two_projection(lines, structural, cursor, source_coverage):
     preserved = parse_number_list(
         parse_field(projection_lines[0], "Preserved"), subject="the preserved task account",
     )
+    if preserved != list(range(1, len(preserved) + 1)):
+        raise ValueError("the preserved task account is not one exact prefix")
     removed = parse_number_list(
         parse_field(projection_lines[1], "Removed"), subject="the removed task account",
     )
     projected = []
-    for expected_task, line in enumerate(projection_lines[2:], 1):
+    first_remaining_task = len(preserved) + 1
+    for expected_task, line in enumerate(projection_lines[2:], first_remaining_task):
         match = re.fullmatch(
             r"Task ([1-9][0-9]*): prior (task|tasks) ([1-9][0-9]*(?:, [1-9][0-9]*)*)"
             r" · findings (F[1-9][0-9]*(?:, F[1-9][0-9]*)*)",
@@ -546,6 +553,8 @@ def parse_artifact_bytes(raw, *, expected_built=None, expected_round=None):
     for field, value in ROUTE_FIXED.items():
         if route[field] != value:
             raise ValueError(f"the Route account has an invalid {field} value")
+    if route["Repetition"] not in REPETITION_VALUES:
+        raise ValueError("the Route account has an invalid Repetition value")
 
     source_coverage, cursor = parse_finding_account(
         lines, structural, cursor, "## Finding coverage",
@@ -578,6 +587,8 @@ def parse_artifact_bytes(raw, *, expected_built=None, expected_round=None):
         raise ValueError("the escalating Correction Round artifact has no remaining finding")
     tasks = []
     if task_starts:
+        first_task = schema_two["projection"]["remaining"][0]["task"] \
+            if schema_two else 1
         separators = []
         for start in task_starts:
             previous = start - 1
@@ -594,7 +605,9 @@ def parse_artifact_bytes(raw, *, expected_built=None, expected_round=None):
                 raise ValueError("a Correction Round task separator has trailing prose")
             end = separators[position + 1] \
                 if position + 1 < len(separators) else len(lines)
-            tasks.append(parse_task(lines, structural, start, end, position + 1))
+            tasks.append(parse_task(
+                lines, structural, start, end, first_task + position,
+            ))
     elif nonblank(lines, cursor):
         raise ValueError("the Correction Round root has unowned trailing bytes")
     if state == "active":
@@ -695,3 +708,78 @@ def parse_artifact(path, *, expected_built=None, expected_round=None):
     return parse_artifact_bytes(
         path.read_bytes(), expected_built=expected_built, expected_round=expected_round,
     )
+
+
+def merge_controller_projection(source_raw, target_raw):
+    """Apply one controller projection when it owns every target task byte.
+
+    Return None when the target owns task bytes that the source controller graph cannot
+    represent exactly. The caller then selects the structural escalation route.
+    """
+    source = parse_artifact_bytes(source_raw)
+    target = parse_artifact_bytes(target_raw)
+    if source["built"] != target["built"] or source["round"] != target["round"]:
+        return None
+
+    source_tasks = {item["task"]: item for item in source["tasks"]}
+    target_tasks = {item["task"]: item for item in target["tasks"]}
+
+    def unwritten(task):
+        return task["design_sha256"] in {
+            sha256(b"### Design\n"),
+            sha256(b"### Design\n[written at correction task Design - see below]\n"),
+        } and task["disagreement_sha256"] is None
+
+    for task, target_task in target_tasks.items():
+        source_task = source_tasks.get(task)
+        if source_task is None:
+            if not unwritten(target_task):
+                return None
+            continue
+        if source_task["task_contract_sha256"] != target_task["task_contract_sha256"]:
+            if not unwritten(target_task):
+                return None
+    return source_raw
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    check_parser = subparsers.add_parser(
+        "check", help="validate one canonical workspace Correction Round artifact",
+    )
+    check_parser.add_argument("built")
+    check_parser.add_argument("round")
+    args = parser.parse_args(argv)
+
+    if not LOT_RE.fullmatch(args.built):
+        parser.error("BUILT must be one canonical lot identity")
+    if not re.fullmatch(r"[1-9][0-9]*", args.round):
+        parser.error("ROUND must be one positive canonical integer")
+    round_number = int(args.round)
+    workspace = pathlib.Path(__file__).absolute().parents[2]
+    common = workspace / "prompts" / "common"
+    sys.path.insert(0, str(common))
+    try:
+        import progress
+
+        refusal = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(refusal):
+                account = progress.correction_round_check_account(
+                    progress.journal_entries(), args.built, round_number,
+                    "the read-only Correction Round artifact check",
+                )
+        except SystemExit as exc:
+            message = refusal.getvalue().rstrip()
+            if message:
+                print(message, file=sys.stderr)
+            return exc.code if isinstance(exc.code, int) and exc.code else 1
+    finally:
+        sys.path.remove(str(common))
+    print(json.dumps(account, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

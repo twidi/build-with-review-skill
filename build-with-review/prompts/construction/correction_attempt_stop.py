@@ -232,6 +232,7 @@ def derive(args, attempt_payload, attempt_marker, resolved, roots):
         "unit": identity["unit"],
         "unit_authority_sha256": identity["unit_authority_sha256"],
         "execution_authority_sha256": identity["execution_authority_sha256"],
+        "prior_attempt": identity["prior_attempt"],
         "attempt": identity["attempt"],
         "sha": base_commit,
         "preserved_ref": None,
@@ -255,18 +256,59 @@ def derive(args, attempt_payload, attempt_marker, resolved, roots):
     }
 
 
+def derive_with_resolved(args, attempt_payload, attempt_marker, resolved, roots):
+    token = progress.CORRECTION_RESOLVED_WORK_UNITS.set((resolved,))
+    try:
+        return derive(args, attempt_payload, attempt_marker, resolved, roots)
+    finally:
+        progress.CORRECTION_RESOLVED_WORK_UNITS.reset(token)
+
+
 def derive_live(args, roots):
     resolved = resolve_correction(args.built, args.round, args.task)
     attempt_payload, attempt_marker = failure.read_attempt_marker()
     if attempt_marker.get("task") != args.task or attempt_marker.get("attempt") != args.attempt:
         fail("the correction attempt marker belongs to another attempt")
-    operation, expected = derive(args, attempt_payload, attempt_marker, resolved, roots)
+    operation, expected = derive_with_resolved(
+        args, attempt_payload, attempt_marker, resolved, roots,
+    )
     return {
         "resolved": resolved,
         "attempt_payload": attempt_payload,
         "attempt_marker": attempt_marker,
         "operation": operation,
         "expected": expected,
+    }
+
+
+def provisional_event(args, attempt_marker, roots):
+    predecessor = attempt_marker.get("attempt_predecessor")
+    predecessor_commit = predecessor.get("commit") if isinstance(predecessor, dict) else None
+    execution_authority = {
+        "schema": 1,
+        "contract_authority": attempt_marker.get("unit_authority_sha256"),
+        "tree_authority": attempt_marker.get("tree_authority"),
+    }
+    return {
+        "schema": 2,
+        "unit": attempt_marker.get("unit"),
+        "unit_authority_sha256": attempt_marker.get("unit_authority_sha256"),
+        "execution_authority_sha256": hashlib.sha256(
+            canonical_bytes(execution_authority),
+        ).hexdigest(),
+        "prior_attempt": attempt_marker.get("prior_attempt"),
+        "attempt": attempt_marker.get("attempt"),
+        "sha": predecessor_commit,
+        "preserved_ref": None,
+        "design_proof_authority": attempt_marker.get("design_proof_authority"),
+        "final_checker_set_sha256": attempt_marker.get(
+            "outstanding_final_checker_set_sha256"
+        ),
+        "final_checker_assignments": attempt_marker.get(
+            "assigned_final_checker_obligations"
+        ),
+        "spares": roots,
+        "spare_snapshot": None,
     }
 
 
@@ -287,7 +329,10 @@ def provisional_operation(args, roots):
             "the recorded correction attempt stop",
         )
         return operation_identity(args, progress.note_data(terminals[0][1]))
-    return derive_live(args, roots)["operation"]
+    _attempt_payload, attempt_marker = failure.read_attempt_marker()
+    if attempt_marker.get("task") != args.task or attempt_marker.get("attempt") != args.attempt:
+        fail("the correction attempt marker belongs to another attempt")
+    return operation_identity(args, provisional_event(args, attempt_marker, roots))
 
 
 def close(args):
@@ -319,7 +364,7 @@ def close(args):
             current_operation = operation_identity(args, event)
             if current_operation != operation:
                 fail("the correction attempt stop operation changed while waiting for authority")
-            _operation, expected = derive(
+            _operation, expected = derive_with_resolved(
                 args, attempt_payload, attempt_marker, resolved, roots,
             )
             if marker_path.exists() or marker_path.is_symlink():
@@ -346,7 +391,16 @@ def close(args):
             )
             print(f"CORRECTION ATTEMPT {args.kind.upper()} (already recorded)")
             return
-        current = derive_live(args, roots)
+        operation_under_lease, expected = derive_with_resolved(
+            args, attempt_payload, attempt_marker, resolved, roots,
+        )
+        current = {
+            "resolved": resolved,
+            "attempt_payload": attempt_payload,
+            "attempt_marker": attempt_marker,
+            "operation": operation_under_lease,
+            "expected": expected,
+        }
         if current["operation"] != operation:
             fail("the correction attempt stop operation changed while waiting for authority")
         attempt_payload = current["attempt_payload"]

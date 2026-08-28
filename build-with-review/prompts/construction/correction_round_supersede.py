@@ -30,12 +30,15 @@ BLOCKING_MARKERS = {
     "correction-round-open-in-progress",
     "correction-round-void-in-progress",
     "correction-round-built-in-progress",
+    "correction-terminal-restore-in-progress",
     "correction-round-revision-in-progress",
     "correction-attempt-failure-in-progress",
     "correction-rewind-in-progress",
     "correction-attempt-stop-in-progress",
     "correction-product-authority-in-progress",
     "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+    "correction-round-escalation-in-progress",
 }
 
 
