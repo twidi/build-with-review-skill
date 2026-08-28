@@ -5707,12 +5707,27 @@ def retry_code_member(entries, proof, proof_index, proof_entry, report, subject)
             {key: item[key] for key in ("id", "where", "what", "why", "impact")}
             for item in obligation["checker_result"]["findings"]
         ]
+        if all(set(item) == {"id", "status", "evidence"}
+               for item in obligation["items"]):
+            dispositions = obligation["items"]
+        elif all(set(item) == {"id", "status"}
+                 for item in obligation["items"]):
+            dispositions = [{
+                **item,
+                "evidence": (
+                    "The frozen task contract blocks this exact finding."
+                    if item["status"] == "contract-blocked"
+                    else "The recovered code blocker carries this exact finding."
+                ),
+            } for item in obligation["items"]]
+        else:
+            fail(f"{subject}'s code-review blocker has malformed retry dispositions")
         return {
             "source": "retry", "failure": proof,
             "result": obligation["result"],
             "result_sha256": obligation["result_sha256"],
             "findings": findings,
-            "resolution": obligation["items"],
+            "resolution": dispositions,
             "resolution_proof": obligation["blocked"],
         }
     if "report" not in report:

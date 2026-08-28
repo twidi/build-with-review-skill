@@ -2787,6 +2787,13 @@ def intermediate_code_contract_blocker_reaches_the_corrected_plan_retry():
         raw_lines = (fixture.workspace / "progress.jsonl").read_bytes().splitlines()
         failure_proof = f"{failure_index}:{hashlib.sha256(raw_lines[failure_index]).hexdigest()}"
 
+        fixture.set_attempt_context(1)
+        fixture.progress_call(
+            "session-retired", "gate-test-session-1", "superseded",
+            "--archive", "--hide", ok=True,
+        )
+        fixture.set_controller_context()
+
         plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
         fixture.run(
             "bash", plan_commit, "lot-1", "fix: extend the task write set", ok=True,
@@ -2816,8 +2823,22 @@ def intermediate_code_contract_blocker_reaches_the_corrected_plan_retry():
         )
         check(manifest["previous"]["failure"] == failure_proof, manifest["previous"])
         check(
-            [item["status"] for item in manifest["previous"]["resolution"]]
-            == ["contract-blocked", "carried"],
+            manifest["previous"]["resolution"] == [
+                {
+                    "id": 1,
+                    "status": "contract-blocked",
+                    "evidence": (
+                        "The required production test is outside the frozen Files account."
+                    ),
+                },
+                {
+                    "id": 2,
+                    "status": "carried",
+                    "evidence": (
+                        "The replacement attempt must still prove this implementation finding."
+                    ),
+                },
+            ],
             manifest["previous"],
         )
 
@@ -2972,6 +2993,56 @@ def mistaken_code_resolution_can_be_reclassified_as_one_exact_contract_blocker()
         check(terminal.get("kind") == "attempt.failed", terminal)
         check(terminal["data"]["code_review"]["contract_blocked"] == [2], terminal)
         check(terminal["data"]["code_review"]["required"] == [1, 2], terminal)
+        fixture.set_attempt_context(1)
+        fixture.progress_call(
+            "session-retired", "gate-test-session-1", "superseded",
+            "--archive", "--hide", ok=True,
+        )
+        fixture.set_controller_context()
+
+        plan_commit = fixture.workspace / "prompts" / "construction" / "plan-commit.sh"
+        fixture.run(
+            "bash", plan_commit, "lot-1", "fix: extend the recovered task contract",
+            ok=True,
+        )
+        head = fixture.git("rev-parse", "HEAD").stdout.strip()
+        predecessor = fixture.git("rev-parse", "HEAD^").stdout.strip()
+        opened = fixture.run(
+            "bash", fixture.gate_check, "open", "baseline", f"plan/lot-1/{head}",
+            "-", "0", "0", predecessor, ok=True,
+        )
+        op = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE).group(1)
+        fixture.close_gate(op)
+        attempt = fixture.workspace / "prompts" / "construction" / "attempt-started.sh"
+        fixture.run("bash", attempt, "lot-1", "1", "2", "-", ok=True)
+        fixture.set_attempt_context(2)
+        fixture.run_code_round(1, 0)
+        retry_opening = next(
+            entry for entry in reversed(fixture.journal())
+            if entry.get("event") == "subagent-started"
+            and entry.get("kind") == "code-checker"
+            and entry.get("attempt") == 2
+        )
+        manifest = json.loads(
+            (fixture.workspace / retry_opening["data"]["manifest"]).read_text(
+                encoding="utf-8",
+            )
+        )
+        check(
+            manifest["previous"]["resolution"] == [
+                {
+                    "id": 1,
+                    "status": "carried",
+                    "evidence": "The recovered code blocker carries this exact finding.",
+                },
+                {
+                    "id": 2,
+                    "status": "contract-blocked",
+                    "evidence": "The frozen task contract blocks this exact finding.",
+                },
+            ],
+            manifest["previous"],
+        )
     finally:
         fixture.close()
 
