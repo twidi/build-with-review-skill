@@ -156,6 +156,7 @@ def reset():
     shutil.rmtree(os.path.join(WORKSPACE, "reports"), ignore_errors=True)
     shutil.rmtree(os.path.join(WORKSPACE, "plans"), ignore_errors=True)
     shutil.rmtree(os.path.join(WORKSPACE, "amendments"), ignore_errors=True)
+    shutil.rmtree(os.path.join(REPO, ".superpowers", "bwr", "tmp"), ignore_errors=True)
     for marker in (
         "amendment-commit-in-progress", "document-copy-in-progress", "attempt-in-flight",
         "amendment-sweep-preflight.json", "bare-stop-in-progress",
@@ -7344,12 +7345,17 @@ def task_pass_accepts_one_exact_complete_multitask_generation():
     code_proof = f"{len(raw_lines) - 1}:{hashlib.sha256(raw_lines[-1]).hexdigest()}"
     report_relative, report_sha = write_gate_report(gate, gate_blob, tree)
     owner = "lot-1/task-2/attempt-1"
+    gate_data = {
+        "op": gate, "scope": "task", "owner": owner, "lot": "lot-1",
+        "task": 2, "attempt": 1, "head": commit, "base": first,
+        "tree": tree, "gate": gate_blob, "code": code_proof,
+    }
+    append_subagent(
+        "subagent-started", "gate-runner", mandate="gate", data=gate_data,
+    )
     append_subagent(
         "subagent-ended", "gate-runner", mandate="gate",
-        data={"op": gate, "scope": "task", "owner": owner, "lot": "lot-1",
-              "task": 2, "attempt": 1, "head": commit, "base": first,
-              "tree": tree, "gate": gate_blob, "code": code_proof,
-              "green": True, "surface": "unchanged", "report": report_relative,
+        data={**gate_data, "green": True, "surface": "unchanged", "report": report_relative,
               "report_sha256": report_sha, "commands": 1},
     )
     append_note(
@@ -7408,6 +7414,9 @@ def baseline_pass_requires_the_exact_amendment_successor_owner():
         {"amendment": 1, "origin": "product-review", "built": "lot-1"},
         "return to the same built lot",
     )
+    set_caller_bwr(
+        mode="product-review", lot="lot-1", job="controller", task=None, attempt=None,
+    )
 
     wrong_gate = seed_baseline_gate("amendment/2/" + amendment_commit,
                                     amendment_commit, first_commit)
@@ -7463,6 +7472,9 @@ def baseline_pass_accepts_only_the_exact_c2_plan_successor():
         {"amendment": 1, "origin": "product-review", "built": "lot-1"},
         "return through C2",
     )
+    set_caller_bwr(
+        mode="product-review", lot="lot-1", job="controller", task=None, attempt=None,
+    )
 
     plan_relative = "docs/plans/test-run-lot-1-plan.md"
     write_project(plan_relative, "# Revalidated plan\n")
@@ -7489,7 +7501,7 @@ def product_receipt_audits_the_fixed_lens_block_and_freezes_its_bytes():
         "built": "lot-1", "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
         "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
-    })
+    }, by=CALLER, mode="product-review", lot="lot-1", job="controller")
     labels = product_completion_labels("user")
     malformed = "\n".join([
         f"COMPLETION ({len(labels)} items)",
@@ -7534,7 +7546,7 @@ def product_receipt_counts_every_structured_finding_in_its_hashed_report():
         "built": "lot-1", "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
         "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
-    })
+    }, by=CALLER, mode="product-review", lot="lot-1", job="controller")
     content = product_report_text("user", ("IMPORTANT", "DECISION"))
     report_sha = write_report("reports/product-review/lot-1/lot-1-user.md", content)
     before = len(journal_lines())
@@ -7585,7 +7597,7 @@ def product_receipt_rejects_a_noncontiguous_finding_structure():
         "built": "lot-1", "commit": commit, "gate": gate,
         "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
         "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
-    })
+    }, by=CALLER, mode="product-review", lot="lot-1", job="controller")
     malformed = product_report_text("user", ("IMPORTANT",)).replace(
         "Proof: exact cited location\n", "",
     )
