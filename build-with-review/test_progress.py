@@ -94,7 +94,7 @@ sys.exit(64)
 '''
 
 # Globals filled by main() once the temp layout exists.
-BASE = REPO = WORKSPACE = SCRIPT = FAKE_DIR = ENV = None
+BASE = REPO = WORKSPACE = SCRIPT = FAKE_DIR = ENV = BASE_REPO_SNAPSHOT = None
 
 TESTS = []
 FIXTURE_SNAPSHOTS = {}
@@ -145,33 +145,11 @@ def set_caller_bwr(**values):
 
 
 def reset():
-    for path in (os.path.join(FAKE_DIR, "calls.jsonl"),
-                 os.path.join(WORKSPACE, "progress.jsonl"),
-                 os.path.join(WORKSPACE, "progress.jsonl.lock"),
-                 os.path.join(WORKSPACE, "construction-history-validation.json"),
-                 os.path.join(REPO, "fixture-code-review.txt")):
-        if os.path.lexists(path):
-            os.remove(path)
-    shutil.rmtree(os.path.join(WORKSPACE, "dashboard"), ignore_errors=True)
-    shutil.rmtree(os.path.join(WORKSPACE, "reports"), ignore_errors=True)
-    shutil.rmtree(os.path.join(WORKSPACE, "plans"), ignore_errors=True)
-    shutil.rmtree(os.path.join(WORKSPACE, "amendments"), ignore_errors=True)
-    shutil.rmtree(os.path.join(REPO, ".superpowers", "bwr", "tmp"), ignore_errors=True)
-    for marker in (
-        "amendment-commit-in-progress", "document-copy-in-progress", "attempt-in-flight",
-        "amendment-sweep-preflight.json", "bare-stop-in-progress",
-        "amendment-attempt-settle-in-progress.json", "amendment-attempt-settle.lock",
-        "controller-physical-admission.lock",
-    ):
-        path = os.path.join(WORKSPACE, marker)
-        if os.path.lexists(path):
-            os.remove(path)
-    shutil.rmtree(os.path.join(WORKSPACE, "recovery"), ignore_errors=True)
-    shutil.rmtree(os.path.join(REPO, "docs"), ignore_errors=True)
-    shutil.rmtree(os.path.join(REPO, ".git"), ignore_errors=True)
-    subprocess.run(["git", "init", "-q", REPO], check=True)
-    subprocess.run(["git", "-C", REPO, "config", "user.name", "Progress Test"], check=True)
-    subprocess.run(["git", "-C", REPO, "config", "user.email", "progress@example.test"], check=True)
+    calls = os.path.join(FAKE_DIR, "calls.jsonl")
+    if os.path.exists(calls):
+        os.remove(calls)
+    shutil.rmtree(REPO)
+    shutil.copytree(BASE_REPO_SNAPSHOT, REPO)
     set_config(default_config())
 
 
@@ -12205,6 +12183,21 @@ def fixture_snapshot_restores_one_isolated_real_prefix():
 
 
 @test
+def fixture_reset_restores_one_pristine_repository():
+    baseline_status = subprocess.check_output(
+        ["git", "-C", REPO, "status", "--porcelain"], text=True,
+    )
+    leaked = write_project("fixture-reset-leak.txt", "must not survive\n")
+    subprocess.run(["git", "-C", REPO, "add", leaked], check=True)
+    reset()
+    check(not os.path.exists(leaked), "the shared reset retained a fixture-owned path")
+    status = subprocess.check_output(
+        ["git", "-C", REPO, "status", "--porcelain"], text=True,
+    )
+    check(status == baseline_status, f"the shared reset retained repository state: {status}")
+
+
+@test
 def format_slowest_tests_orders_descending():
     check(
         format_slowest_tests([(0.2, "fast"), (1.5, "slow")], limit=2)
@@ -12223,7 +12216,7 @@ def format_slowest_tests(durations, limit=10):
 # ------------------------------------------------------------------ runner
 
 def main():
-    global BASE, REPO, WORKSPACE, SCRIPT, FAKE_DIR, ENV
+    global BASE, REPO, WORKSPACE, SCRIPT, FAKE_DIR, ENV, BASE_REPO_SNAPSHOT
     BASE = tempfile.mkdtemp(prefix="progress-test-")
     try:
         REPO = os.path.join(BASE, "repo")
@@ -12295,6 +12288,16 @@ def main():
         ENV = dict(os.environ)
         ENV["TWICC_BIN"] = f"{shlex.quote(sys.executable)} {shlex.quote(fake)}"
         ENV["FAKE_TWICC_DIR"] = FAKE_DIR
+
+        subprocess.run(["git", "init", "-q", REPO], check=True)
+        subprocess.run(["git", "-C", REPO, "config", "user.name", "Progress Test"], check=True)
+        subprocess.run(
+            ["git", "-C", REPO, "config", "user.email", "progress@example.test"],
+            check=True,
+        )
+        BASE_REPO_SNAPSHOT = os.path.join(BASE, "fixture-snapshots", "pristine-repo")
+        os.makedirs(os.path.dirname(BASE_REPO_SNAPSHOT), exist_ok=True)
+        shutil.copytree(REPO, BASE_REPO_SNAPSHOT)
 
         selected = TESTS
         test_filter = os.environ.get("BWR_TEST_FILTER")
