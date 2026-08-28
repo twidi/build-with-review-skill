@@ -14,8 +14,10 @@ returns canned JSON for `whoami` and `session <id>`, records every call it
 receives so order can be asserted, and fails on demand. No real TwiCC
 instance and no file of this repository is ever touched.
 """
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import fcntl
 import multiprocessing
@@ -174,6 +176,52 @@ def reset():
 def run_progress(*args, env=None):
     return subprocess.run([sys.executable, SCRIPT, *args],
                           capture_output=True, text=True, env=env or ENV, timeout=120)
+
+
+def in_process_progress_runner():
+    progress = run_with_test_environment(ENV, lambda: load_common_module("progress"))
+
+    def run(*args, env=None, timeout=120):
+        del timeout
+        command_env = env or ENV
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        returncode = 0
+        previous_argv = sys.argv
+
+        def invoke():
+            nonlocal returncode
+            sys.argv = [SCRIPT, *args]
+            try:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    progress.main()
+            except SystemExit as exc:
+                returncode = exc.code if isinstance(exc.code, int) else 1
+            except Exception:
+                with contextlib.redirect_stderr(stderr):
+                    traceback.print_exc()
+                returncode = 1
+            finally:
+                sys.argv = previous_argv
+
+        run_with_test_environment(command_env, invoke)
+        return subprocess.CompletedProcess(
+            [SCRIPT, *args], returncode, stdout.getvalue(), stderr.getvalue(),
+        )
+
+    run.progress_module = progress
+    return run
+
+
+def run_with_test_environment(environment, callback):
+    previous = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(environment)
+        return callback()
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 def load_common_module(name):
@@ -12063,6 +12111,34 @@ def code_checker_admission_keeps_one_strict_output_route():
     check("This proof form applies only after `review-risk.md` admits the question" in product
           and "A human answers it" in product,
           "PRODUCT REVIEW must retain its admitted DECISION route")
+
+
+@test
+def in_process_runner_matches_real_note_and_refusal_results():
+    real = run_progress("note", "ruling", "--text", "same authority")
+    check(real.returncode == 0, real.stdout + real.stderr)
+    real_entry = journal_lines()[0]
+    reset()
+
+    runner = in_process_progress_runner()
+    local = runner("note", "ruling", "--text", "same authority")
+    check(local.returncode == 0, local.stdout + local.stderr)
+    local_entry = journal_lines()[0]
+    for entry in (real_entry, local_entry):
+        entry.pop("ts", None)
+    check(local_entry == real_entry,
+          "the in-process runner changed the durable note account")
+
+    reset()
+    real_refusal = run_progress("note", "ruling", "--data", "[]")
+    reset()
+    local_refusal = runner("note", "ruling", "--data", "[]")
+    check(real_refusal.returncode != 0 and local_refusal.returncode != 0,
+          "one runner accepted malformed note data")
+    check("--data` must be a JSON object" in real_refusal.stdout
+          and "--data` must be a JSON object" in local_refusal.stdout,
+          "the runners disagree on the malformed note refusal")
+    check(journal_lines() == [], "an in-process refusal changed the journal")
 
 
 @test
