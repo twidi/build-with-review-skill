@@ -2228,6 +2228,7 @@ def task_success_historical_replay_binds_schema_two_start_session():
             "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in rows),
             encoding="utf-8",
         )
+        (fixture.workspace / "construction-history-validation.json").unlink()
         replay = fixture.progress_call("construction-verdict-check", "history", ok=False)
         check("frozen attempt authority" in (replay.stdout + replay.stderr),
               replay.stdout + replay.stderr)

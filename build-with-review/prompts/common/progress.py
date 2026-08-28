@@ -150,6 +150,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 JOURNAL = os.path.join(WORKSPACE, "progress.jsonl")
 JOURNAL_LOCK = f"{JOURNAL}.lock"
+CONSTRUCTION_HISTORY_VALIDATION = os.path.join(
+    WORKSPACE, "construction-history-validation.json",
+)
+CONSTRUCTION_HISTORY_PROJECTOR = "construction-history-v1"
 AMENDMENT_SWEEP_PREFLIGHT = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
 AMENDMENT_ATTEMPT_SETTLE_MARKER = os.path.join(
     WORKSPACE, "amendment-attempt-settle-in-progress.json",
@@ -319,6 +323,198 @@ def journal_entries():
                      f"progress.jsonl line {line_number}")
             entries.append(entry)
     return entries
+
+
+CONSTRUCTION_HISTORY_DEPENDENCY_PAIRS = (
+    ("report", "report_sha256"),
+    ("manifest", "manifest_sha256"),
+    ("result", "result_sha256"),
+    ("artifact", "artifact_sha256"),
+)
+CONSTRUCTION_HISTORY_DEPENDENCY_ROOTS = {"reports"}
+
+
+def construction_history_dependencies(entries):
+    dependencies = {}
+
+    def add(raw_path, expected_sha256):
+        if not isinstance(raw_path, str) or not isinstance(expected_sha256, str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            return
+        relative = PurePosixPath(raw_path)
+        if relative.is_absolute() or not relative.parts \
+                or relative.parts[0] not in CONSTRUCTION_HISTORY_DEPENDENCY_ROOTS:
+            return
+        path = exact_real_file(
+            WORKSPACE, raw_path, "the validated construction-history dependency",
+        )
+        actual = sha256_bytes(Path(path).read_bytes())
+        if actual != expected_sha256:
+            fail("a validated construction-history dependency changed", raw_path)
+        previous = dependencies.get(raw_path)
+        if previous is not None and previous != expected_sha256:
+            fail("a construction-history dependency path has two content generations", raw_path)
+        dependencies[raw_path] = expected_sha256
+
+    def walk(value):
+        if isinstance(value, dict):
+            for path_key, hash_key in CONSTRUCTION_HISTORY_DEPENDENCY_PAIRS:
+                add(value.get(path_key), value.get(hash_key))
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    for entry in entries:
+        walk(entry)
+        data = note_data(entry)
+        if isinstance(entry.get("text"), str):
+            add(entry["text"], data.get("artifact_sha256"))
+    return [
+        {"path": path, "sha256": dependencies[path]}
+        for path in sorted(dependencies)
+    ]
+
+
+def validate_construction_history_dependencies(dependencies):
+    if not isinstance(dependencies, list):
+        fail("the construction-history checkpoint has malformed dependencies")
+    paths = []
+    for dependency in dependencies:
+        if not isinstance(dependency, dict) or set(dependency) != {"path", "sha256"}:
+            fail("the construction-history checkpoint has an open dependency account")
+        path, expected = dependency.get("path"), dependency.get("sha256")
+        if not isinstance(path, str) or not re.fullmatch(r"[0-9a-f]{64}", str(expected)):
+            fail("the construction-history checkpoint has a malformed dependency")
+        relative = PurePosixPath(path)
+        if relative.is_absolute() or not relative.parts \
+                or relative.parts[0] not in CONSTRUCTION_HISTORY_DEPENDENCY_ROOTS:
+            fail("the construction-history checkpoint has a foreign dependency", path)
+        physical = exact_real_file(
+            WORKSPACE, path, "the construction-history checkpoint dependency",
+        )
+        if sha256_bytes(Path(physical).read_bytes()) != expected:
+            fail("a validated construction-history dependency changed", path)
+        paths.append(path)
+    if paths != sorted(set(paths)):
+        fail("the construction-history checkpoint has duplicate or unordered dependencies")
+
+
+def merge_construction_history_dependencies(previous, current):
+    merged = {item["path"]: item["sha256"] for item in previous}
+    for dependency in current:
+        path, sha256 = dependency["path"], dependency["sha256"]
+        if path in merged and merged[path] != sha256:
+            fail("a construction-history dependency path has two content generations", path)
+        merged[path] = sha256
+    return [{"path": path, "sha256": merged[path]} for path in sorted(merged)]
+
+
+def construction_history_checkpoint_account(raw, line_count, dependencies):
+    account = {
+        "schema": 1,
+        "projector": CONSTRUCTION_HISTORY_PROJECTOR,
+        "journal_bytes": len(raw),
+        "journal_lines": line_count,
+        "journal_sha256": sha256_bytes(raw),
+        "dependencies": dependencies,
+    }
+    return {**account, "account_sha256": sha256_bytes(json.dumps(
+        account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))}
+
+
+def preflight_construction_history_checkpoint_path():
+    if os.path.lexists(CONSTRUCTION_HISTORY_VALIDATION) \
+            and (os.path.islink(CONSTRUCTION_HISTORY_VALIDATION)
+                 or not os.path.isfile(CONSTRUCTION_HISTORY_VALIDATION)):
+        fail("the construction-history checkpoint path has a foreign occupant")
+
+
+def read_construction_history_checkpoint(raw, entries):
+    if not os.path.lexists(CONSTRUCTION_HISTORY_VALIDATION):
+        return None
+    preflight_construction_history_checkpoint_path()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(CONSTRUCTION_HISTORY_VALIDATION, flags)
+        with os.fdopen(descriptor, encoding="utf-8") as source:
+            descriptor = None
+            checkpoint = json.load(source)
+    except (OSError, UnicodeError, ValueError) as exc:
+        fail("the construction-history checkpoint is malformed", exc)
+    finally:
+        if "descriptor" in locals() and descriptor is not None:
+            os.close(descriptor)
+    if not isinstance(checkpoint, dict) or set(checkpoint) != {
+        "schema", "projector", "journal_bytes", "journal_lines",
+        "journal_sha256", "dependencies", "account_sha256",
+    }:
+        fail("the construction-history checkpoint has an open account")
+    unsigned = {key: value for key, value in checkpoint.items()
+                if key != "account_sha256"}
+    if checkpoint.get("account_sha256") != sha256_bytes(json.dumps(
+        unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")):
+        fail("the construction-history checkpoint changes its complete account")
+    if checkpoint.get("schema") != 1:
+        fail("the construction-history checkpoint has an unknown schema")
+    if checkpoint.get("projector") != CONSTRUCTION_HISTORY_PROJECTOR:
+        return None
+    validate_construction_history_dependencies(checkpoint.get("dependencies"))
+    byte_count = checkpoint.get("journal_bytes")
+    line_count = checkpoint.get("journal_lines")
+    if not isinstance(byte_count, int) or isinstance(byte_count, bool) or byte_count < 0 \
+            or not isinstance(line_count, int) or isinstance(line_count, bool) \
+            or line_count < 0:
+        fail("the construction-history checkpoint has invalid journal bounds")
+    if byte_count > len(raw) or line_count > raw.count(b"\n"):
+        fail("the construction-history checkpoint is ahead of the journal")
+    prefix = raw[:byte_count]
+    if byte_count and not prefix.endswith(b"\n") \
+            or prefix.count(b"\n") != line_count \
+            or sha256_bytes(prefix) != checkpoint.get("journal_sha256"):
+        fail("the journal changes its validated construction-history prefix")
+    return checkpoint
+
+
+def publish_construction_history_checkpoint(raw, line_count, dependencies):
+    preflight_construction_history_checkpoint_path()
+    account = construction_history_checkpoint_account(raw, line_count, dependencies)
+    payload = (json.dumps(
+        account, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ) + "\n").encode("utf-8")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".construction-history-validation.", dir=WORKSPACE,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as target:
+            descriptor = None
+            target.write(payload)
+            target.flush()
+            os.fsync(target.fileno())
+        if os.path.lexists(CONSTRUCTION_HISTORY_VALIDATION) \
+                and (os.path.islink(CONSTRUCTION_HISTORY_VALIDATION)
+                     or not os.path.isfile(CONSTRUCTION_HISTORY_VALIDATION)):
+            raise OSError(
+                "the construction-history checkpoint path changed during publication"
+            )
+        os.replace(temporary, CONSTRUCTION_HISTORY_VALIDATION)
+        temporary = None
+        directory = os.open(WORKSPACE, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
 
 def journal_notes():
@@ -7232,8 +7428,42 @@ def validate_attempt_succeeded_entry(entries, index, entry):
             fail("attempt.succeeded did not give every retry obligation to its checker")
 
 
+def construction_history_validation_start(entries):
+    if COMMAND_VALIDATION_CACHE is None:
+        return 0, None
+    generation = COMMAND_VALIDATION_CACHE.get("construction-history-generation")
+    if isinstance(generation, dict) \
+            and generation.get("entries") is entries \
+            and generation.get("entry_count") == len(entries):
+        return generation["start"], generation["journal_sha256"]
+    try:
+        with open(JOURNAL, "rb") as source:
+            raw = source.read()
+    except FileNotFoundError:
+        raw = b""
+    physical_lines = raw.count(b"\n")
+    if physical_lines < len(entries):
+        return 0, sha256_bytes(raw)
+    checkpoint = read_construction_history_checkpoint(raw, entries)
+    start = 0 if checkpoint is None else min(checkpoint["journal_lines"], len(entries))
+    COMMAND_VALIDATION_CACHE["construction-history-generation"] = {
+        "journal_sha256": sha256_bytes(raw),
+        "entry_count": len(entries),
+        "entries": entries,
+        "start": start,
+        "checkpoint": checkpoint,
+    }
+    return start, sha256_bytes(raw)
+
+
 def validate_construction_verdict_history(entries):
-    for index, entry in enumerate(entries):
+    start, journal_sha256 = construction_history_validation_start(entries)
+    cache_key = ("construction-history", len(entries), journal_sha256)
+    validation = COMMAND_VALIDATION_CACHE.get(cache_key) \
+        if COMMAND_VALIDATION_CACHE is not None else None
+    if isinstance(validation, dict) and validation.get("entries") is entries:
+        return
+    for index, entry in enumerate(entries[start:], start):
         if entry.get("event") == "session-started" \
                 and entry.get("mode") == "construction" \
                 and entry.get("job") == "implementer":
@@ -7241,14 +7471,14 @@ def validate_construction_verdict_history(entries):
                 entry, "the durable construction implementer start",
                 entries=entries, index=index,
             )
-    for index, entry in enumerate(entries):
+    for index, entry in enumerate(entries[start:], start):
         if entry.get("event") == "note" \
                 and entry.get("kind") == "construction.spend.recovered":
             validate_construction_spend_recovery_entry(entries, index, entry)
             construction_domain_spends(
                 entries, len(entries), construction_spend_recovery_logical(note_data(entry)),
             )
-    for index, entry in enumerate(entries):
+    for index, entry in enumerate(entries[start:], start):
         if entry.get("event") != "note" or entry.get("kind") != "verdict.consumed":
             continue
         check = note_data(entry).get("check")
@@ -7257,7 +7487,7 @@ def validate_construction_verdict_history(entries):
         if check not in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
             fail("a durable consumed verdict has an unknown checker identity", check)
         validate_construction_verdict_entry(entries, index, entry)
-    for index, entry in enumerate(entries):
+    for index, entry in enumerate(entries[start:], start):
         if entry.get("event") == "note" and entry.get("kind") == "design.review.resolved":
             validate_design_resolution_entry(entries, index, entry)
         elif entry.get("event") == "note" and entry.get("kind") == "design.review.blocked":
@@ -7285,6 +7515,8 @@ def validate_construction_verdict_history(entries):
             )
             if note_data(entry) != expected:
                 fail("the durable stopped attempt changed its retry obligation", expected)
+    if COMMAND_VALIDATION_CACHE is not None:
+        COMMAND_VALIDATION_CACHE[cache_key] = {"entries": entries}
 
 
 def normalize_consolidation_started(entries, data, round_number):
@@ -10387,21 +10619,46 @@ def write_line(entry):
 def write_validated_line(builder, *, attempt_success=False):
     """Validate one semantic event against the exact locked append prefix."""
     recovery = None
+    checkpoint_warning = None
     with open(JOURNAL_LOCK, "a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if attempt_success_marker("the pending attempt success") is not None \
                 and not attempt_success:
             fail("the pending attempt success owns every workflow mutation")
+        preflight_construction_history_checkpoint_path()
         fd = os.open(JOURNAL, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o666)
         try:
             append_start, recovery = _repair_incomplete_tail(fd)
             entries = journal_entries()
+            checkpoint_start, journal_sha256 = construction_history_validation_start(entries)
             entry = builder(entries)
             validate_pending_amendment_attempt_settlement_append(entries, entry)
             validate_pending_attempt_success_append(entries, entry)
             validate_pending_pass_opening_append(
                 entries, entry, "the journal append",
             )
+            generation = COMMAND_VALIDATION_CACHE.get(
+                "construction-history-generation", {},
+            ) if COMMAND_VALIDATION_CACHE is not None else {}
+            checkpoint = generation.get("checkpoint") \
+                if generation.get("entry_count") == len(entries) else None
+            checkpoint_exact = checkpoint is not None and checkpoint_start == len(entries)
+            validation = COMMAND_VALIDATION_CACHE.get(
+                ("construction-history", len(entries), journal_sha256),
+            ) if COMMAND_VALIDATION_CACHE is not None else None
+            history_validated = isinstance(validation, dict) \
+                and validation.get("entries") is entries
+            checkpoint_enabled = checkpoint_exact or history_validated
+            if attempt_success and not checkpoint_exact:
+                checkpoint_enabled = False
+            checkpoint_dependencies = None
+            if checkpoint_enabled:
+                dependency_start = generation.get("start", 0) \
+                    if checkpoint is not None else 0
+                checkpoint_dependencies = merge_construction_history_dependencies(
+                    checkpoint.get("dependencies", []) if checkpoint is not None else [],
+                    construction_history_dependencies([*entries[dependency_start:], entry]),
+                )
             payload = (
                 json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
             ).encode("utf-8")
@@ -10415,10 +10672,25 @@ def write_validated_line(builder, *, attempt_success=False):
                 raise OSError(
                     f"short journal write: wrote {written} of {len(payload)} bytes"
                 )
+            os.fsync(fd)
+            end = os.lseek(fd, 0, os.SEEK_END)
+            raw = os.pread(fd, end, 0)
+            if checkpoint_dependencies is not None:
+                try:
+                    publish_construction_history_checkpoint(
+                        raw, len(entries) + 1, checkpoint_dependencies,
+                    )
+                except OSError as exc:
+                    checkpoint_warning = str(exc)
         finally:
             os.close(fd)
     if recovery:
         print(f"**progress WARNING** · {recovery}")
+    if checkpoint_warning:
+        print(
+            "**progress WARNING** · the construction-history checkpoint was not "
+            f"advanced: {checkpoint_warning}"
+        )
 
 
 def validate_pending_attempt_success_append(entries, entry):
@@ -11827,7 +12099,7 @@ def main():
     args = build_parser().parse_args()
     read_only = {
         "subagents-open", "construction-failure-check",
-        "amendment-attempt-settle-owner-check",
+        "amendment-attempt-settle-owner-check", "construction-verdict-check",
     }
     # A retained success owner admits only its helper-owned terminal. Do not
     # repair shared bytes before that locked admission can refuse another
@@ -11838,6 +12110,7 @@ def main():
         if pending_attempt_success and args.command not in read_only:
             fail("the pending attempt success owns every workflow mutation")
         if args.command not in read_only and not pending_attempt_success:
+            preflight_construction_history_checkpoint_path()
             repair_journal_tail()
         args.func(args)
         if args.command not in read_only:

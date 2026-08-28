@@ -145,8 +145,9 @@ def reset():
     for path in (os.path.join(FAKE_DIR, "calls.jsonl"),
                  os.path.join(WORKSPACE, "progress.jsonl"),
                  os.path.join(WORKSPACE, "progress.jsonl.lock"),
+                 os.path.join(WORKSPACE, "construction-history-validation.json"),
                  os.path.join(REPO, "fixture-code-review.txt")):
-        if os.path.exists(path):
+        if os.path.lexists(path):
             os.remove(path)
     shutil.rmtree(os.path.join(WORKSPACE, "dashboard"), ignore_errors=True)
     shutil.rmtree(os.path.join(WORKSPACE, "reports"), ignore_errors=True)
@@ -10509,10 +10510,17 @@ def _concurrent_worker(script_path, worker_idx, count):
         spec.loader.exec_module(mod)
     finally:
         sys.path.remove(script_dir)
+    mod.COMMAND_VALIDATION_CACHE = {}
     for seq in range(count):
-        mod.write_line({"ts": "t", "by": f"w{worker_idx}", "event": "note",
-                        "kind": "ruling", "text": "x" * 1000,
-                        "data": {"w": worker_idx, "seq": seq}})
+        entry = {"ts": "t", "by": f"w{worker_idx}", "event": "note",
+                 "kind": "ruling", "text": "x" * 1000,
+                 "data": {"w": worker_idx, "seq": seq}}
+
+        def build(entries, candidate=entry):
+            mod.validate_construction_verdict_history(entries)
+            return candidate
+
+        mod.write_validated_line(build)
 
 
 def _positive_short_write_worker(script_path):
@@ -10603,6 +10611,406 @@ def concurrent_appends_do_not_interleave():
         raw = source.read()
     check(raw.endswith(b"\n") and raw.count(b"\n") == workers * per_worker,
           "every concurrent append must end in one physical newline")
+    with open(os.path.join(WORKSPACE, "construction-history-validation.json"),
+              encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    check(checkpoint["journal_lines"] == workers * per_worker, checkpoint)
+    check(checkpoint["journal_bytes"] == len(raw), checkpoint)
+    check(checkpoint["journal_sha256"] == hashlib.sha256(raw).hexdigest(), checkpoint)
+
+
+def write_with_construction_validation(progress, entry):
+    def build(entries):
+        progress.validate_construction_verdict_history(entries)
+        return entry
+
+    progress.write_validated_line(build)
+
+
+@test
+def construction_history_checkpoint_certifies_one_successful_locked_append():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    entry = progress.event_entry(
+        "fixture", "note", kind="ruling", text="checkpoint seed",
+    )
+
+    write_with_construction_validation(progress, entry)
+
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    check(os.path.isfile(checkpoint_path),
+          "a successful locked append did not publish its construction-history checkpoint")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "rb") as source:
+        journal = source.read()
+    check(checkpoint.get("schema") == 1, checkpoint)
+    check(checkpoint.get("projector") == "construction-history-v1", checkpoint)
+    check(checkpoint.get("journal_bytes") == len(journal), checkpoint)
+    check(checkpoint.get("journal_lines") == 1, checkpoint)
+    check(checkpoint.get("journal_sha256") == hashlib.sha256(journal).hexdigest(), checkpoint)
+    unsigned = {key: value for key, value in checkpoint.items() if key != "account_sha256"}
+    expected = hashlib.sha256(json.dumps(
+        unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    check(checkpoint.get("account_sha256") == expected,
+          "the checkpoint does not authenticate its complete account")
+
+
+@test
+def construction_history_checkpoint_recovers_one_uncheckpointed_suffix():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    first = progress.event_entry("fixture", "note", kind="ruling", text="first")
+    write_with_construction_validation(progress, first)
+
+    append_note("ruling", text="interrupted append")
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    entries = progress.journal_entries()
+    start, _ = progress.construction_history_validation_start(entries)
+    check(start == 1, f"the checkpoint did not select only the suffix: {start}")
+    third = progress.event_entry("fixture", "note", kind="ruling", text="third")
+    write_with_construction_validation(progress, third)
+
+    with open(os.path.join(WORKSPACE, "construction-history-validation.json"),
+              encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    check(checkpoint["journal_lines"] == 3,
+          "the recovered suffix did not advance the checkpoint through the new append")
+
+
+@test
+def construction_history_checkpoint_refuses_a_changed_certified_prefix():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    first = progress.event_entry("fixture", "note", kind="ruling", text="original")
+    write_with_construction_validation(progress, first)
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    with open(checkpoint_path, "rb") as source:
+        checkpoint_before = source.read()
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, encoding="utf-8") as source:
+        changed = json.loads(source.read())
+    changed["text"] = "modified"
+    with open(journal_path, "w", encoding="utf-8") as target:
+        target.write(json.dumps(changed, ensure_ascii=False, separators=(",", ":")) + "\n")
+    changed_bytes = open(journal_path, "rb").read()
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    refused = False
+    try:
+        progress.write_validated_line(lambda entries: progress.event_entry(
+            "fixture", "note", kind="ruling", text="must not append",
+        ))
+    except SystemExit:
+        refused = True
+    check(refused, "a changed certified prefix was accepted")
+    with open(journal_path, "rb") as source:
+        check(source.read() == changed_bytes,
+              "the refused append changed the already-damaged journal")
+    with open(checkpoint_path, "rb") as source:
+        check(source.read() == checkpoint_before,
+              "the refused append replaced the certified checkpoint")
+
+
+@test
+def construction_history_read_only_validation_does_not_advance_the_checkpoint():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    first = progress.event_entry("fixture", "note", kind="ruling", text="first")
+    write_with_construction_validation(progress, first)
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    with open(checkpoint_path, "rb") as source:
+        checkpoint_before = source.read()
+    append_note("ruling", text="uncheckpointed suffix")
+    dashboard = os.path.join(WORKSPACE, "dashboard", "data", "progress.jsonl")
+    os.makedirs(os.path.dirname(dashboard))
+    with open(dashboard, "wb") as target:
+        target.write(b"dashboard sentinel\n")
+
+    proc = run_progress("construction-verdict-check", "history")
+
+    check(proc.returncode == 0, proc.stdout + proc.stderr)
+    check("CONSTRUCTION VERDICTS VALID" in proc.stdout, proc.stdout)
+    with open(checkpoint_path, "rb") as source:
+        check(source.read() == checkpoint_before,
+              "a read-only history validation advanced the durable checkpoint")
+    check(len(journal_lines()) == 2,
+          "a read-only history validation changed the journal")
+    with open(dashboard, "rb") as source:
+        check(source.read() == b"dashboard sentinel\n",
+              "a read-only history validation refreshed the dashboard")
+
+
+@test
+def construction_history_read_only_validation_preserves_an_incomplete_tail():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    first = progress.event_entry("fixture", "note", kind="ruling", text="first")
+    write_with_construction_validation(progress, first)
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "ab") as target:
+        target.write(b'{"interrupted":')
+    with open(journal_path, "rb") as source:
+        journal_before = source.read()
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    with open(checkpoint_path, "rb") as source:
+        checkpoint_before = source.read()
+    dashboard = os.path.join(WORKSPACE, "dashboard", "data", "progress.jsonl")
+    os.makedirs(os.path.dirname(dashboard))
+    with open(dashboard, "wb") as target:
+        target.write(b"dashboard sentinel\n")
+
+    proc = run_progress("construction-verdict-check", "history")
+
+    check(proc.returncode != 0, "an incomplete journal tail passed read-only validation")
+    with open(journal_path, "rb") as source:
+        check(source.read() == journal_before,
+              "read-only validation repaired the incomplete journal tail")
+    with open(checkpoint_path, "rb") as source:
+        check(source.read() == checkpoint_before,
+              "read-only validation changed the checkpoint on refusal")
+    with open(dashboard, "rb") as source:
+        check(source.read() == b"dashboard sentinel\n",
+              "read-only validation refreshed the dashboard on refusal")
+
+
+@test
+def construction_history_checkpoint_validates_an_uncheckpointed_construction_event():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    first = progress.event_entry("fixture", "note", kind="ruling", text="first")
+    write_with_construction_validation(progress, first)
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    with open(checkpoint_path, "rb") as source:
+        checkpoint_before = source.read()
+    append_note(
+        "verdict.consumed", {"check": "design", "outcome": "clean"},
+        lot="lot-1", task=1, attempt=1, round=1,
+    )
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "rb") as source:
+        journal_before = source.read()
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    refused = False
+    try:
+        write_with_construction_validation(
+            progress,
+            progress.event_entry("fixture", "note", kind="ruling", text="must not append"),
+        )
+    except SystemExit:
+        refused = True
+
+    check(refused, "an uncheckpointed malformed Construction event was accepted")
+    with open(journal_path, "rb") as source:
+        check(source.read() == journal_before,
+              "the suffix refusal changed the journal")
+    with open(checkpoint_path, "rb") as source:
+        check(source.read() == checkpoint_before,
+              "the suffix refusal advanced the checkpoint")
+
+
+@test
+def construction_history_missing_checkpoint_replays_before_the_first_construction_append():
+    append_note(
+        "verdict.consumed", {"check": "design", "outcome": "clean"},
+        lot="lot-1", task=1, attempt=1, round=1,
+    )
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "rb") as source:
+        journal_before = source.read()
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    refused = False
+
+    def build(entries):
+        progress.validate_construction_verdict_history(entries)
+        return progress.event_entry("fixture", "note", kind="ruling", text="must not append")
+
+    try:
+        progress.write_validated_line(build)
+    except SystemExit:
+        refused = True
+
+    check(refused, "a missing checkpoint adopted malformed historical Construction authority")
+    with open(journal_path, "rb") as source:
+        check(source.read() == journal_before,
+              "the first full replay refusal changed the journal")
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "construction-history-validation.json",
+    )), "a failed first replay published a checkpoint")
+
+
+@test
+def unrelated_note_does_not_bootstrap_or_replay_construction_history():
+    append_note(
+        "verdict.consumed", {"check": "design", "outcome": "clean"},
+        lot="lot-1", task=1, attempt=1, round=1,
+    )
+
+    proc = run_progress("note", "ruling", "--text", "unrelated product authority")
+
+    check(proc.returncode == 0, proc.stdout + proc.stderr)
+    check(len(journal_lines()) == 2, "the unrelated note did not append exactly once")
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "construction-history-validation.json",
+    )), "an unrelated note certified unvalidated Construction history")
+
+
+@test
+def construction_history_same_process_cache_binds_the_exact_entries_object():
+    historical_start = {
+        "ts": "t", "by": "fixture", "event": "session-started",
+        "session": "legacy-implementer", "mode": "construction",
+        "job": "implementer", "lot": "lot-1", "task": 1, "attempt": 1,
+    }
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        target.write(json.dumps(historical_start, separators=(",", ":")) + "\n")
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    original = progress.validate_construction_session_start
+    calls = []
+
+    def observed(*args, **kwargs):
+        calls.append(args[0].get("session"))
+        return original(*args, **kwargs)
+
+    progress.validate_construction_session_start = observed
+    first = progress.journal_entries()
+    progress.validate_construction_verdict_history(first)
+    progress.validate_construction_verdict_history(first)
+    check(calls == ["legacy-implementer"],
+          f"the exact same entries object was validated more than once: {calls}")
+
+    equivalent = json.loads(json.dumps(first))
+    progress.validate_construction_verdict_history(equivalent)
+    check(calls == ["legacy-implementer", "legacy-implementer"],
+          f"a byte-equivalent entries object inherited cached authority: {calls}")
+
+    changed = json.loads(json.dumps(first))
+    changed[0] = {
+        "ts": "t", "by": "fixture", "event": "note",
+        "kind": "verdict.consumed", "data": {"check": "foreign"},
+    }
+    refused = False
+    try:
+        progress.validate_construction_verdict_history(changed)
+    except SystemExit:
+        refused = True
+    check(refused, "a changed same-length entries object inherited cached authority")
+
+
+@test
+def construction_history_checkpoint_removes_old_validator_calls_from_later_processes():
+    historical_starts = [{
+        "ts": "t", "by": "fixture", "event": "session-started",
+        "session": f"legacy-implementer-{number}", "mode": "construction",
+        "job": "implementer", "lot": "lot-1", "task": 1, "attempt": 1,
+    } for number in range(2_000)]
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "w", encoding="utf-8") as target:
+        for historical_start in historical_starts:
+            target.write(json.dumps(historical_start, separators=(",", ":")) + "\n")
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    original = progress.validate_construction_session_start
+    calls = []
+
+    def observed(*args, **kwargs):
+        calls.append(args[0].get("session"))
+        return original(*args, **kwargs)
+
+    progress.validate_construction_session_start = observed
+    second = progress.event_entry("fixture", "note", kind="ruling", text="second")
+    write_with_construction_validation(progress, second)
+    check(calls == [entry["session"] for entry in historical_starts],
+          f"the missing checkpoint did not perform one full validation: {len(calls)} calls")
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    later_calls = []
+    original = progress.validate_construction_session_start
+
+    def observed_later(*args, **kwargs):
+        later_calls.append(args[0].get("session"))
+        return original(*args, **kwargs)
+
+    progress.validate_construction_session_start = observed_later
+    third = progress.event_entry("fixture", "note", kind="ruling", text="third")
+    write_with_construction_validation(progress, third)
+    check(later_calls == [],
+          f"a later process replayed the certified physical start: {later_calls}")
+
+
+@test
+def construction_history_projector_change_forces_one_new_full_validation():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    historical_start = progress.event_entry(
+        "fixture", "session-started", session="legacy-implementer",
+        mode="construction", job="implementer", lot="lot-1", task=1, attempt=1,
+    )
+    write_with_construction_validation(progress, historical_start)
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    checkpoint["projector"] = "construction-history-v0"
+    unsigned = {key: value for key, value in checkpoint.items() if key != "account_sha256"}
+    checkpoint["account_sha256"] = hashlib.sha256(json.dumps(
+        unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    with open(checkpoint_path, "w", encoding="utf-8") as target:
+        target.write(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")) + "\n")
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    original = progress.validate_construction_session_start
+    calls = []
+
+    def observed(*args, **kwargs):
+        calls.append(args[0].get("session"))
+        return original(*args, **kwargs)
+
+    progress.validate_construction_session_start = observed
+    next_entry = progress.event_entry("fixture", "note", kind="ruling", text="next")
+    write_with_construction_validation(progress, next_entry)
+
+    check(calls == ["legacy-implementer"],
+          f"a projector change did not force one complete replay: {calls}")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        current = json.load(source)
+    check(current["projector"] == "construction-history-v1",
+          "the complete replay did not replace the stale projector generation")
+
+
+@test
+def construction_history_checkpoint_refuses_a_foreign_leaf_before_append():
+    foreign = os.path.join(BASE, "foreign-construction-checkpoint.json")
+    with open(foreign, "w", encoding="utf-8") as target:
+        target.write("foreign\n")
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    os.symlink(foreign, checkpoint_path)
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    interrupted = b'{"interrupted":'
+    with open(journal_path, "wb") as target:
+        target.write(interrupted)
+
+    proc = run_progress("note", "ruling", "--text", "must not append")
+
+    check(proc.returncode != 0, "a foreign checkpoint leaf was replaced")
+    with open(journal_path, "rb") as source:
+        check(source.read() == interrupted,
+              "a foreign checkpoint leaf allowed journal repair or append")
+    check(os.path.islink(checkpoint_path), "the foreign checkpoint leaf was removed")
+    with open(foreign, encoding="utf-8") as source:
+        check(source.read() == "foreign\n", "the foreign checkpoint target changed")
 
 
 @test
