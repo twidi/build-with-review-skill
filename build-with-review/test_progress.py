@@ -97,6 +97,7 @@ sys.exit(64)
 BASE = REPO = WORKSPACE = SCRIPT = FAKE_DIR = ENV = None
 
 TESTS = []
+FIXTURE_SNAPSHOTS = {}
 
 
 def test(fn):
@@ -171,6 +172,29 @@ def reset():
     subprocess.run(["git", "-C", REPO, "config", "user.name", "Progress Test"], check=True)
     subprocess.run(["git", "-C", REPO, "config", "user.email", "progress@example.test"], check=True)
     set_config(default_config())
+
+
+def restore_fixture_snapshot(name, builder):
+    if not re.fullmatch(r"[a-z0-9-]+", name):
+        raise ValueError(f"invalid fixture snapshot name: {name!r}")
+    snapshot = FIXTURE_SNAPSHOTS.get(name)
+    if snapshot is None:
+        builder()
+        snapshot_root = os.path.join(BASE, "fixture-snapshots", name)
+        os.makedirs(os.path.dirname(snapshot_root), exist_ok=True)
+        shutil.copytree(REPO, snapshot_root)
+        config = open(os.path.join(FAKE_DIR, "config.json"), "rb").read()
+        FIXTURE_SNAPSHOTS[name] = (snapshot_root, config)
+        return
+
+    snapshot_root, config = snapshot
+    shutil.rmtree(REPO)
+    shutil.copytree(snapshot_root, REPO)
+    calls = os.path.join(FAKE_DIR, "calls.jsonl")
+    if os.path.exists(calls):
+        os.remove(calls)
+    with open(os.path.join(FAKE_DIR, "config.json"), "wb") as target:
+        target.write(config)
 
 
 def run_progress(*args, env=None):
@@ -664,6 +688,15 @@ def drive_design_to_round_ten():
                 "id": 1, "status": "still-open",
                 "evidence": "The exact admitted defect remains open.",
             }]
+
+
+def build_design_round_ten_prefix():
+    seed_active_attempt()
+    drive_design_to_round_ten()
+
+
+def seed_design_round_ten_prefix():
+    restore_fixture_snapshot("design-round-ten", build_design_round_ten_prefix)
 
 
 def drive_design_to_round_ten_contract_blocker():
@@ -3951,8 +3984,7 @@ def design_parity_round_ten_uses_one_terminal_settlement_and_no_round_eleven():
 
 @test
 def design_parity_accepted_final_defect_requires_exact_failure_handoff():
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     resolve_design_round(10, [
         {"id": 1, "status": "alternative"},
         {"id": 2, "status": "accepted"},
@@ -4200,8 +4232,7 @@ def early_design_blocker_refuses_an_implementer_owned_finding():
 
 @test
 def early_design_contract_blocker_composes_with_an_inherited_design_obligation():
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     resolve_design_round(10, [
         {"id": 1, "status": "alternative"},
         {"id": 2, "status": "accepted"},
@@ -4365,8 +4396,7 @@ def code_contract_blocker_abort_preserves_the_exact_retry_batch():
 
 @test
 def code_contract_blocker_composes_with_an_inherited_design_obligation():
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     resolve_design_round(10, [
         {"id": 1, "status": "alternative"},
         {"id": 2, "status": "accepted"},
@@ -4608,8 +4638,7 @@ def code_contract_blocker_composes_two_code_obligations_for_one_manifest():
 
 
 def assert_composed_code_contract_blocker_stop_reaches_both_checkers(mode):
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     resolve_design_round(10, [
         {"id": 1, "status": "alternative"},
         {"id": 2, "status": "accepted"},
@@ -4676,8 +4705,7 @@ def inherited_design_and_code_obligations_survive_an_abort_until_success():
 
 
 def assert_stopped_design_obligation_reaches_retry(mode):
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     resolve_design_round(10, [
         {"id": 1, "status": "alternative"},
         {"id": 2, "status": "accepted"},
@@ -4727,8 +4755,7 @@ def design_parity_triplet_abort_preserves_accepted_final_obligation():
 
 @test
 def design_parity_stop_without_an_accepted_settlement_keeps_normal_retry_behavior():
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     append_current_disagreement(
         "#### Finding 1 — design alternative\n"
         "The first alternative satisfies the accepted task contract.\n"
@@ -4744,8 +4771,7 @@ def design_parity_stop_without_an_accepted_settlement_keeps_normal_retry_behavio
     check(retry.returncode == 0 and retry.stdout.strip() == "-", retry.stdout + retry.stderr)
 
     reset()
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     stop_active_attempt("abort")
     retry = run_progress("construction-retry-check", "lot-1", "3", "-")
     check(retry.returncode == 0 and retry.stdout.strip() == "-", retry.stdout + retry.stderr)
@@ -4753,8 +4779,7 @@ def design_parity_stop_without_an_accepted_settlement_keeps_normal_retry_behavio
 
 @test
 def design_parity_historical_stop_rejects_a_changed_accepted_obligation():
-    seed_active_attempt()
-    drive_design_to_round_ten()
+    seed_design_round_ten_prefix()
     resolve_design_round(10, [
         {"id": 1, "status": "alternative"},
         {"id": 2, "status": "accepted"},
@@ -12139,6 +12164,26 @@ def in_process_runner_matches_real_note_and_refusal_results():
           and "--data` must be a JSON object" in local_refusal.stdout,
           "the runners disagree on the malformed note refusal")
     check(journal_lines() == [], "an in-process refusal changed the journal")
+
+
+@test
+def fixture_snapshot_restores_one_isolated_real_prefix():
+    def build_prefix():
+        seed_active_attempt()
+        recorded = run_progress("note", "ruling", "--text", "snapshot authority")
+        check(recorded.returncode == 0, recorded.stdout + recorded.stderr)
+
+    restore_fixture_snapshot("active-attempt", build_prefix)
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    exact = open(journal_path, "rb").read()
+    with open(journal_path, "ab") as target:
+        target.write(b'{"snapshot":"changed"}\n')
+
+    restore_fixture_snapshot("active-attempt", build_prefix)
+    check(open(journal_path, "rb").read() == exact,
+          "the fixture snapshot retained another test's journal mutation")
+    replay = run_progress("construction-verdict-check", "history")
+    check(replay.returncode == 0, replay.stdout + replay.stderr)
 
 
 @test
