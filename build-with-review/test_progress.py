@@ -557,6 +557,49 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
     append_note("verdict.consumed", verdict, None, **context)
 
 
+def build_code_round_nine_prefix():
+    seed_active_attempt()
+    for round_number in range(1, 10):
+        append_checker_verdict(
+            "code", lot="lot-1", task=3, attempt=2,
+            round_number=round_number, findings=1,
+        )
+
+
+def seed_code_round_nine_prefix():
+    restore_fixture_snapshot("code-round-nine", build_code_round_nine_prefix)
+
+
+def build_code_round_ten_one_finding_prefix():
+    seed_code_round_nine_prefix()
+    append_checker_verdict(
+        "code", lot="lot-1", task=3, attempt=2,
+        round_number=10, findings=1,
+    )
+
+
+def seed_code_round_ten_one_finding_prefix():
+    restore_fixture_snapshot(
+        "code-round-ten-one-finding",
+        build_code_round_ten_one_finding_prefix,
+    )
+
+
+def build_code_round_ten_two_findings_prefix():
+    seed_code_round_nine_prefix()
+    append_checker_verdict(
+        "code", lot="lot-1", task=3, attempt=2,
+        round_number=10, findings=2,
+    )
+
+
+def seed_code_round_ten_two_findings_prefix():
+    restore_fixture_snapshot(
+        "code-round-ten-two-findings",
+        build_code_round_ten_two_findings_prefix,
+    )
+
+
 def design_result_payload(opening, *, findings=(), previous=(), verdict=None):
     findings = list(findings)
     return {
@@ -4430,12 +4473,7 @@ def code_contract_blocker_composes_with_an_inherited_design_obligation():
 
 @test
 def early_design_contract_blocker_composes_with_an_inherited_code_obligation():
-    seed_active_attempt()
-    for round_number in range(1, 11):
-        append_checker_verdict(
-            "code", lot="lot-1", task=3, attempt=2,
-            round_number=round_number, findings=1,
-        )
+    seed_code_round_ten_one_finding_prefix()
     resolution = os.path.join(BASE, "accepted-code-before-design-blocker.md")
     with open(resolution, "w", encoding="utf-8") as target:
         target.write(
@@ -4516,12 +4554,7 @@ def early_design_contract_blocker_composes_with_an_inherited_code_obligation():
 
 @test
 def code_contract_blocker_composes_two_code_obligations_for_one_manifest():
-    seed_active_attempt()
-    for round_number in range(1, 11):
-        append_checker_verdict(
-            "code", lot="lot-1", task=3, attempt=2,
-            round_number=round_number, findings=1,
-        )
+    seed_code_round_ten_one_finding_prefix()
     resolution = os.path.join(BASE, "accepted-code-retry.md")
     with open(resolution, "w", encoding="utf-8") as target:
         target.write(
@@ -5204,14 +5237,7 @@ def construction_duplicate_logical_spend_recovery_rejects_a_late_duplicate():
 
 @test
 def code_checker_round_limit_still_stops_at_ten():
-    seed_active_attempt()
-    append_checker_verdict("design", lot="lot-1", task=3, attempt=2)
-
-    for round_number in range(1, 10):
-        append_checker_verdict(
-            "code", lot="lot-1", task=3, attempt=2,
-            round_number=round_number, findings=1, text="F1 remains actionable.",
-        )
+    seed_code_round_nine_prefix()
 
     append_code_correction(9)
     gate = seed_review_gate(round_number=10)
@@ -5268,17 +5294,7 @@ def code_checker_verdict_derives_exact_public_impact_counts():
 
 @test
 def code_round_ten_resolution_accounts_for_the_exact_findings_batch():
-    seed_active_attempt()
-    for round_number in range(1, 10):
-        append_checker_verdict(
-            "code", lot="lot-1", task=3, attempt=2,
-            round_number=round_number, findings=1, text="Finding 1 remains actionable.",
-        )
-    append_checker_verdict(
-        "code", lot="lot-1", task=3, attempt=2,
-        round_number=10, findings=2,
-        text="Finding 1 is disputed.\nFinding 2 is another valid implementation.\n",
-    )
+    seed_code_round_ten_two_findings_prefix()
 
     incomplete_path = os.path.join(BASE, "incomplete-code-resolution.md")
     with open(incomplete_path, "w", encoding="utf-8") as target:
@@ -5368,12 +5384,7 @@ def code_round_ten_resolution_accounts_for_the_exact_findings_batch():
 
 @test
 def an_accepted_round_ten_defect_cannot_become_a_gate_proof():
-    seed_active_attempt()
-    for round_number in range(1, 11):
-        append_checker_verdict(
-            "code", lot="lot-1", task=3, attempt=2,
-            round_number=round_number, findings=1, text="Finding 1 is a real defect.",
-        )
+    seed_code_round_ten_one_finding_prefix()
     resolution_path = os.path.join(BASE, "accepted-code-defect.md")
     with open(resolution_path, "w", encoding="utf-8") as target:
         target.write(
@@ -5392,12 +5403,7 @@ def an_accepted_round_ten_defect_cannot_become_a_gate_proof():
 
 @test
 def a_damaged_historical_round_ten_resolution_fails_closed():
-    seed_active_attempt()
-    for round_number in range(1, 11):
-        append_checker_verdict(
-            "code", lot="lot-1", task=3, attempt=2,
-            round_number=round_number, findings=1, text="Finding 1 is disputed.",
-        )
+    seed_code_round_ten_one_finding_prefix()
     append_note(
         "code.review.resolved",
         {
