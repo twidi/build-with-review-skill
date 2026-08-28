@@ -306,7 +306,7 @@ def append_subagent(event, kind, *, mandate=None, data=None, **context):
         target.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
-def append_code_correction(round_number):
+def append_code_correction(round_number, *, runner=run_progress):
     verdict = next(
         entry for entry in reversed(journal_lines())
         if entry.get("kind") == "verdict.consumed"
@@ -321,7 +321,7 @@ def append_code_correction(round_number):
             f"The next candidate corrects finding {finding}."
             for finding in range(1, findings + 1)
         ) + "\n")
-    result = run_progress(
+    result = runner(
         "note", "code.review.resolved", "--round", str(round_number),
         "--text-file", path,
         "--data", json.dumps({
@@ -334,7 +334,8 @@ def append_code_correction(round_number):
 
 
 def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
-                           round_number=1, findings=0, text=None, impacts=None):
+                           round_number=1, findings=0, text=None, impacts=None,
+                           runner=run_progress):
     round_limit = {"design": 10, "code": 10}[check]
     helper = os.path.join(WORKSPACE, "prompts", "construction", "construction_review.py")
     plan_path = os.path.join(WORKSPACE, "plans", f"{lot}-plan.md")
@@ -388,12 +389,13 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
             append_checker_verdict(
                 "design", lot=lot, task=task, attempt=attempt,
                 round_number=1, findings=0,
+                runner=runner,
             )
         if round_number > 1:
             prior_round = round_number - 1
             if not any(entry.get("kind") == "code.review.resolved"
                        and entry.get("round") == prior_round for entry in journal_lines()):
-                append_code_correction(prior_round)
+                append_code_correction(prior_round, runner=runner)
         if active:
             candidate = os.path.join(REPO, "fixture-code-review.txt")
             with open(candidate, "w", encoding="utf-8") as target:
@@ -537,11 +539,13 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
 
 
 def build_code_round_nine_prefix():
+    runner = in_process_progress_runner()
     seed_active_attempt()
     for round_number in range(1, 10):
         append_checker_verdict(
             "code", lot="lot-1", task=3, attempt=2,
             round_number=round_number, findings=1,
+            runner=runner,
         )
 
 
@@ -554,6 +558,7 @@ def build_code_round_ten_one_finding_prefix():
     append_checker_verdict(
         "code", lot="lot-1", task=3, attempt=2,
         round_number=10, findings=1,
+        runner=in_process_progress_runner(),
     )
 
 
@@ -569,6 +574,7 @@ def build_code_round_ten_two_findings_prefix():
     append_checker_verdict(
         "code", lot="lot-1", task=3, attempt=2,
         round_number=10, findings=2,
+        runner=in_process_progress_runner(),
     )
 
 
@@ -602,13 +608,13 @@ def write_design_result(name, payload):
     return path
 
 
-def open_design_round(round_number):
-    opened = run_progress(
+def open_design_round(round_number, *, runner=run_progress):
+    opened = runner(
         "subagent-started", "design-checker", "--round", str(round_number),
     )
     check(opened.returncode == 0, opened.stdout + opened.stderr)
     opening = json.loads(opened.stdout)
-    spent = run_progress(
+    spent = runner(
         "note", "bound.spent", "--round", str(round_number),
         "--text", f"design checker round {round_number} of 10",
     )
@@ -616,25 +622,27 @@ def open_design_round(round_number):
     return opening
 
 
-def finish_design_round(round_number, opening, *, findings=(), previous=()):
+def finish_design_round(
+        round_number, opening, *, findings=(), previous=(), runner=run_progress,
+):
     source = write_design_result(
         f"design-round-{round_number}.json",
         design_result_payload(opening, findings=findings, previous=previous),
     )
-    ended = run_progress(
+    ended = runner(
         "subagent-ended", "design-checker", "--round", str(round_number),
         "--data", json.dumps({"result": source}),
     )
     check(ended.returncode == 0, ended.stdout + ended.stderr)
     outcome = "clean" if not findings else "findings"
-    consumed = run_progress(
+    consumed = runner(
         "note", "verdict.consumed", "--round", str(round_number),
         "--data", json.dumps({"check": "design", "outcome": outcome}),
     )
     check(consumed.returncode == 0, consumed.stdout + consumed.stderr)
 
 
-def resolve_design_round(round_number, items):
+def resolve_design_round(round_number, items, *, runner=run_progress):
     text_path = os.path.join(BASE, f"design-resolution-{round_number}.md")
     with open(text_path, "w", encoding="utf-8") as target:
         target.write("\n\n".join(
@@ -642,7 +650,7 @@ def resolve_design_round(round_number, items):
             f"Exact evidence for finding {item['id']}."
             for item in items
         ) + "\n")
-    result = run_progress(
+    result = runner(
         "note", "design.review.resolved", "--round", str(round_number),
         "--text-file", text_path,
         "--data", json.dumps({"check": "design", "items": items}),
@@ -650,8 +658,8 @@ def resolve_design_round(round_number, items):
     check(result.returncode == 0, result.stdout + result.stderr)
 
 
-def block_design_contract(round_number):
-    result = run_progress(
+def block_design_contract(round_number, *, runner=run_progress):
+    result = runner(
         "note", "design.review.blocked", "--round", str(round_number),
         "--data", '{"check":"design"}',
     )
@@ -682,10 +690,10 @@ def append_current_disagreement(body):
         target.write(f"{heading}{body.rstrip()}\n")
 
 
-def drive_design_to_round_ten():
+def drive_design_to_round_ten(*, runner=run_progress):
     previous = []
     for round_number in range(1, 11):
-        opening = open_design_round(round_number)
+        opening = open_design_round(round_number, runner=runner)
         finding = {
             "id": 1, "where": f"Design round {round_number}",
             "what": f"The round {round_number} design keeps one exact defect.",
@@ -700,12 +708,16 @@ def drive_design_to_round_ten():
                 "why": "The final settlement must preserve the exact alternative.",
                 "impact": "MINOR", "previous": [],
             })
-        finish_design_round(round_number, opening, findings=findings, previous=previous)
+        finish_design_round(
+            round_number, opening, findings=findings, previous=previous, runner=runner,
+        )
         if round_number < 10:
             replace_current_design(
                 f"Implement the accepted task contract. Corrected generation {round_number}."
             )
-            resolve_design_round(round_number, [{"id": 1, "status": "corrected"}])
+            resolve_design_round(
+                round_number, [{"id": 1, "status": "corrected"}], runner=runner,
+            )
             previous = [{
                 "id": 1, "status": "still-open",
                 "evidence": "The exact admitted defect remains open.",
@@ -714,17 +726,17 @@ def drive_design_to_round_ten():
 
 def build_design_round_ten_prefix():
     seed_active_attempt()
-    drive_design_to_round_ten()
+    drive_design_to_round_ten(runner=in_process_progress_runner())
 
 
 def seed_design_round_ten_prefix():
     restore_fixture_snapshot("design-round-ten", build_design_round_ten_prefix)
 
 
-def drive_design_to_round_ten_contract_blocker():
+def drive_design_to_round_ten_contract_blocker(*, runner=run_progress):
     previous = []
     for round_number in range(1, 11):
-        opening = open_design_round(round_number)
+        opening = open_design_round(round_number, runner=runner)
         finding = {
             "id": 1,
             "where": "frozen task contract" if round_number == 10 else f"Design round {round_number}",
@@ -740,16 +752,34 @@ def drive_design_to_round_ten_contract_blocker():
                 "why": "The next Design generation must account for the complete immutable batch.",
                 "impact": "IMPORTANT", "previous": [],
             })
-        finish_design_round(round_number, opening, findings=findings, previous=previous)
+        finish_design_round(
+            round_number, opening, findings=findings, previous=previous, runner=runner,
+        )
         if round_number < 10:
             replace_current_design(
                 f"Implement the accepted task contract. Corrected generation {round_number}."
             )
-            resolve_design_round(round_number, [{"id": 1, "status": "corrected"}])
+            resolve_design_round(
+                round_number, [{"id": 1, "status": "corrected"}], runner=runner,
+            )
             previous = [{
                 "id": 1, "status": "still-open",
                 "evidence": "The exact admitted defect remains open.",
             }]
+
+
+def build_design_round_ten_contract_blocker_prefix():
+    seed_active_attempt()
+    drive_design_to_round_ten_contract_blocker(
+        runner=in_process_progress_runner(),
+    )
+
+
+def seed_design_round_ten_contract_blocker_prefix():
+    restore_fixture_snapshot(
+        "design-round-ten-contract-blocker",
+        build_design_round_ten_contract_blocker_prefix,
+    )
 
 
 def stop_active_attempt(mode, attempt=2):
@@ -3980,7 +4010,7 @@ def design_parity_round_ten_uses_one_terminal_settlement_and_no_round_eleven():
         "#### Finding 7 — design alternative\n"
         "A prior attempt preserved this accepted alternative."
     )
-    drive_design_to_round_ten()
+    drive_design_to_round_ten(runner=in_process_progress_runner())
 
     before = len(journal_lines())
     refused_after(
@@ -4075,8 +4105,7 @@ def design_parity_accepted_final_defect_requires_exact_failure_handoff():
 
 @test
 def design_parity_final_contract_blocker_reaches_plan_fault_retry_without_settlement():
-    seed_active_attempt()
-    drive_design_to_round_ten_contract_blocker()
+    seed_design_round_ten_contract_blocker_prefix()
 
     before = len(journal_lines())
     refused_after(
@@ -4337,8 +4366,7 @@ def early_design_contract_blocker_survives_abort():
 
 @test
 def design_parity_stop_preserves_a_final_contract_blocker():
-    seed_active_attempt()
-    drive_design_to_round_ten_contract_blocker()
+    seed_design_round_ten_contract_blocker_prefix()
     block_final_design_contract()
     stop_active_attempt("pause")
     stopped = journal_lines()[-1]
