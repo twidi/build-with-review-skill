@@ -36,6 +36,7 @@ class Fixture:
         self.repo = self.temp / "repo"
         self.workspace = self.repo / ".superpowers" / "bwr" / "2026-08-19-demo"
         self.workspace.mkdir(parents=True)
+        (self.workspace / "progress.jsonl").write_bytes(b"")
         shutil.copytree(HERE / "prompts", self.workspace / "prompts")
         self.fake = self.temp / "fake_twicc.py"
         self.current_attempt = 1
@@ -1489,12 +1490,16 @@ def unusable_code_result_regenerates_the_same_logical_round_without_another_spen
             check((fixture.workspace / "progress.jsonl").read_bytes() == before,
                   "a refused live repair changed durable state")
         before = (fixture.workspace / "progress.jsonl").read_bytes()
-        fixture.progress_call(
+        resumed = fixture.progress_call(
             "subagent-started", "code-checker", "--round", "1",
-            "--data", json.dumps({"gate": op}), ok=False,
+            "--data", json.dumps({"gate": op}),
         )
         check((fixture.workspace / "progress.jsonl").read_bytes() == before,
-              "resume opened a new physical call over the lost live repair call")
+              "an exact retained rerun appended a second physical call")
+        resumed_data = json.loads(resumed.stdout)
+        for key in ("call", "gate", "manifest", "manifest_sha256", "tree"):
+            check(resumed_data[key] == first[key],
+                  f"an exact retained rerun changed its frozen {key}")
         fixture.progress_call(
             "subagent-ended", "code-checker", "--round", "1",
             "--data", '{"unusable":"lost"}',
