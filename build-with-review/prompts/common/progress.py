@@ -7520,6 +7520,21 @@ def validate_construction_verdict_history(entries):
         COMMAND_VALIDATION_CACHE[cache_key] = {"entries": entries}
 
 
+def validate_construction_history_append(entries, entry):
+    if entry.get("event") != "session-started" \
+            or entry.get("mode") != "construction" \
+            or entry.get("job") != "implementer":
+        return
+    subject = "the locked construction implementer start"
+    validate_construction_verdict_history(entries)
+    validate_construction_launch_candidate(
+        entries, entry.get("lot"), entry.get("task"), entry.get("attempt"), subject,
+    )
+    validate_construction_session_start(
+        entry, subject, entries=[*entries, entry], index=len(entries),
+    )
+
+
 def normalize_consolidation_started(entries, data, round_number):
     if data is not None:
         fail("subagent-started consolidation derives its identity and takes no --data")
@@ -10633,6 +10648,7 @@ def write_validated_line(builder, *, attempt_success=False):
             entries = journal_entries()
             checkpoint_start, journal_sha256 = construction_history_validation_start(entries)
             entry = builder(entries)
+            validate_construction_history_append(entries, entry)
             validate_pending_amendment_attempt_settlement_append(entries, entry)
             validate_pending_attempt_success_append(entries, entry)
             validate_pending_pass_opening_append(

@@ -1756,6 +1756,12 @@ def construction_session_started_requires_the_exact_attempt_identity():
         "git", "-C", REPO, "rev-parse", "refs/bwr/test-run/lot-1/attempt-base",
     ], text=True).strip()
     check(line["data"]["attempt_base"] == base, line)
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    check(os.path.isfile(checkpoint_path),
+          "the public implementer start did not bootstrap the history checkpoint")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    check(checkpoint["journal_lines"] == len(journal_lines()), checkpoint)
     history = run_progress("construction-verdict-check", "history")
     check(history.returncode == 0, history.stdout + history.stderr)
     changed = journal_lines()
@@ -10682,6 +10688,47 @@ def construction_history_checkpoint_certifies_one_successful_locked_append():
     ).encode("utf-8")).hexdigest()
     check(checkpoint.get("account_sha256") == expected,
           "the checkpoint does not authenticate its complete account")
+
+
+@test
+def construction_history_first_implementer_start_bootstraps_the_checkpoint():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    start = progress.event_entry(
+        "fixture", "session-started", session="legacy-implementer",
+        mode="construction", job="implementer", lot="lot-1", task=1, attempt=1,
+    )
+
+    progress.write_validated_line(lambda entries: start)
+
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    check(os.path.isfile(checkpoint_path),
+          "the first locked Construction start did not bootstrap the checkpoint")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    check(checkpoint["journal_lines"] == 1, checkpoint)
+
+
+@test
+def construction_history_locked_candidate_refuses_a_malformed_implementer_start():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    malformed = progress.event_entry(
+        "fixture", "session-started", session="legacy-implementer",
+        mode="construction", job="implementer", lot="foreign", task=1, attempt=1,
+    )
+    refused = False
+
+    try:
+        progress.write_validated_line(lambda entries: malformed)
+    except SystemExit:
+        refused = True
+
+    check(refused, "a malformed locked Construction candidate was appended")
+    check(journal_lines() == [], "the malformed locked candidate changed the journal")
+    check(not os.path.exists(os.path.join(
+        WORKSPACE, "construction-history-validation.json",
+    )), "the malformed locked candidate published a checkpoint")
 
 
 @test
