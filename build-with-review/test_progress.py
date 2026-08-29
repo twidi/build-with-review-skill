@@ -34830,6 +34830,20 @@ def write_with_construction_validation(progress, entry):
     progress.write_validated_line(build)
 
 
+def rewrite_construction_history_checkpoint_projector(projector):
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    checkpoint["projector"] = projector
+    unsigned = {key: value for key, value in checkpoint.items() if key != "account_sha256"}
+    checkpoint["account_sha256"] = hashlib.sha256(json.dumps(
+        unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    with open(checkpoint_path, "w", encoding="utf-8") as target:
+        target.write(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")) + "\n")
+    return checkpoint_path
+
+
 @test
 def construction_history_checkpoint_certifies_one_successful_locked_append():
     progress = load_common_module("progress")
@@ -34849,7 +34863,7 @@ def construction_history_checkpoint_certifies_one_successful_locked_append():
     with open(journal_path, "rb") as source:
         journal = source.read()
     check(checkpoint.get("schema") == 1, checkpoint)
-    check(checkpoint.get("projector") == "construction-history-v1", checkpoint)
+    check(checkpoint.get("projector") == "construction-history-v2", checkpoint)
     check(checkpoint.get("journal_bytes") == len(journal), checkpoint)
     check(checkpoint.get("journal_lines") == 1, checkpoint)
     check(checkpoint.get("journal_sha256") == hashlib.sha256(journal).hexdigest(), checkpoint)
@@ -35202,16 +35216,11 @@ def construction_history_projector_change_forces_one_new_full_validation():
         mode="construction", job="implementer", lot="lot-1", task=1, attempt=1,
     )
     write_with_construction_validation(progress, historical_start)
-    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
-    with open(checkpoint_path, encoding="utf-8") as source:
-        checkpoint = json.load(source)
-    checkpoint["projector"] = "construction-history-v0"
-    unsigned = {key: value for key, value in checkpoint.items() if key != "account_sha256"}
-    checkpoint["account_sha256"] = hashlib.sha256(json.dumps(
-        unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    ).encode("utf-8")).hexdigest()
-    with open(checkpoint_path, "w", encoding="utf-8") as target:
-        target.write(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")) + "\n")
+    checkpoint_path = rewrite_construction_history_checkpoint_projector(
+        "construction-history-v1",
+    )
+    with open(checkpoint_path, "rb") as source:
+        stale_checkpoint = source.read()
 
     progress = load_common_module("progress")
     progress.COMMAND_VALIDATION_CACHE = {}
@@ -35223,6 +35232,23 @@ def construction_history_projector_change_forces_one_new_full_validation():
         return original(*args, **kwargs)
 
     progress.validate_construction_session_start = observed
+    progress.validate_construction_verdict_history(progress.journal_entries())
+    check(calls == ["legacy-implementer"],
+          f"a read-only validator trusted the pre-merge checkpoint: {calls}")
+    with open(checkpoint_path, "rb") as source:
+        check(source.read() == stale_checkpoint,
+              "a read-only full replay replaced the pre-merge checkpoint")
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    original = progress.validate_construction_session_start
+    calls = []
+
+    def observed_append(*args, **kwargs):
+        calls.append(args[0].get("session"))
+        return original(*args, **kwargs)
+
+    progress.validate_construction_session_start = observed_append
     next_entry = progress.event_entry("fixture", "note", kind="ruling", text="next")
     write_with_construction_validation(progress, next_entry)
 
@@ -35230,8 +35256,71 @@ def construction_history_projector_change_forces_one_new_full_validation():
           f"a projector change did not force one complete replay: {calls}")
     with open(checkpoint_path, encoding="utf-8") as source:
         current = json.load(source)
-    check(current["projector"] == "construction-history-v1",
+    check(current["projector"] == "construction-history-v2",
           "the complete replay did not replace the stale projector generation")
+
+    rewrite_construction_history_checkpoint_projector("foreign-projector")
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    original = progress.validate_construction_session_start
+    calls = []
+
+    def observed_foreign(*args, **kwargs):
+        calls.append(args[0].get("session"))
+        return original(*args, **kwargs)
+
+    progress.validate_construction_session_start = observed_foreign
+    final_entry = progress.event_entry("fixture", "note", kind="ruling", text="final")
+    write_with_construction_validation(progress, final_entry)
+    check(calls == ["legacy-implementer"],
+          f"a foreign projector version was not a cache miss: {calls}")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        current = json.load(source)
+    check(current["projector"] == "construction-history-v2",
+          "the foreign projector generation survived the complete replay")
+
+
+@test
+def construction_history_premerge_checkpoint_cannot_hide_invalid_merged_authority():
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    malformed = progress.event_entry(
+        "fixture", "session-started", session="invalid-correction-implementer",
+        mode="construction", job="implementer", lot="lot-1", correction=1,
+        task=1, attempt=1, data={"schema": 1},
+    )
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "w", encoding="utf-8") as target:
+        target.write(json.dumps(malformed, ensure_ascii=False, separators=(",", ":")) + "\n")
+    raw = open(journal_path, "rb").read()
+    dependencies = progress.construction_history_dependencies([malformed])
+    checkpoint = progress.construction_history_checkpoint_account(raw, 1, dependencies)
+    checkpoint["projector"] = "construction-history-v1"
+    unsigned = {key: value for key, value in checkpoint.items() if key != "account_sha256"}
+    checkpoint["account_sha256"] = hashlib.sha256(json.dumps(
+        unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    checkpoint_path = os.path.join(WORKSPACE, "construction-history-validation.json")
+    with open(checkpoint_path, "w", encoding="utf-8") as target:
+        target.write(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")) + "\n")
+    checkpoint_before = open(checkpoint_path, "rb").read()
+
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    refused = False
+    try:
+        write_with_construction_validation(
+            progress,
+            progress.event_entry("fixture", "note", kind="ruling", text="must not append"),
+        )
+    except SystemExit:
+        refused = True
+
+    check(refused, "a pre-merge checkpoint hid invalid integrated Construction authority")
+    check(open(journal_path, "rb").read() == raw,
+          "the rejected cold replay changed or appended the journal")
+    check(open(checkpoint_path, "rb").read() == checkpoint_before,
+          "the rejected cold replay replaced the pre-merge checkpoint")
 
 
 @test

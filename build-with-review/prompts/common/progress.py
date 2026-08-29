@@ -218,7 +218,7 @@ JOURNAL_LOCK = f"{JOURNAL}.lock"
 CONSTRUCTION_HISTORY_VALIDATION = os.path.join(
     WORKSPACE, "construction-history-validation.json",
 )
-CONSTRUCTION_HISTORY_PROJECTOR = "construction-history-v1"
+CONSTRUCTION_HISTORY_PROJECTOR = "construction-history-v2"
 AMENDMENT_SWEEP_PREFLIGHT = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
 AMENDMENT_ATTEMPT_SETTLE_MARKER = os.path.join(
     WORKSPACE, "amendment-attempt-settle-in-progress.json",
