@@ -10492,7 +10492,9 @@ def validate_construction_verdict_entries(entries, start=0):
             )
         elif entry.get("event") == "note" and entry.get("kind") == "bound.spent":
             logical = note_data(entry)
-            if construction_spend_recoveries(entries, index + 1, logical):
+            if isinstance(logical, dict) \
+                    and logical.get("check") in {*CONSTRUCTION_CHECKERS, "diagnostic"} \
+                    and construction_spend_recoveries(entries, index + 1, logical):
                 construction_domain_spends(entries, len(entries), logical)
     for index, entry in enumerate(entries[start:], start):
         if entry.get("event") != "note" or entry.get("kind") != "verdict.consumed":

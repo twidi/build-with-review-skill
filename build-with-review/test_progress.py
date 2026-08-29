@@ -36000,6 +36000,54 @@ def construction_history_read_only_validation_preserves_an_incomplete_tail():
 
 
 @test
+def construction_history_ignores_a_non_construction_bound_spend():
+    seed_active_attempt()
+    open_design_round(1)
+    spend = next(
+        entry for entry in journal_lines()
+        if entry.get("kind") == "bound.spent"
+        and (entry.get("data") or {}).get("check") == "design"
+    )
+    duplicate = json.loads(json.dumps(spend))
+    duplicate["ts"] = "duplicate"
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+    recovered = run_progress(
+        "construction-spend-recover", "lot-1", "3", "2", "design", "1",
+    )
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    append_note(
+        "bound.spent",
+        {"scope": "construction-completeness", "pass": 3},
+        "C2 completeness pass 3",
+        mode="construction", job="controller", lot="lot-4.3", round=3,
+    )
+    checkpoint = os.path.join(WORKSPACE, "construction-history-validation.json")
+    if os.path.exists(checkpoint):
+        os.unlink(checkpoint)
+
+    entries = journal_lines()
+    check(any(entry.get("kind") == "construction.spend.recovered" for entry in entries),
+          "the fixture did not publish its exact Construction spend recovery")
+    foreign_spend = next(
+        entry for entry in entries
+        if entry.get("kind") == "bound.spent"
+        and (entry.get("data") or {}).get("scope") == "construction-completeness"
+    )
+    check("check" not in (foreign_spend.get("data") or {}), foreign_spend)
+
+    proc = run_progress("construction-verdict-check", "history")
+
+    check(proc.returncode == 0, proc.stdout + proc.stderr)
+    check("CONSTRUCTION VERDICTS VALID" in proc.stdout, proc.stdout)
+    check(any(
+        entry.get("kind") == "bound.spent"
+        and (entry.get("data") or {}).get("scope") == "construction-completeness"
+        for entry in journal_lines()
+    ), "Construction history validation changed the non-Construction spend")
+
+
+@test
 def construction_history_checkpoint_validates_an_uncheckpointed_construction_event():
     progress = load_common_module("progress")
     progress.COMMAND_VALIDATION_CACHE = {}
