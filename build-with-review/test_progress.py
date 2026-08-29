@@ -283,8 +283,10 @@ def in_process_progress_runner(*, retain_projection_cache=False):
         shared_env["TWICC_BIN"] = ENV.get("TWICC_BIN")
         if shared_env != ENV:
             raise ValueError("the in-process progress runner requires the shared test environment")
-        stdout = io.StringIO()
-        stderr = io.StringIO()
+        stdout_bytes = io.BytesIO()
+        stderr_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8", write_through=True)
+        stderr = io.TextIOWrapper(stderr_bytes, encoding="utf-8", write_through=True)
         returncode = 0
         previous_argv = sys.argv
         previous_twicc = progress.TWICC
@@ -310,8 +312,12 @@ def in_process_progress_runner(*, retain_projection_cache=False):
                     progress.CORRECTION_CONTRACT_STATE_CACHE.reset(cache_token)
 
         run_with_test_environment(invoke)
+        stdout.flush()
+        stderr.flush()
         return subprocess.CompletedProcess(
-            [SCRIPT, *args], returncode, stdout.getvalue(), stderr.getvalue(),
+            [SCRIPT, *args], returncode,
+            stdout_bytes.getvalue().decode("utf-8"),
+            stderr_bytes.getvalue().decode("utf-8"),
         )
 
     def retain_validated_correction_rewind(data):
@@ -1974,6 +1980,10 @@ def seed_completed_grouped_amendment_successor(token):
     gate = seed_baseline_gate(
         f"amendment/1/{amendment_commit}", amendment_commit,
         first_opening["data"]["commit"],
+    )
+    set_caller_bwr(
+        mode="product-review", lot="lot-1", job="controller",
+        task=None, attempt=None, mandate=None, round=None,
     )
     successor = run_progress(
         "note", "pass.opened",
@@ -8651,6 +8661,12 @@ def product_pass_generation_binds_lens_pool_receipt_and_verifier():
           first_account)
 
     config = default_config()
+    product_controller = {
+        "schema": 1, "job": "controller", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1", "status": "working",
+    }
+    config["whoami"]["session"]["annotations"]["bwr"] = product_controller
+    config["sessions"][CALLER]["annotations"]["bwr"] = product_controller
     config["sessions"][TARGET] = {
         "id": TARGET,
         "annotations": {"bwr": {
@@ -8675,6 +8691,10 @@ def product_pass_generation_binds_lens_pool_receipt_and_verifier():
     )
     second_gate = seed_baseline_gate(
         f"amendment/1/{second_commit}", second_commit, first_commit,
+    )
+    set_caller_bwr(
+        mode="product-review", lot="lot-1", job="controller",
+        task=None, attempt=None, mandate=None, round=None,
     )
     second_opened = run_progress(
         "note", "pass.opened",
@@ -18140,9 +18160,12 @@ def correction_stop_projector_validates_resumes_once_and_rejects_mutation():
 
 @test
 def correction_pause_blocks_every_authority_mutation_until_resume():
-    seed_bounded_correction_retry_with_one_final_checker_obligation()
+    progress_runner = in_process_progress_runner(retain_projection_cache=True)
+    seed_bounded_correction_retry_with_one_final_checker_obligation(
+        progress_runner,
+    )
     implementer = start_correction_implementer_session(
-        "correction-retry-pause", 2,
+        "correction-retry-pause", 2, progress_runner=progress_runner,
     )
     restore_correction_controller_with_implementer(implementer, 2)
     paused = subprocess.run(
@@ -18206,23 +18229,56 @@ def correction_pause_blocks_every_authority_mutation_until_resume():
         refused_mapping = True
     check(refused_mapping, "a final-checker map crossed a current pause")
     check(journal_lines() == before_entries, "the stopped mapping changed the journal")
-    retired = run_progress(
+    retired = progress_runner(
         "session-retired", implementer, "superseded", "--archive", "--hide",
     )
     check(retired.returncode == 0, retired.stdout + retired.stderr)
-    resumed = run_progress("note", "resumed")
+    resumed = progress_runner("note", "resumed")
     check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    start_correction_attempt_in_process(1, 3, progress_runner)
+    resumed_implementer = start_correction_implementer_session(
+        "correction-retry-pause-resumed", 3, progress_runner=progress_runner,
+    )
+    blocker_opening = open_design_round(1, progress_runner=progress_runner)
+    finish_design_round(1, blocker_opening, findings=[{
+        "id": 1,
+        "where": "frozen task contract",
+        "what": "The resumed task omits one required bounded file.",
+        "why": "Only the controller can revise the canonical Correction artifact.",
+        "impact": "IMPORTANT",
+        "previous": [],
+    }], progress_runner=progress_runner)
+    blocked = progress_runner(
+        "note", "design.review.blocked", "--round", "1",
+        "--data", '{"check":"design"}',
+    )
+    check(blocked.returncode == 0, blocked.stdout + blocked.stderr)
+    admitted = progress_runner(
+        "construction-failure-check", "lot-1", "1", "3", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    fail_correction_attempt_in_process(1, 3, "C3.9b", progress_runner)
+    restore_correction_controller_with_implementer(resumed_implementer, 3)
+    retired = progress_runner(
+        "session-retired", resumed_implementer, "superseded",
+        "--archive", "--hide",
+    )
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
     replace_correction_task_line(
         1,
         "Files: src/demo.py and its focused tests",
         "Files: src/demo.py, src/resumed.py, and their focused tests",
     )
-    revised = subprocess.run(
-        [os.path.join(WORKSPACE, "prompts", "construction", "correction-round-revise.sh"),
-         "lot-1", "1", "1", "The resumed task owns one additional bounded file."],
-        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
-    )
-    check(revised.returncode == 0, revised.stdout + revised.stderr)
+    revised = revise_correction_in_process(1, progress_runner)
+    if "BASELINE REQUIRED" in revised:
+        baseline = select_correction_baseline_in_process(progress_runner)
+        check(baseline["mode"] == "required", baseline)
+        seed_correction_baseline_gate(
+            baseline["owner"], baseline["base_commit"], baseline["base_commit"],
+            progress_runner=progress_runner,
+        )
+        revised = revise_correction_in_process(1, progress_runner)
+    check("CORRECTION ROUND REVISED" in revised, revised)
     check(journal_lines()[-1].get("kind") == "correction.round.revised",
           journal_lines()[-1])
 
@@ -37908,7 +37964,7 @@ def main():
             started = time.monotonic()
             try:
                 fn()
-            except Exception:
+            except (Exception, SystemExit):
                 duration = time.monotonic() - started
                 durations.append((duration, fn.__name__))
                 failures += 1

@@ -2681,6 +2681,7 @@ def final_design_contract_blocker_uses_the_real_plan_fault_closer():
             encoding="utf-8",
         )
         failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
+        fixture.set_controller_context()
         fixture.run("bash", failed, "lot-1", "1", "1", "C3.9b", ok=True)
         terminal = next(
             entry for entry in reversed(fixture.journal())
@@ -2695,6 +2696,7 @@ def final_design_contract_blocker_uses_the_real_plan_fault_closer():
         )
         proof = retry.stdout.strip()
         check(proof != "-", "the plan-fault closer lost its Design obligation")
+        fixture.set_attempt_context(1)
         fixture.progress_call(
             "session-retired", "gate-test-session-1", "superseded",
             "--archive", "--hide", ok=True,
@@ -2765,6 +2767,7 @@ def early_design_contract_blocker_uses_the_real_plan_fault_closer():
             encoding="utf-8",
         )
         failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
+        fixture.set_controller_context()
         fixture.run("bash", failed, "lot-1", "1", "1", "C3.9b", ok=True)
         terminal = next(
             entry for entry in reversed(fixture.journal())
@@ -2777,6 +2780,7 @@ def early_design_contract_blocker_uses_the_real_plan_fault_closer():
             "construction-retry-check", "lot-1", "1", "-", ok=True,
         ).stdout.strip()
         check(proof != "-", "the early plan-fault closer lost its Design obligation")
+        fixture.set_attempt_context(1)
         fixture.progress_call(
             "session-retired", "gate-test-session-1", "superseded",
             "--archive", "--hide", ok=True,
@@ -2880,6 +2884,7 @@ def intermediate_code_contract_blocker_reaches_the_corrected_plan_retry():
             encoding="utf-8",
         )
         failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
+        fixture.set_controller_context()
         fixture.run("bash", failed, "lot-1", "1", "1", "C3.9b", ok=True)
         failure_index, failure = next(
             (index, entry) for index, entry in reversed(list(enumerate(fixture.journal())))
@@ -3225,6 +3230,7 @@ def accepted_round_ten_handoff_is_bound_to_the_next_checker_generation():
             encoding="utf-8",
         )
         failed = fixture.workspace / "prompts" / "construction" / "attempt-failed.sh"
+        fixture.set_controller_context()
         fixture.run("bash", failed, "lot-1", "1", "1", "C3.9a", ok=True)
         terminal_index, terminal = next(
             (index, entry) for index, entry in reversed(list(enumerate(fixture.journal())))
@@ -3236,6 +3242,7 @@ def accepted_round_ten_handoff_is_bound_to_the_next_checker_generation():
               terminal_data)
         raw_lines = (fixture.workspace / "progress.jsonl").read_bytes().splitlines()
         failure_proof = f"{terminal_index}:{hashlib.sha256(raw_lines[terminal_index]).hexdigest()}"
+        fixture.set_attempt_context(1)
         fixture.progress_call(
             "session-retired", "gate-test-session-1", "failed",
             "--archive", "--hide", ok=True,
@@ -3276,7 +3283,9 @@ def accepted_round_ten_handoff_is_bound_to_the_next_checker_generation():
         check(manifest["previous"]["findings"][0]["impact"] == "IMPORTANT",
               "the accepted finding lost its public impact during retry handoff")
 
+        fixture.set_controller_context()
         fixture.run("bash", failed, "lot-1", "1", "2", "C3.9a", ok=True)
+        fixture.set_attempt_context(2)
         fixture.progress_call(
             "session-retired", "gate-test-session-2", "failed",
             "--archive", "--hide", ok=True,

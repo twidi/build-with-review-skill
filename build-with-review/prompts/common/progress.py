@@ -9130,7 +9130,7 @@ def correction_revision_blocker_account(entries, before, built, correction, subj
             and review["contract_blocked"]
         ]
         if len(blocker_reviews) != 1:
-            fail(f"{subject} has no exact controller-owned C3.9b blocker")
+            continue
         proof = journal_line_proof(index)
         if proof in consumed:
             continue
