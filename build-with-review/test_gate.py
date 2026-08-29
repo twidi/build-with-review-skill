@@ -5,6 +5,7 @@ Run from the skill root with: python3 test_gate.py
 """
 import atexit
 import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -3620,6 +3621,343 @@ def format_slowest_tests_orders_descending():
         == ["1.500s slow", "0.200s fast"],
         "the functional duration report is not ordered from slowest to fastest",
     )
+
+
+@test
+def correction_gate_inherits_its_lease_before_physical_admission():
+    gate = (HERE / "prompts" / "construction" / "gate-check.sh").read_text(
+        encoding="utf-8",
+    )
+    flat = " ".join(gate.split())
+    fresh = gate.split("    else\n        controller_physical_admission_acquire", 1)
+    check(len(fresh) == 1,
+          "the fresh gate still acquires physical admission before its Correction lease")
+    check("gate-correction-lease-acquired" in gate,
+          "the fresh Correction gate has no deterministic retained-lease boundary")
+    inherited_calls = flat.split(
+        'python3 "$GATE_EXECUTION" open-marker "$marker_draft"',
+    )[1:]
+    check(
+        any(
+            '"$GATE_CORRECTION_LEASE_FD"' in call.split("||", 1)[0]
+            and '"$GATE_CORRECTION_LEASE_OPERATION"' in call.split("||", 1)[0]
+            for call in inherited_calls
+        ),
+        "the gate helper does not authenticate its inherited Correction lease",
+    )
+
+
+@test
+def correction_plan_and_gate_use_one_deadlock_free_lock_order():
+    roots = []
+    processes = []
+
+    def make_fixture(label):
+        root = pathlib.Path(tempfile.mkdtemp(prefix=f"bwr-lock-order-{label}-"))
+        roots.append(root)
+        repo = root / "repo"
+        workspace = repo / ".superpowers" / "bwr" / "run"
+        construction = workspace / "prompts" / "construction"
+        common = workspace / "prompts" / "common"
+        construction.mkdir(parents=True)
+        common.mkdir(parents=True)
+        for relative in (
+            "prompts/construction/plan-commit.sh",
+            "prompts/construction/gate-check.sh",
+            "prompts/construction/gate_execution.py",
+            "prompts/construction/gate_file.py",
+            "prompts/common/attempt-closer.sh",
+            "prompts/common/bare-stop.sh",
+            "prompts/common/correction_authority.py",
+            "prompts/common/final_checker_obligations.py",
+        ):
+            source = HERE / relative
+            target = workspace / relative
+            shutil.copy2(source, target)
+        progress = common / "progress.py"
+        progress.write_text(
+            """#!/usr/bin/env python3
+import fcntl
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+WORKSPACE = pathlib.Path(__file__).resolve().parents[2]
+REPO = WORKSPACE.parents[2]
+JOURNAL = WORKSPACE / "progress.jsonl"
+
+def journal_entries():
+    if not JOURNAL.exists():
+        return []
+    return [json.loads(line) for line in JOURNAL.read_text(encoding="utf-8").splitlines()]
+
+def note_data(entry):
+    value = entry.get("data")
+    return value if isinstance(value, dict) else {}
+
+def correction_escalation_plan_origin(_entries, lot):
+    return lot == "lot-1"
+
+def require_no_open_correction_escalation_c2(*_args, **_kwargs):
+    return None
+
+def correction_escalation_require_quiescent(*_args, **_kwargs):
+    return None
+
+def correction_escalation_clean_c2_account(*_args, **_kwargs):
+    commit = subprocess.check_output(
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    return {"plan_account": {"commit": commit}}
+
+def append(kind, data):
+    lock = JOURNAL.with_name(JOURNAL.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        entry = {
+            "event": "subagent-started" if kind == "gate-runner" else "note",
+            "kind": kind,
+            "lot": "lot-1",
+            "data": data,
+        }
+        with JOURNAL.open("a", encoding="utf-8") as target:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\\n")
+            target.flush()
+            os.fsync(target.fileno())
+    finally:
+        os.close(descriptor)
+
+def main():
+    command = sys.argv[1]
+    if command == "construction-origin-check":
+        return
+    if command == "construction-plan-task-manifest":
+        print("1 " + "a" * 40)
+        return
+    if command == "construction-correction-authority-scope":
+        print("correction-escalation")
+        return
+    if command == "construction-correction-lease-check":
+        from correction_authority import CorrectionAuthorityLease
+        with CorrectionAuthorityLease.inherit(WORKSPACE, sys.argv[3], int(sys.argv[2])):
+            return
+    if command == "construction-plan-publication-check":
+        print(json.dumps({"schema": 1, "lot": sys.argv[2]}, separators=(",", ":")))
+        return
+    if command == "construction-plan-publication-append":
+        from correction_authority import CorrectionAuthorityLease
+        operation = sys.argv[7]
+        with CorrectionAuthorityLease.inherit(WORKSPACE, operation, int(sys.argv[6])):
+            commit = subprocess.check_output(
+                ["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True,
+            ).strip()
+            append("plan.written", {
+                "schema": 2, "origin": "correction-round", "commit": commit,
+                "op": sys.argv[4],
+            })
+        return
+    if command == "subagent-started" and sys.argv[2] == "gate-runner":
+        position = sys.argv.index("--data")
+        append("gate-runner", json.loads(sys.argv[position + 1]))
+        return
+    raise SystemExit(64)
+
+if __name__ == "__main__":
+    main()
+""",
+            encoding="utf-8",
+        )
+        progress.chmod(0o755)
+        review = construction / "construction_review.py"
+        review.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+        review.chmod(0o755)
+        document_copy = common / "document-copy.sh"
+        document_copy.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+WORKSPACE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+REPO=$(cd "$WORKSPACE/../../.." && pwd)
+case $1 in
+    source) printf '%s\\n' "$WORKSPACE/$2" ;;
+    copy) mkdir -p "$REPO/$(dirname "$3")"; cp "$WORKSPACE/$2" "$REPO/$3" ;;
+    finish) ;;
+    *) exit 64 ;;
+esac
+""",
+            encoding="utf-8",
+        )
+        document_copy.chmod(0o755)
+        (workspace / "progress.jsonl").write_bytes(b"")
+        (workspace / "plans").mkdir()
+        plan = (
+            "# Plan\n\n## Task 1 - One\n"
+            "Achieves: Keep the lock order exact.\n"
+            "To verify: The concurrent owner is serialized.\n\n"
+            "### Design\nUse one shared lock order.\n"
+        )
+        (workspace / "plans" / "lot-1-plan.md").write_text(
+            plan + "\nCandidate generation.\n", encoding="utf-8",
+        )
+        (repo / "docs" / "plans").mkdir(parents=True)
+        target = repo / "docs" / "plans" / "run-lot-1-plan.md"
+        target.write_text(plan + "\nPublished generation.\n", encoding="utf-8")
+        (repo / ".superpowers" / "bwr" / "gate.md").write_text(
+            "true\n", encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.name", "Lock Order Test"], check=True)
+        (repo / ".gitignore").write_text(".superpowers/\n", encoding="utf-8")
+        (repo / "base.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", repo, "add", ".gitignore", "base.txt", str(target.relative_to(repo))],
+            check=True,
+        )
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "base"], check=True)
+        (repo / "second.txt").write_text("second\n", encoding="utf-8")
+        subprocess.run(["git", "-C", repo, "add", "second.txt"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "second"], check=True)
+        head = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip()
+        base = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD^"], text=True).strip()
+        env = dict(os.environ)
+        env.pop("CONTROLLER_PHYSICAL_ADMISSION_FD", None)
+        env.pop("CONTROLLER_PHYSICAL_ADMISSION_ACQUIRED_HERE", None)
+        return {
+            "root": root, "repo": repo, "workspace": workspace, "target": target,
+            "head": head, "base": base, "env": env,
+            "plan": construction / "plan-commit.sh",
+            "gate": construction / "gate-check.sh",
+        }
+
+    def surfaces(fixture):
+        repo = fixture["repo"]
+        workspace = fixture["workspace"]
+        def optional(path):
+            return path.read_bytes() if path.is_file() and not path.is_symlink() else None
+        return {
+            "journal": (workspace / "progress.jsonl").read_bytes(),
+            "gate_marker": optional(workspace / "gate-check-in-progress"),
+            "plan_marker": optional(workspace / "plan-commit-in-progress"),
+            "refs": subprocess.check_output(
+                ["git", "-C", repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/bwr"],
+            ),
+            "head": subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"]),
+            "tree": subprocess.check_output(["git", "-C", repo, "write-tree"]),
+            "index": subprocess.check_output(["git", "-C", repo, "diff", "--cached", "--binary"]),
+            "status": subprocess.check_output(["git", "-C", repo, "status", "--porcelain=v1"]),
+            "target": fixture["target"].read_bytes(),
+        }
+
+    def start(fixture, command, barrier):
+        directory = fixture["root"] / barrier
+        directory.mkdir()
+        env = dict(fixture["env"])
+        env["BWR_TEST_CONTROLLER_PHYSICAL_BARRIER"] = barrier
+        env["BWR_TEST_CONTROLLER_PHYSICAL_BARRIER_DIR"] = str(directory)
+        process = subprocess.Popen(
+            list(map(str, command)), cwd=fixture["repo"], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        processes.append(process)
+        return process, directory
+
+    def wait_ready(process, directory, barrier):
+        ready = directory / f"{barrier}.ready"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if ready.exists():
+                return
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"{barrier} exited before its barrier\n{stdout}\n{stderr}")
+            time.sleep(0.01)
+        raise AssertionError(f"{barrier} did not reach its retained-lock boundary")
+
+    def release(directory, barrier):
+        (directory / f"{barrier}.release").write_text("release\n", encoding="utf-8")
+
+    def physical_is_free(fixture):
+        path = fixture["workspace"] / "controller-physical-admission.lock"
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    def commands(fixture):
+        plan = ["bash", fixture["plan"], "lot-1", "test: publish serialized plan"]
+        gate = [
+            "bash", fixture["gate"], "open", "baseline",
+            f"plan/lot-1/{fixture['head']}", "-", "0", "0", fixture["base"],
+        ]
+        return plan, gate
+
+    try:
+        plan_first = make_fixture("plan-first")
+        plan_command, gate_command = commands(plan_first)
+        plan_process, plan_barrier = start(
+            plan_first, plan_command, "plan-correction-lease-acquired",
+        )
+        wait_ready(plan_process, plan_barrier, "plan-correction-lease-acquired")
+        gate_process, gate_barrier = start(
+            plan_first, gate_command, "gate-correction-lease-acquired",
+        )
+        time.sleep(0.1)
+        check(gate_process.poll() is None, "the gate did not wait for the plan Correction lease")
+        physical_is_free(plan_first)
+        release(plan_barrier, "plan-correction-lease-acquired")
+        plan_stdout, plan_stderr = plan_process.communicate(timeout=20)
+        check(plan_process.returncode == 0, plan_stdout + plan_stderr)
+        wait_ready(gate_process, gate_barrier, "gate-correction-lease-acquired")
+        plan_winner = surfaces(plan_first)
+        release(gate_barrier, "gate-correction-lease-acquired")
+        gate_stdout, gate_stderr = gate_process.communicate(timeout=20)
+        check(gate_process.returncode != 0, gate_stdout + gate_stderr)
+        check(surfaces(plan_first) == plan_winner,
+              "the losing gate changed state after the plan winner")
+        check(plan_winner["gate_marker"] is None and plan_winner["plan_marker"] is None,
+              "the plan-first order retained an operation marker")
+        check(plan_winner["journal"].count(b'"kind":"plan.written"') == 1,
+              "the plan-first order did not publish one plan terminal")
+
+        gate_first = make_fixture("gate-first")
+        plan_command, gate_command = commands(gate_first)
+        gate_process, gate_barrier = start(
+            gate_first, gate_command, "gate-correction-lease-acquired",
+        )
+        wait_ready(gate_process, gate_barrier, "gate-correction-lease-acquired")
+        plan_process, plan_barrier = start(
+            gate_first, plan_command, "plan-correction-lease-acquired",
+        )
+        time.sleep(0.1)
+        check(plan_process.poll() is None, "the plan did not wait for the gate Correction lease")
+        physical_is_free(gate_first)
+        release(gate_barrier, "gate-correction-lease-acquired")
+        gate_stdout, gate_stderr = gate_process.communicate(timeout=20)
+        check(gate_process.returncode == 0, gate_stdout + gate_stderr)
+        wait_ready(plan_process, plan_barrier, "plan-correction-lease-acquired")
+        gate_winner = surfaces(gate_first)
+        release(plan_barrier, "plan-correction-lease-acquired")
+        plan_stdout, plan_stderr = plan_process.communicate(timeout=20)
+        check(plan_process.returncode != 0, plan_stdout + plan_stderr)
+        check(surfaces(gate_first) == gate_winner,
+              "the losing plan changed state after the gate winner")
+        check(gate_winner["gate_marker"] is not None and gate_winner["plan_marker"] is None,
+              "the gate-first order did not retain only its gate owner")
+        check(gate_winner["journal"].count(b'"kind":"gate-runner"') == 1,
+              "the gate-first order did not publish one physical gate owner")
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        for root in roots:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def format_slowest_tests(durations, limit=10):

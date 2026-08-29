@@ -667,6 +667,57 @@ def logical_open_cannot_freeze_a_policy_generation_crossed_while_it_waits():
 
 
 @test
+def inherited_gate_admission_rejects_foreign_and_unlocked_descriptors():
+    fixture = Fixture()
+    descriptors = []
+    try:
+        fixture.gate.write_text("true\n", encoding="utf-8")
+        operation = "e" * 64
+        draft = fixture.marker_draft(operation)
+        helper = fixture.prompts / "gate_execution.py"
+        before_journal = (fixture.workspace / "progress.jsonl").read_bytes() \
+            if (fixture.workspace / "progress.jsonl").exists() else b""
+        before_head = fixture.run("git", "rev-parse", "HEAD").stdout
+        before_tree = fixture.run("git", "write-tree").stdout
+        before_status = fixture.run("git", "status", "--porcelain=v1").stdout
+
+        foreign = os.open(fixture.temp / "foreign.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        descriptors.append(foreign)
+        canonical = os.open(
+            fixture.workspace / "correction-authority.lock",
+            os.O_RDWR | os.O_CREAT,
+            0o600,
+        )
+        descriptors.append(canonical)
+        for descriptor in descriptors:
+            refused = subprocess.run(
+                [
+                    sys.executable, helper, "open-marker", draft, str(descriptor),
+                    f"gate-admission:{operation}",
+                ],
+                cwd=fixture.repo,
+                pass_fds=(descriptor,),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            check(refused.returncode != 0, "an unowned inherited gate lease was accepted")
+            check(not (fixture.workspace / "gate-check-in-progress").exists(),
+                  "an unowned inherited gate lease published a marker")
+            journal = fixture.workspace / "progress.jsonl"
+            check((journal.read_bytes() if journal.exists() else b"") == before_journal,
+                  "an unowned inherited gate lease appended to the journal")
+            check(fixture.run("git", "rev-parse", "HEAD").stdout == before_head
+                  and fixture.run("git", "write-tree").stdout == before_tree
+                  and fixture.run("git", "status", "--porcelain=v1").stdout == before_status,
+                  "an unowned inherited gate lease changed Git state")
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        fixture.close()
+
+
+@test
 def policy_schedule_mutations_recheck_a_marker_after_waiting_for_authority():
     fixture = Fixture()
     process = None

@@ -988,7 +988,28 @@ def correction_gate_terminal(op, outcome):
                     anchored.remove_exact(hashlib.sha256(marker_payload).hexdigest())
 
 
-def open_marker(source):
+def inherited_gate_lease(marker, operation, descriptor, inherited_operation):
+    expected = f"gate-admission:{marker['op']}"
+    if inherited_operation != expected:
+        refuse("the inherited gate admission names another operation")
+    try:
+        descriptor = int(descriptor)
+    except (TypeError, ValueError):
+        refuse("the inherited gate admission descriptor is malformed")
+    try:
+        return CorrectionAuthorityLease.inherit(WORKSPACE, operation, descriptor)
+    except (OSError, ValueError) as exc:
+        refuse(f"the inherited gate admission lease failed: {exc}")
+
+
+def require_correction_gate_parent(inherited_descriptor):
+    if inherited_descriptor is None and not (MARKER.exists() or MARKER.is_symlink()):
+        refuse("a fresh Correction gate has no inherited admission owner")
+
+
+def open_marker(source, inherited_descriptor=None, inherited_operation=None):
+    if (inherited_descriptor is None) != (inherited_operation is None):
+        refuse("the inherited gate admission is incomplete")
     source = pathlib.Path(source)
     if not source.is_absolute():
         refuse("the gate marker draft path must be absolute")
@@ -1009,8 +1030,13 @@ def open_marker(source):
     elif marker["code"] != "-":
         refuse("the gate marker draft carries an invalid code-review proof")
     if marker["scope"] in CORRECTION_SCOPES:
+        require_correction_gate_parent(inherited_descriptor)
         operation = f"correction-gate:{marker['op']}"
-        with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+        lease_owner = CorrectionAuthorityLease.acquire(WORKSPACE, operation) \
+            if inherited_descriptor is None else inherited_gate_lease(
+                marker, operation, inherited_descriptor, inherited_operation,
+            )
+        with lease_owner as lease:
             if marker["scope"] == "correction-baseline":
                 authority = correction_baseline_authority(marker)
             else:
@@ -1056,11 +1082,23 @@ def open_marker(source):
 
         encoded = None
         if escalation_lot is None:
-            publish_ordinary()
+            if inherited_descriptor is None:
+                publish_ordinary()
+            else:
+                operation = f"gate-admission:{marker['op']}"
+                with inherited_gate_lease(
+                    marker, operation, inherited_descriptor, inherited_operation,
+                ):
+                    publish_ordinary()
         else:
+            require_correction_gate_parent(inherited_descriptor)
             operation = f"correction-escalation-gate:{marker['op']}"
             try:
-                with CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+                lease_owner = CorrectionAuthorityLease.acquire(WORKSPACE, operation) \
+                    if inherited_descriptor is None else inherited_gate_lease(
+                        marker, operation, inherited_descriptor, inherited_operation,
+                    )
+                with lease_owner:
                     entries = progress.journal_entries()
                     validate_correction_escalation_gate(marker, entries, escalation_lot)
                     publish_ordinary()
@@ -1500,8 +1538,8 @@ def main():
             sys.stdout.buffer.write(canonical_bytes(configured_policy()))
         elif command == "policy-publish" and len(sys.argv) == 3:
             publish_policy(sys.argv[2])
-        elif command == "open-marker" and len(sys.argv) == 3:
-            open_marker(sys.argv[2])
+        elif command == "open-marker" and len(sys.argv) in {3, 5}:
+            open_marker(sys.argv[2], *sys.argv[3:])
         elif command == "correction-terminal" and len(sys.argv) == 5:
             if sys.argv[3] not in {"result", "lost", "unusable"}:
                 refuse("the correction gate terminal kind is invalid")

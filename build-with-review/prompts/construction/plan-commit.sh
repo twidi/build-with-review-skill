@@ -57,6 +57,7 @@ if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
     "$PROGRESS" construction-correction-lease-check \
         "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION" \
         || die "the Correction escalation plan publication does not own its exact shared authority lease. Nothing was copied, staged, committed or marked."
+    controller_physical_test_barrier plan-correction-lease-acquired
 fi
 # The pending marker is the operation's identity AND its prepared payload,
 # published atomically. "HEAD touches the plan copy" cannot be an identity —

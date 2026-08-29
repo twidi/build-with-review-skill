@@ -293,6 +293,7 @@ open_check() {
     [[ $owner =~ ^[A-Za-z0-9._:/-]+$ ]] || die "the gate-check owner has invalid characters"
     validate_gate
     local head base tree op round marker_draft
+    local GATE_CORRECTION_LEASE_FD= GATE_CORRECTION_LEASE_OPERATION=
     head=$(git rev-parse HEAD)
     base=$(git rev-parse --verify "$base_arg^{commit}") \
         || die "$base_arg is not a commit"
@@ -389,6 +390,13 @@ Finish or abandon that exact check before opening another."
             read_marker
         fi
     else
+        op=$(printf '%s\0' "$scope" "$owner" "$head" "$base" "$tree" "$GATE_SHA" "$code" \
+            "$(date +%s%N)" "$$" "$RANDOM" | sha256sum | cut -d' ' -f1)
+        GATE_CORRECTION_LEASE_OPERATION="gate-admission:$op"
+        exec {GATE_CORRECTION_LEASE_FD}<>"$WORKSPACE/correction-authority.lock"
+        flock -x "$GATE_CORRECTION_LEASE_FD" \
+            || die "the gate opening cannot acquire the shared Correction authority lease"
+        controller_physical_test_barrier gate-correction-lease-acquired
         controller_physical_admission_acquire "$WORKSPACE" \
             || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
         if ! controller_operation_refuse_pending "$WORKSPACE"; then
@@ -418,8 +426,6 @@ PY
             fi
         fi
         controller_physical_test_barrier gate-before-marker
-        op=$(printf '%s\0' "$scope" "$owner" "$head" "$base" "$tree" "$GATE_SHA" "$code" \
-            "$(date +%s%N)" "$$" "$RANDOM" | sha256sum | cut -d' ' -f1)
         marker_draft=$(mktemp "$WORKSPACE/.gate-check-in-progress.XXXXXX")
         {
             printf 'op %s\n' "$op"
@@ -438,6 +444,7 @@ PY
             fi
         } > "$marker_draft"
         python3 "$GATE_EXECUTION" open-marker "$marker_draft" \
+            "$GATE_CORRECTION_LEASE_FD" "$GATE_CORRECTION_LEASE_OPERATION" \
             || { rm -f "$marker_draft"; die "the logical gate could not freeze its exact policy and schedule"; }
         rm -f "$marker_draft"
         read_marker
@@ -447,6 +454,7 @@ PY
             exec {GATE_JOURNAL_FD}>&-
         fi
         controller_physical_admission_release
+        exec {GATE_CORRECTION_LEASE_FD}>&-
     fi
     if [[ $scope != correction-* ]]; then
         "$PROGRESS" subagent-started gate-runner --data "$(event_data)"
