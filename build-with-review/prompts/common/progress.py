@@ -218,7 +218,7 @@ JOURNAL_LOCK = f"{JOURNAL}.lock"
 CONSTRUCTION_HISTORY_VALIDATION = os.path.join(
     WORKSPACE, "construction-history-validation.json",
 )
-CONSTRUCTION_HISTORY_PROJECTOR = "construction-history-v2"
+CONSTRUCTION_HISTORY_PROJECTOR = "construction-history-v3"
 AMENDMENT_SWEEP_PREFLIGHT = os.path.join(WORKSPACE, "amendment-sweep-preflight.json")
 AMENDMENT_ATTEMPT_SETTLE_MARKER = os.path.join(
     WORKSPACE, "amendment-attempt-settle-in-progress.json",
@@ -490,13 +490,45 @@ CONSTRUCTION_HISTORY_DEPENDENCY_PAIRS = (
     ("result", "result_sha256"),
     ("artifact", "artifact_sha256"),
 )
-CONSTRUCTION_HISTORY_DEPENDENCY_ROOTS = {"reports"}
+CONSTRUCTION_HISTORY_OBJECT_DEPENDENCY_PAIRS = (
+    ("artifact_object", "artifact_sha256"),
+    ("confirmed_object", "confirmed_sha256"),
+    ("correction_artifact_object", "correction_artifact_sha256"),
+    ("final_object", "final_sha256"),
+    ("object", "sha256"),
+)
+CONSTRUCTION_HISTORY_DEPENDENCY_ROOTS = {"reports", "corrections"}
+
+
+def construction_history_dependency_file(raw_path, expected_sha256, subject):
+    relative = PurePosixPath(raw_path)
+    if relative.parts[0] == "reports":
+        path = Path(exact_real_file(WORKSPACE, raw_path, subject))
+        if sha256_bytes(path.read_bytes()) != expected_sha256:
+            fail("a validated construction-history dependency changed", raw_path)
+        return path
+    match = re.fullmatch(
+        r"corrections/(lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?)/objects/"
+        r"sha256-([0-9a-f]{64})(\.(?:md|json))",
+        raw_path,
+    )
+    if match is None or match.group(2) != expected_sha256:
+        fail("the construction-history checkpoint has a malformed Correction object", raw_path)
+    try:
+        path = validate_content_object(
+            WORKSPACE, match.group(1), expected_sha256, match.group(3),
+        )
+    except (OSError, ValueError) as exc:
+        fail("a validated construction-history Correction object changed", raw_path, exc)
+    if PurePosixPath(path.relative_to(WORKSPACE)) != relative:
+        fail("a validated construction-history Correction object changes its path", raw_path)
+    return path
 
 
 def construction_history_dependencies(entries):
     dependencies = {}
 
-    def add(raw_path, expected_sha256):
+    def add(raw_path, expected_sha256, *, correction_object=False):
         if not isinstance(raw_path, str) or not isinstance(expected_sha256, str) \
                 or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
             return
@@ -504,12 +536,11 @@ def construction_history_dependencies(entries):
         if relative.is_absolute() or not relative.parts \
                 or relative.parts[0] not in CONSTRUCTION_HISTORY_DEPENDENCY_ROOTS:
             return
-        path = exact_real_file(
-            WORKSPACE, raw_path, "the validated construction-history dependency",
+        if relative.parts[0] == "corrections" and not correction_object:
+            return
+        construction_history_dependency_file(
+            raw_path, expected_sha256, "the validated construction-history dependency",
         )
-        actual = sha256_bytes(Path(path).read_bytes())
-        if actual != expected_sha256:
-            fail("a validated construction-history dependency changed", raw_path)
         previous = dependencies.get(raw_path)
         if previous is not None and previous != expected_sha256:
             fail("a construction-history dependency path has two content generations", raw_path)
@@ -519,6 +550,8 @@ def construction_history_dependencies(entries):
         if isinstance(value, dict):
             for path_key, hash_key in CONSTRUCTION_HISTORY_DEPENDENCY_PAIRS:
                 add(value.get(path_key), value.get(hash_key))
+            for path_key, hash_key in CONSTRUCTION_HISTORY_OBJECT_DEPENDENCY_PAIRS:
+                add(value.get(path_key), value.get(hash_key), correction_object=True)
             for nested in value.values():
                 walk(nested)
         elif isinstance(value, list):
@@ -550,11 +583,9 @@ def validate_construction_history_dependencies(dependencies):
         if relative.is_absolute() or not relative.parts \
                 or relative.parts[0] not in CONSTRUCTION_HISTORY_DEPENDENCY_ROOTS:
             fail("the construction-history checkpoint has a foreign dependency", path)
-        physical = exact_real_file(
-            WORKSPACE, path, "the construction-history checkpoint dependency",
+        construction_history_dependency_file(
+            path, expected, "the construction-history checkpoint dependency",
         )
-        if sha256_bytes(Path(physical).read_bytes()) != expected:
-            fail("a validated construction-history dependency changed", path)
         paths.append(path)
     if paths != sorted(set(paths)):
         fail("the construction-history checkpoint has duplicate or unordered dependencies")

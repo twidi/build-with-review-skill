@@ -12496,9 +12496,107 @@ def correction_attempt_failure_preserves_its_complete_schema_two_authority():
     terminal_index = len(journal_lines()) - 1
     terminal = journal_lines()[terminal_index]
     check(terminal.get("correction") == 1, terminal)
-    load_common_module("progress").validate_attempt_failed_entry(
-        journal_lines(), terminal_index, terminal,
+    progress_module = load_common_module("progress")
+    entries = journal_lines()
+    progress_module.validate_attempt_failed_entry(entries, terminal_index, terminal)
+    contract_state = progress_module.current_correction_contract_state(
+        entries, terminal_index, "lot-1", 1,
+        "the checkpointed Correction failure fixture",
     )
+    artifact_object = contract_state["artifact_object"]
+    artifact_sha256 = contract_state["artifact_sha256"]
+    object_path = pathlib.Path(WORKSPACE) / artifact_object
+    object_bytes = object_path.read_bytes()
+    object_mode = stat.S_IMODE(object_path.stat().st_mode)
+    progress_module = load_common_module("progress")
+    progress_module.COMMAND_VALIDATION_CACHE = {}
+    write_with_construction_validation(
+        progress_module,
+        progress_module.event_entry(
+            "fixture", "note", kind="ruling", text="checkpointed Correction failure",
+        ),
+    )
+    checkpoint_path = pathlib.Path(WORKSPACE) / "construction-history-validation.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    check({"path": artifact_object, "sha256": artifact_sha256}
+          in checkpoint["dependencies"],
+          "the Construction checkpoint did not freeze the Correction failure object")
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    journal_path = pathlib.Path(WORKSPACE) / "progress.jsonl"
+    journal_bytes = journal_path.read_bytes()
+    object_path.chmod(0o644)
+    object_path.write_bytes(bytes([object_bytes[0] ^ 1]) + object_bytes[1:])
+    object_path.chmod(object_mode)
+    progress_module = load_common_module("progress")
+    progress_module.COMMAND_VALIDATION_CACHE = {}
+    refused = False
+    try:
+        progress_module.validate_construction_verdict_history(
+            progress_module.journal_entries(),
+        )
+    except (SystemExit, ValueError):
+        refused = True
+    check(refused, "a checkpointed Correction failure accepted its changed object")
+    check(journal_path.read_bytes() == journal_bytes,
+          "the object refusal changed the Construction journal")
+    check(checkpoint_path.read_bytes() == checkpoint_bytes,
+          "the object refusal changed the Construction checkpoint")
+    object_path.chmod(0o644)
+    object_path.write_bytes(object_bytes)
+    object_path.chmod(object_mode)
+    progress_module = load_common_module("progress")
+    progress_module.COMMAND_VALIDATION_CACHE = {}
+    historical_failures = []
+    original_failure_validator = progress_module.validate_attempt_failed_entry
+
+    def observed_failure(*args, **kwargs):
+        historical_failures.append(args[1])
+        return original_failure_validator(*args, **kwargs)
+
+    progress_module.validate_attempt_failed_entry = observed_failure
+    progress_module.validate_construction_verdict_history(
+        progress_module.journal_entries(),
+    )
+    check(historical_failures == [],
+          f"an exact Correction object lost suffix-only replay: {historical_failures}")
+    stale_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    stale_checkpoint["projector"] = "construction-history-v2"
+    stale_checkpoint["dependencies"] = [
+        dependency for dependency in stale_checkpoint["dependencies"]
+        if dependency["path"] != artifact_object
+    ]
+    unsigned = {
+        key: value for key, value in stale_checkpoint.items()
+        if key != "account_sha256"
+    }
+    stale_checkpoint["account_sha256"] = hashlib.sha256(json.dumps(
+        unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    checkpoint_path.write_text(
+        json.dumps(stale_checkpoint, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    stale_checkpoint_bytes = checkpoint_path.read_bytes()
+    object_path.chmod(0o644)
+    object_path.write_bytes(bytes([object_bytes[0] ^ 1]) + object_bytes[1:])
+    object_path.chmod(object_mode)
+    progress_module = load_common_module("progress")
+    progress_module.COMMAND_VALIDATION_CACHE = {}
+    refused = False
+    try:
+        progress_module.validate_construction_verdict_history(
+            progress_module.journal_entries(),
+        )
+    except (SystemExit, ValueError):
+        refused = True
+    check(refused, "an object-unaware v2 checkpoint skipped the integrated cold replay")
+    check(journal_path.read_bytes() == journal_bytes,
+          "the stale-v2 cold replay changed the Construction journal")
+    check(checkpoint_path.read_bytes() == stale_checkpoint_bytes,
+          "the stale-v2 cold replay replaced the checkpoint on refusal")
+    object_path.chmod(0o644)
+    object_path.write_bytes(object_bytes)
+    object_path.chmod(object_mode)
     retired = run_progress(
         "session-retired", physical_session, "failed", "--archive", "--hide",
     )
@@ -34863,7 +34961,7 @@ def construction_history_checkpoint_certifies_one_successful_locked_append():
     with open(journal_path, "rb") as source:
         journal = source.read()
     check(checkpoint.get("schema") == 1, checkpoint)
-    check(checkpoint.get("projector") == "construction-history-v2", checkpoint)
+    check(checkpoint.get("projector") == "construction-history-v3", checkpoint)
     check(checkpoint.get("journal_bytes") == len(journal), checkpoint)
     check(checkpoint.get("journal_lines") == 1, checkpoint)
     check(checkpoint.get("journal_sha256") == hashlib.sha256(journal).hexdigest(), checkpoint)
@@ -35256,8 +35354,28 @@ def construction_history_projector_change_forces_one_new_full_validation():
           f"a projector change did not force one complete replay: {calls}")
     with open(checkpoint_path, encoding="utf-8") as source:
         current = json.load(source)
-    check(current["projector"] == "construction-history-v2",
+    check(current["projector"] == "construction-history-v3",
           "the complete replay did not replace the stale projector generation")
+
+    rewrite_construction_history_checkpoint_projector("construction-history-v2")
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    original = progress.validate_construction_session_start
+    calls = []
+
+    def observed_v2(*args, **kwargs):
+        calls.append(args[0].get("session"))
+        return original(*args, **kwargs)
+
+    progress.validate_construction_session_start = observed_v2
+    v2_entry = progress.event_entry("fixture", "note", kind="ruling", text="v2 miss")
+    write_with_construction_validation(progress, v2_entry)
+    check(calls == ["legacy-implementer"],
+          f"the object-unaware v2 projector was not a cache miss: {calls}")
+    with open(checkpoint_path, encoding="utf-8") as source:
+        current = json.load(source)
+    check(current["projector"] == "construction-history-v3",
+          "the object-unaware v2 projector survived the complete replay")
 
     rewrite_construction_history_checkpoint_projector("foreign-projector")
     progress = load_common_module("progress")
@@ -35276,7 +35394,7 @@ def construction_history_projector_change_forces_one_new_full_validation():
           f"a foreign projector version was not a cache miss: {calls}")
     with open(checkpoint_path, encoding="utf-8") as source:
         current = json.load(source)
-    check(current["projector"] == "construction-history-v2",
+    check(current["projector"] == "construction-history-v3",
           "the foreign projector generation survived the complete replay")
 
 
@@ -35321,6 +35439,57 @@ def construction_history_premerge_checkpoint_cannot_hide_invalid_merged_authorit
           "the rejected cold replay changed or appended the journal")
     check(open(checkpoint_path, "rb").read() == checkpoint_before,
           "the rejected cold replay replaced the pre-merge checkpoint")
+
+
+@test
+def construction_history_checkpoint_freezes_every_correction_object_shape():
+    progress = load_common_module("progress")
+    authority = load_common_module("correction_authority")
+    markdown = authority.publish_content_object(
+        WORKSPACE, "lot-1", b"immutable markdown object\n", ".md",
+    )
+    payload = b'{"schema":1}\n'
+    structured = authority.publish_content_object(
+        WORKSPACE, "lot-1", payload, ".json",
+    )
+    markdown_path = str(pathlib.Path(markdown).relative_to(WORKSPACE))
+    structured_path = str(pathlib.Path(structured).relative_to(WORKSPACE))
+    markdown_sha256 = hashlib.sha256(b"immutable markdown object\n").hexdigest()
+    structured_sha256 = hashlib.sha256(payload).hexdigest()
+    entry = {"data": {
+        "artifact_object": markdown_path, "artifact_sha256": markdown_sha256,
+        "confirmed_object": markdown_path, "confirmed_sha256": markdown_sha256,
+        "correction_artifact_object": markdown_path,
+        "correction_artifact_sha256": markdown_sha256,
+        "final_object": markdown_path, "final_sha256": markdown_sha256,
+        "return": {"object": structured_path, "sha256": structured_sha256},
+    }}
+
+    dependencies = progress.construction_history_dependencies([entry])
+
+    check(dependencies == [
+        {"path": structured_path, "sha256": structured_sha256},
+        {"path": markdown_path, "sha256": markdown_sha256},
+    ], dependencies)
+    progress.validate_construction_history_dependencies(dependencies)
+    pathlib.Path(markdown).chmod(0o644)
+    refused = False
+    try:
+        progress.validate_construction_history_dependencies(dependencies)
+    except (SystemExit, ValueError):
+        refused = True
+    check(refused, "a writable Correction object remained checkpoint authority")
+    pathlib.Path(markdown).chmod(0o444)
+    malformed = [{
+        "path": "corrections/lot-1/objects/not-content-addressed.md",
+        "sha256": markdown_sha256,
+    }]
+    refused = False
+    try:
+        progress.validate_construction_history_dependencies(malformed)
+    except (SystemExit, ValueError):
+        refused = True
+    check(refused, "a malformed Correction object path remained checkpoint authority")
 
 
 @test
