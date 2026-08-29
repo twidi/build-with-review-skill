@@ -24592,6 +24592,15 @@ def cmd_correction_amendment_commit_append(args):
 
 
 def cmd_construction_failure_check(args):
+    if args.controller:
+        me = whoami()
+        caller = caller_context(me)
+        expected = {"mode": "construction", "lot": args.lot, "job": "controller"}
+        actual = {key: caller[key] for key in CONTEXT_FIELDS if key in caller}
+        if actual != expected:
+            fail("the official failure closer requires the exact Construction controller", {
+                "expected": expected, "actual": actual,
+            })
     entries = journal_entries()
     validate_construction_verdict_history(entries)
     context = {"lot": args.lot, "task": args.task, "attempt": args.attempt}
@@ -25001,6 +25010,7 @@ def build_parser():
     sp.add_argument("task", type=positive_int)
     sp.add_argument("attempt", type=positive_int)
     sp.add_argument("classification", choices=tuple(sorted(CONSTRUCTION_CLASSIFICATIONS)))
+    sp.add_argument("--controller", action="store_true", help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_construction_failure_check)
 
     sp = sub.add_parser("amendment-attempt-settle-terminal", help=argparse.SUPPRESS)

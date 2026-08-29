@@ -106,8 +106,12 @@ if [ -n "$GUARD_FAILED" ]; then
     die "$CONTROLLER_OPERATION_ERROR. Rerun that owner first, then retry this failure closer.
 Nothing was moved, staged, recorded or bound."
 fi
-FAILURE_DATA=$("$WORKSPACE/prompts/common/progress.py" construction-failure-check \
-    "$LOT" "$N" "$K" "$CLASS") \
+FAILURE_CHECK=("$WORKSPACE/prompts/common/progress.py" construction-failure-check \
+    "$LOT" "$N" "$K" "$CLASS")
+if [ -z "${BWR_AMENDMENT_ATTEMPT_SETTLE_OWNER:-}" ]; then
+    FAILURE_CHECK+=(--controller)
+fi
+FAILURE_DATA=$("${FAILURE_CHECK[@]}") \
     || die "the failure is not admitted by the exact checker state.
 Settle implementer-owned Design or code round 10, or record the exact controller-owned
 Design or code blocker at the round where it was found, before the plan changes.

@@ -5046,6 +5046,8 @@ def amendment_inverted_a4_competing_failure_owner_blocks_settlement():
             "Achieves: Complete task 3.",
             "Achieves: The competing immediate closer owns this replacement.",
         ))
+    set_caller_bwr(mode="construction", lot="lot-1", job="controller",
+                   task=None, attempt=None, mandate=None, round=None)
 
     barrier_dir = tempfile.mkdtemp(dir=BASE)
     failure_env = dict(ENV)
@@ -5329,6 +5331,111 @@ def design_parity_final_contract_blocker_reaches_plan_fault_retry_without_settle
     history = run_progress("construction-verdict-check", "history")
     check(history.returncode != 0,
           "a changed final contract-blocker obligation passed historical validation")
+
+
+@test
+def official_failure_closer_refuses_stale_controller_before_binding_and_resumes_its_owner():
+    seed_active_attempt()
+    opening = open_design_round(1)
+    finish_design_round(1, opening, findings=[{
+        "id": 1,
+        "where": "frozen task contract",
+        "what": "The controller must correct one current task boundary.",
+        "why": "The implementer cannot change controller-owned plan fields.",
+        "impact": "IMPORTANT",
+        "previous": [],
+    }])
+    block_design_contract(1)
+
+    plan_path = os.path.join(WORKSPACE, "plans", "lot-1-plan.md")
+    plan = open(plan_path, encoding="utf-8").read()
+    corrected_plan = plan.replace(
+        "Achieves: Complete task 3.",
+        "Achieves: Complete task 3 under the corrected controller boundary.",
+    )
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(corrected_plan)
+
+    marker = os.path.join(WORKSPACE, "attempt-in-flight")
+    journal = os.path.join(WORKSPACE, "progress.jsonl")
+    marker_before = open(marker, "rb").read()
+    journal_before = open(journal, "rb").read()
+    head_before = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    )
+    index_before = subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    )
+    refs_before = subprocess.check_output(
+        ["git", "-C", REPO, "for-each-ref", "--format=%(refname) %(objectname)",
+         "refs/bwr/test-run"], text=True,
+    )
+    status_before = subprocess.check_output(
+        ["git", "-C", REPO, "status", "--porcelain=v2", "--untracked-files=all"],
+        text=True,
+    )
+
+    set_caller_bwr(mode="product-review", lot="lot-9", job="controller",
+                   task=None, attempt=None, mandate=None, round=None)
+    closer = os.path.join(WORKSPACE, "prompts", "construction", "attempt-failed.sh")
+    stale = subprocess.run(
+        [closer, "lot-1", "3", "2", "C3.9b"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(stale.returncode != 0, "a stale Product controller closed a Construction attempt")
+    check(open(marker, "rb").read() == marker_before,
+          "a stale controller bound the attempt closer before its context refusal")
+    check(open(journal, "rb").read() == journal_before,
+          "a stale controller appended before its context refusal")
+    check(open(plan_path, encoding="utf-8").read() == corrected_plan,
+          "a stale controller changed the corrected workspace plan")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ) == head_before, "a stale controller changed HEAD")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "write-tree"], text=True,
+    ) == index_before, "a stale controller changed the index")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "for-each-ref", "--format=%(refname) %(objectname)",
+         "refs/bwr/test-run"], text=True,
+    ) == refs_before, "a stale controller changed the run refs")
+    check(subprocess.check_output(
+        ["git", "-C", REPO, "status", "--porcelain=v2", "--untracked-files=all"],
+        text=True,
+    ) == status_before, "a stale controller changed the repository status")
+
+    call = ("prompts/construction/attempt-failed.sh", "lot-1", "3", "2", "C3.9b")
+    closer_hash = hashlib.sha256(
+        b"".join(part.encode("utf-8") + b"\0" for part in ("failure", *call))
+    ).hexdigest()
+    with open(marker, "ab") as target:
+        target.write(
+            f"closer failure {closer_hash}\ncall {' '.join(call)}\n".encode("utf-8")
+        )
+    set_caller_bwr(mode="construction", lot="lot-1", job="controller",
+                   task=None, attempt=None, mandate=None, round=None)
+    resumed = subprocess.run(
+        [closer, "lot-1", "3", "2", "C3.9b"], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+    check(not os.path.exists(marker), "the exact retained failure owner was not consumed")
+    check(open(plan_path, encoding="utf-8").read() == corrected_plan,
+          "the resumed closer changed the corrected workspace plan")
+    failures = [entry for entry in journal_lines() if entry.get("kind") == "attempt.failed"]
+    check(len(failures) == 1, "the resumed closer did not append one failure terminal")
+    failure = failures[0]
+    check(
+        failure.get("mode") == "construction"
+        and failure.get("job") == "controller"
+        and failure.get("lot") == "lot-1"
+        and failure.get("task") == 3
+        and failure.get("data", {}).get("attempt") == 2
+        and failure.get("data", {}).get("classification") == "C3.9b",
+        failure,
+    )
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
 
 
 @test
