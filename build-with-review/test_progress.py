@@ -3640,7 +3640,7 @@ def code_checker_exact_duplicate_terminal_has_one_append_only_recovery():
     append_checker_verdict("design", lot="lot-1", task=3, attempt=2)
     gate = seed_review_gate()
     set_caller_bwr(
-        job="implementer", lot="lot-1", task=3, attempt=2, round=1, mandate=None,
+        job="implementer", lot="lot-1", task=3, attempt=2, round=None, mandate=None,
     )
     opened = run_progress(
         "subagent-started", "code-checker", "--round", "1",
@@ -3694,7 +3694,7 @@ def code_checker_exact_duplicate_terminal_has_one_append_only_recovery():
     check(foreign.returncode != 0 and after_foreign == before,
           "a foreign controller recovered an implementer terminal")
     set_caller_bwr(
-        job="implementer", lot="lot-1", task=3, attempt=2, round=1, mandate=None,
+        job="implementer", lot="lot-1", task=3, attempt=2, round=None, mandate=None,
     )
 
     changed_lines = journal_lines()

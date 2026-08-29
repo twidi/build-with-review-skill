@@ -23928,16 +23928,17 @@ def cmd_construction_spend_recover(args):
 def cmd_construction_terminal_duplicate_recover(args):
     me = whoami()
     caller = caller_context(me)
-    expected_context = {
+    expected_caller = {
         "mode": "construction", "lot": caller.get("lot"),
         "task": caller.get("task"), "attempt": caller.get("attempt"),
-        "round": args.round, "job": "implementer",
+        "job": "implementer",
     }
-    if caller != expected_context \
+    if caller != expected_caller \
             or not isinstance(caller.get("lot"), str) or not caller["lot"] \
             or not construction_positive_integer(caller.get("task")) \
             or not construction_positive_integer(caller.get("attempt")):
         fail("duplicate-terminal recovery requires the exact Construction implementer context")
+    event_context = {**expected_caller, "round": args.round}
 
     def build(entries):
         validate_construction_verdict_history(entries)
@@ -23945,7 +23946,7 @@ def cmd_construction_terminal_duplicate_recover(args):
         if raw_entries and raw_entries[-1].get("event") == "note" \
                 and raw_entries[-1].get("kind") == "subagent.terminal.recovered" \
                 and raw_entries[-1].get("by") == me["session_id"] \
-                and subagent_event_context(raw_entries[-1]) == expected_context:
+                and subagent_event_context(raw_entries[-1]) == event_context:
             _opening_index, _canonical_index, _duplicate_index, opening, _canonical = \
                 validate_subagent_terminal_recovery_entry(
                     raw_entries, len(raw_entries) - 1, raw_entries[-1],
@@ -23967,11 +23968,11 @@ def cmd_construction_terminal_duplicate_recover(args):
         )
         if note_data(opening).get("check") != args.check \
                 or opening.get("by") != me["session_id"] \
-                or subagent_event_context(opening) != expected_context:
+                or subagent_event_context(opening) != event_context:
             fail("duplicate-terminal recovery does not own the exact requested checker call")
         candidate = event_entry(
             me["session_id"], "note", kind="subagent.terminal.recovered",
-            data=data, **expected_context,
+            data=data, **event_context,
         )
         raw_with_candidate = [*raw_entries, candidate]
         validate_subagent_terminal_recovery_entry(
