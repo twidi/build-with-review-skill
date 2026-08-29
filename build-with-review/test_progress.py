@@ -7511,6 +7511,143 @@ def baseline_pass_accepts_only_the_exact_c2_plan_successor():
 
 
 @test
+def duplicate_product_pass_opening_recovers_one_exact_public_generation():
+    seed_committed_spec()
+    first_commit, first_gate, _ = seed_task_gate("lot-1", "duplicate-pass-source")
+    opened = run_progress(
+        "note", "pass.opened",
+        "--data", json.dumps({"built": "lot-1", "commit": first_commit, "gate": first_gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    amendment = run_progress(
+        "note", "amendment.opened",
+        "--data", '{"amendment":1,"origin":"product-review","built":"lot-1"}',
+        "--text", "return through one duplicate successor opening",
+    )
+    check(amendment.returncode == 0, amendment.stdout + amendment.stderr)
+    amendment_commit = seed_clean_amendment_landing(
+        {"amendment": 1, "origin": "product-review", "built": "lot-1"},
+        "return through one duplicate successor opening",
+    )
+    set_caller_bwr(
+        mode="product-review", lot="lot-1", job="controller", task=None, attempt=None,
+    )
+    owner = f"amendment/1/{amendment_commit}"
+    gate = seed_baseline_gate(owner, amendment_commit, first_commit)
+    successor_data = {
+        "built": "lot-1", "commit": amendment_commit, "gate": gate,
+        "source_scope": "baseline", "source_owner": owner,
+        "source_lot": "-", "source_task": 0, "source_attempt": 0,
+    }
+    append_note(
+        "pass.opened", successor_data, by=CALLER,
+        mode="product-review", lot="lot-1", job="controller",
+    )
+    canonical_index = len(journal_lines()) - 1
+    append_note(
+        "pass.opened", successor_data, by=CALLER,
+        mode="product-review", lot="lot-1", job="controller",
+    )
+    duplicate_index = len(journal_lines()) - 1
+
+    config = default_config()
+    for payload in (
+        config["whoami"]["session"]["annotations"]["bwr"],
+        config["sessions"][CALLER]["annotations"]["bwr"],
+    ):
+        payload.update(mode="product-review", lot="lot-1", job="controller")
+        for field in ("task", "attempt", "round", "mandate"):
+            payload.pop(field, None)
+    config["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1, "job": "reviewer", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1",
+        "mandate": "unlooked", "status": "working",
+    }
+    set_config(config)
+
+    before = len(journal_lines())
+    blocked = run_progress("session-started", TARGET)
+    check(blocked.returncode != 0 and len(journal_lines()) == before,
+          "a reviewer consumed an unrecovered duplicate pass opening")
+
+    recovered = run_progress("pass-opening-duplicate-recover")
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    entries = journal_lines()
+    recovery = entries[-1]
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "rb") as journal:
+        raw = journal.read().splitlines()
+    check(
+        recovery.get("kind") == "pass.opening.duplicate.recovered"
+        and recovery.get("data") == {
+            "schema": 1,
+            "canonical": f"{canonical_index}:{hashlib.sha256(raw[canonical_index]).hexdigest()}",
+            "duplicate": f"{duplicate_index}:{hashlib.sha256(raw[duplicate_index]).hexdigest()}",
+            "owner": CALLER,
+            "built": "lot-1", "commit": amendment_commit, "gate": gate,
+        },
+        "the duplicate-opening recovery did not freeze its exact pair",
+    )
+    after_recovery = len(entries)
+    retry = run_progress("pass-opening-duplicate-recover")
+    check(retry.returncode == 0 and len(journal_lines()) == after_recovery,
+          "an exact duplicate-opening recovery retry appended twice")
+
+    started = run_progress("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+
+@test
+def product_pass_opening_revalidates_its_stale_candidate_under_the_journal_lock():
+    commit, gate, owner = seed_task_gate("lot-1", "locked-pass-opening")
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    candidate = progress.event_entry(
+        CALLER, "note", kind="pass.opened",
+        mode="product-review", lot="lot-1", job="controller",
+        data={
+            "built": "lot-1", "commit": commit, "gate": gate,
+            "source_scope": "task", "source_owner": owner,
+            "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
+        },
+    )
+    before = len(journal_lines())
+    progress.write_validated_line(lambda _entries: candidate)
+    try:
+        progress.write_validated_line(lambda _entries: candidate)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("a stale concurrent pass-opening candidate appended twice")
+    check(len(journal_lines()) == before + 1,
+          "the locked pass-opening admission did not publish exactly one opening")
+
+
+@test
+def product_pass_opening_runs_its_complete_admission_once_under_the_journal_lock():
+    commit, gate, _ = seed_task_gate("lot-1", "single-pass-opening-validation")
+    progress = load_common_module("progress")
+    progress.COMMAND_VALIDATION_CACHE = {}
+    validations = []
+    validate = progress.validate_pass_opening_history
+
+    def count_validation(*args, **kwargs):
+        validations.append(args[1])
+        return validate(*args, **kwargs)
+
+    progress.validate_pass_opening_history = count_validation
+    context = {"mode": "product-review", "lot": "lot-1", "job": "controller"}
+    normalized = progress.normalize_pass_opened(
+        {"built": "lot-1", "commit": commit, "gate": gate}, context,
+    )
+    candidate = progress.event_entry(
+        CALLER, "note", kind="pass.opened", data=normalized, **context,
+    )
+    progress.write_validated_line(lambda _entries: candidate)
+    check(validations == [len(journal_lines()) - 1],
+          "a product pass opening replayed its complete admission outside the locked append")
+
+
+@test
 def product_receipt_audits_the_fixed_lens_block_and_freezes_its_bytes():
     commit, gate, _ = seed_task_gate("lot-1", "receipt")
     append_note("pass.opened", {
