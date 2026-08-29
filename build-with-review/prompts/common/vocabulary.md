@@ -244,6 +244,33 @@ later, when someone sees what was built and reverses it.
 
 ---
 
+## Command completion
+
+**An intermediate tool result is not a command result.** A command is complete only when
+the tool reports a terminal status for its process. Output returned without that status
+is only an intermediate observation.
+
+When the tool says the process continues and supplies a process handle:
+
+1. Retain that handle.
+2. Use the provider-native continuation or wait mechanism on the same process.
+3. Never run the command again while that process remains active.
+4. Do not classify, consume or replace the command from the intermediate result.
+
+The handle's name and the continuation mechanism belong to the provider. This workflow
+does not prescribe provider-specific fields or calls.
+
+**Empty intermediate output is neither success nor failure.** It does not mean that the
+completed command has empty output. Collect the terminal exit status, stdout and stderr
+from the same process.
+
+A non-zero terminal exit status is a failure. A zero terminal exit status is a success
+only when the command's output contract is also satisfied. For example, a successful
+command that promises a path must return that path. Missing required output is a
+technical failure even when the terminal exit status is zero.
+
+---
+
 ## Git
 
 **Git ref** — a named pointer to a commit, like a branch or a tag but invisible to
