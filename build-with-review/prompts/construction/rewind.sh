@@ -7,6 +7,11 @@
 # point at those commits at all — the rewound/ namespace is the only handle left
 # on them, exactly as a failed attempt's try-<K> ref is on its own.
 set -euo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    exec python3 "$HERE/correction_rewind.py" "$@"
+fi
 # The re-land paths come verbatim from controller commits and go to
 # `git checkout <sha> -- <paths>`: read as pathspecs, a committed literal
 # `docs/*.md` would restore every matching file from that commit's tree —
@@ -14,7 +19,6 @@ set -euo pipefail
 # the destructive half, on every resume alike. Literal semantics for every
 # git call — this script uses no pathspec magic anywhere.
 export GIT_LITERAL_PATHSPECS=1
-HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$HERE/../.." && pwd)
 REPO=$(cd "$WORKSPACE/../../.." && pwd)
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
@@ -35,6 +39,20 @@ LOT=$1 K=$2 N=$3 SUBJECT=$4
 [[ $SUBJECT != *$'\n'* && $SUBJECT != *$'\r'* ]] \
     || die "the re-land commit subject must be one line"
 
+PROGRESS="$WORKSPACE/prompts/common/progress.py"
+CORRECTION_SCOPE=$("$PROGRESS" construction-correction-authority-scope "$LOT") \
+    || die "the rewind cannot derive its Correction authority scope. Nothing was moved."
+[[ $CORRECTION_SCOPE = ordinary || $CORRECTION_SCOPE = correction-escalation ]] \
+    || die "the rewind returned a malformed Correction authority scope. Nothing was moved."
+CORRECTION_LEASE_FD=
+CORRECTION_LEASE_OPERATION=
+if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+    CORRECTION_LEASE_OPERATION="correction-escalation-rewind:$LOT:$K:$N"
+    exec {CORRECTION_LEASE_FD}<>"$WORKSPACE/correction-authority.lock"
+    flock -x "$CORRECTION_LEASE_FD" \
+        || die "the Correction escalation rewind cannot acquire its shared authority lease. Nothing was moved."
+fi
+
 RUN_NAME=$(basename "$WORKSPACE")
 RUN="refs/bwr/$RUN_NAME"                  # this run's own ref namespace — see vocabulary.md
 BASE="$RUN/$LOT/task-$((K - 1))"
@@ -53,8 +71,9 @@ if [ -e "$STATE" ]; then
     read -r S_LOT S_K S_N < "$STATE"
     S_NONCE=$(grep '^op ' "$STATE" | cut -d' ' -f2 || true)
     # A record whose operation already carries its completion note is an
-    # ORPHAN — the kill fell between the note and the record's removal — and
-    # this call is then a NEW rewind, never a resume. Rewinding the same range
+    # ORPHAN — the kill fell between the note and the record's removal. A
+    # Correction escalation call closes that helper-owned tail and returns.
+    # An ordinary call is then a NEW rewind, never a resume. Rewinding the same range
     # again after rebuilding it is legitimate, and resuming the old record
     # would reset to the old base, move the newly rebuilt task refs, and
     # re-land only the commits the old operation knew — silently erasing every
@@ -69,6 +88,10 @@ if [ -e "$STATE" ]; then
        && awk -v k='"kind":"rewind.done"' -v o="\"op\":\"$S_NONCE\"" \
               'index($0,k) && index($0,o) {found=1; exit} END {exit !found}' "$JOURNAL"; then
         rm -f "$STATE"
+        if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+            printf 'REWIND ALREADY RECORDED\n'
+            exit 0
+        fi
     else
         [ "$S_LOT $S_K $S_N" = "$LOT $K $N" ] \
             || die "an unfinished rewind of \`$S_LOT\` tasks $S_K..$S_N is recorded in
@@ -81,6 +104,12 @@ if [ -n "$RESUME" ]; then
     NONCE=${S_NONCE:-legacy}
     BASE_SHA=$(grep '^base ' "$STATE" | cut -d' ' -f2)
     mapfile -t REPLAY < <(grep '^replay ' "$STATE" | cut -d' ' -f2)
+    MOVE_RECORDS=()
+    if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+        grep -Fxq 'scope correction-escalation' "$STATE" \
+            || die "the retained rewind does not own the Correction escalation scope. Nothing was moved."
+        mapfile -t MOVE_RECORDS < <(grep '^move ' "$STATE" | cut -d' ' -f2-)
+    fi
 else
     controller_physical_admission_acquire "$WORKSPACE" \
         || die "$CONTROLLER_PHYSICAL_ADMISSION_ERROR"
@@ -122,6 +151,20 @@ reset it yourself. Ask the human what becomes of it, then run this call again."
         [ "$keep" = 1 ] && REPLAY+=("$sha")
     done
     BASE_SHA=$(git rev-parse "$BASE")
+    PRE_RESET_SHA=$(git rev-parse HEAD)
+    MOVE_RECORDS=()
+    if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+        for ((t = K; t <= N; t++)); do
+            sha=$(git rev-parse --verify --quiet "$RUN/$LOT/task-$t") || continue
+            dest="$RUN/$LOT/rewound/task-$t"
+            n=2
+            while git rev-parse --verify --quiet "$dest" >/dev/null; do
+                dest="$RUN/$LOT/rewound/task-$t-$n"
+                n=$((n + 1))
+            done
+            MOVE_RECORDS+=("$t $sha $dest")
+        done
+    fi
     # Published atomically: a record visible at its final name is complete. A
     # death mid-write must never leave a truncated REPLAY list that a resume
     # would take for the whole plan — the omitted commits would be reset away
@@ -130,10 +173,25 @@ reset it yourself. Ask the human what becomes of it, then run this call again."
     NONCE="$(date +%s%N).$$"
     {
         printf '%s %s %s\n' "$LOT" "$K" "$N"
+        if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+            printf 'scope correction-escalation\n'
+        fi
         printf 'op %s\n' "$NONCE"
         printf 'base %s\n' "$BASE_SHA"
+        if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+            printf 'head %s\n' "$PRE_RESET_SHA"
+        fi
         for sha in ${REPLAY[@]+"${REPLAY[@]}"}; do printf 'replay %s\n' "$sha"; done
+        for move in "${MOVE_RECORDS[@]}"; do
+            printf 'move %s\n' "$move"
+        done
     } > "$STATE.tmp"
+    if [ "$CORRECTION_SCOPE" = correction-escalation ] && ! "$PROGRESS" \
+            construction-escalation-rewind-check "$LOT" "$K" "$N" "$STATE.tmp" \
+            "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION"; then
+        rm -f "$STATE.tmp"
+        die "the Correction escalation rewind has no exact C3.9d authority. Nothing was moved."
+    fi
     mv "$STATE.tmp" "$STATE"
     controller_physical_admission_release
 fi
@@ -221,26 +279,42 @@ Nothing was reset or committed. Take this state to the human."
 else
     git reset -q --hard "$BASE_SHA"
 
-    for ((t = K; t <= N; t++)); do
-        ref="$RUN/$LOT/task-$t"
-        sha=$(git rev-parse --verify --quiet "$ref") || continue
-        # A task can be rewound more than once. Overwriting would drop the earlier
-        # commit out of every ref at once, and this namespace is the only thing
-        # holding it — so a taken name gets a suffix rather than a new owner.
-        dest="$RUN/$LOT/rewound/task-$t"
-        n=2
-        while existing=$(git rev-parse --verify --quiet "$dest"); do
-            # A destination already holding this very sha is an interrupted earlier
-            # call's finished create: nothing to add, only the source to delete —
-            # two handles for one rewind would be indistinguishable.
-            if [ "$existing" = "$sha" ]; then dest=; break; fi
-            dest="$RUN/$LOT/rewound/task-$t-$n"
-            n=$((n + 1))
+    if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+        for move in "${MOVE_RECORDS[@]}"; do
+            read -r t sha dest <<< "$move"
+            ref="$RUN/$LOT/task-$t"
+            source_commit=$(git rev-parse --verify --quiet "$ref" || true)
+            destination_commit=$(git rev-parse --verify --quiet "$dest" || true)
+            [ -z "$source_commit" ] || [ "$source_commit" = "$sha" ] \
+                || die "the retained rewind source $ref changed before its move. Nothing further was changed."
+            [ -z "$destination_commit" ] || [ "$destination_commit" = "$sha" ] \
+                || die "the retained rewind destination $dest changed before its move. Nothing further was changed."
+            [ -n "$destination_commit" ] || git update-ref "$dest" "$sha"
+            [ -z "$source_commit" ] || git update-ref -d "$ref" "$sha"
+            moved=$((moved + 1))
         done
-        [ -z "$dest" ] || git update-ref "$dest" "$sha"
-        git update-ref -d "$ref"
-        moved=$((moved + 1))
-    done
+    else
+        for ((t = K; t <= N; t++)); do
+            ref="$RUN/$LOT/task-$t"
+            sha=$(git rev-parse --verify --quiet "$ref") || continue
+            # A task can be rewound more than once. Overwriting would drop the earlier
+            # commit out of every ref at once, and this namespace is the only thing
+            # holding it — so a taken name gets a suffix rather than a new owner.
+            dest="$RUN/$LOT/rewound/task-$t"
+            n=2
+            while existing=$(git rev-parse --verify --quiet "$dest"); do
+                # A destination already holding this very sha is an interrupted earlier
+                # call's finished create: nothing to add, only the source to delete —
+                # two handles for one rewind would be indistinguishable.
+                if [ "$existing" = "$sha" ]; then dest=; break; fi
+                dest="$RUN/$LOT/rewound/task-$t-$n"
+                n=$((n + 1))
+            done
+            [ -z "$dest" ] || git update-ref "$dest" "$sha"
+            git update-ref -d "$ref"
+            moved=$((moved + 1))
+        done
+    fi
 
     # Re-landed by CONTENT, never by patch, and in one commit.
     #
@@ -291,7 +365,12 @@ fi
 # The completion is journaled by the script itself: the preserve that precedes
 # a rewind writes `attempt.failed`, and nothing else says the rewind that had
 # to follow actually ran — a resume must be able to tell the two apart.
-NOTE=("$WORKSPACE/prompts/common/progress.py" note rewind.done --data "{\"first\":$K,\"last\":$N,\"relanded\":$replayed,\"op\":\"$NONCE\"}")
+if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+    NOTE=("$PROGRESS" construction-escalation-rewind-append "$LOT" "$K" "$N" \
+          "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION")
+else
+    NOTE=("$PROGRESS" note rewind.done --data "{\"first\":$K,\"last\":$N,\"relanded\":$replayed,\"op\":\"$NONCE\"}")
+fi
 if [ "$replayed" -gt 0 ] && [ -n "$COMMIT_NEEDED" ]; then
     # A hook can refuse the commit — after the reset and the ref moves, which
     # are real and do not repeat. Say so, and hand back the remaining gestures
@@ -332,9 +411,13 @@ if [ -n "$JOURNAL_MISSING" ]; then
         printf '**script WARNING** · the rewind IS done, but its journal line is missing.\n'
         printf 'Run this exact rewind call again: the record authenticates the existing\n'
         printf 're-land commit, so the reset and commit do not repeat, and only this tail runs.\n'
-        printf 'Or retry the line alone, then remove the rewind record:\n\n'
-        printf '    %s\n' "$JOURNAL_MISSING"
-        printf '    rm -f %q\n' "$STATE"
+        if [ "$CORRECTION_SCOPE" = correction-escalation ]; then
+            printf 'The inherited Correction lease cannot be replayed as a detached command.\n'
+        else
+            printf 'Or retry the line alone, then remove the rewind record:\n\n'
+            printf '    %s\n' "$JOURNAL_MISSING"
+            printf '    rm -f %q\n' "$STATE"
+        fi
     } >&2
     exit 1
 fi

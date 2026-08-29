@@ -8,8 +8,10 @@ description: Use when a feature has to go from an idea to committed code — wri
 ## Overview
 
 One arc, from an idea to a delivered lot: **a spec**, then **construction task by
-task**, then **a review of what was built**. A review finding opens a new lot, and the
-arc turns again until a complete review pass finds nothing.
+task**, then **a review of what was built**. A complete actionable set of review findings
+selects exactly one route. A bounded implementation correction opens one Correction Round
+on the built unit. A structural correction opens one sub-lot. The arc turns again until a
+complete review pass finds nothing.
 
 **Three modes.** They alternate; they do not merely follow one another.
 
@@ -62,7 +64,11 @@ tells you what you may decide and what you must ask.
 | The CONSTRUCTION → PRODUCT REVIEW barrier | **opening the pull request** |
 | The product reviewers | the colleagues who review it |
 | A DECISION | the question a reviewer raises that only the product owner can settle |
-| A sub-lot | the follow-up commits that answer the review |
+| A Correction Round | bounded follow-up tasks that correct the reviewed built unit |
+| A sub-lot | structural follow-up work with its own ordinary plan |
+
+**A Correction Round is not a lot, sub-lot, plan, pass, or spec-review round.** It is a
+bounded task graph attached to one built unit and one immutable Correction artifact.
 
 A developer does not stop the review to redesign the feature; they take the comments,
 decide which are theirs to fix, and send the rest to the product owner. Neither do you.
@@ -140,7 +146,8 @@ Each mode's own file says where its exits land. What holds from outside:
 |---|---|---|
 | **SPEC** | the human approves the spec | **CONSTRUCTION** |
 | **CONSTRUCTION** | every task of the lot is green | **PRODUCT REVIEW** |
-| **PRODUCT REVIEW** | a pass leaves confirmed findings | **CONSTRUCTION**, as a sub-lot |
+| **PRODUCT REVIEW** | a pass leaves an eligible bounded implementation correction | **CONSTRUCTION**, as one Correction Round on the built unit |
+| **PRODUCT REVIEW** | a pass leaves a structural correction, including a historical human `route=sublot` | **CONSTRUCTION**, as one sub-lot |
 | **PRODUCT REVIEW** | a complete pass yields nothing | the lot is delivered — next lot, or stop |
 | **anywhere** | a DECISION changes what the product does, on a part a lot has already built | **AMENDMENT** — and back to where you were when it closes; on the one branch where its reach will not close, through a full spec review first |
 
@@ -680,7 +687,7 @@ empty.
 
 ---
 
-## Lots, sub-lots, and what freezes
+## Lots, sub-lots, Correction Rounds, and what freezes
 
 - **The code is one tree, not a stack of lots.** Once a lot is merged, its code is just
   code. *"Going back to lot 1"* means nothing; work happens forward, on the tree as it is.
@@ -699,9 +706,13 @@ One rule decides it: **before the whole exists, you go back. After, you go forwa
 | Situation | What it becomes |
 |---|---|
 | The lot is **not delivered yet** and something is missing or wrong in it | **a change to the lot itself.** Add the task, re-cut, redo one — construction is not finished, nothing has been reviewed, nothing is owed to anyone. |
-| The lot is **delivered** and a review finds something | **a sub-lot `N.n`**: its own plan file, back to the start of CONSTRUCTION's planning. The lot's own plan is never touched again. |
+| The lot is **delivered** and the complete actionable set is a bounded implementation correction | **one Correction Round on that built unit**: its own immutable Correction artifact and bounded task graph. It does not create or change an ordinary plan. |
+| The lot is **delivered** and the complete actionable set contains a structural correction | **a sub-lot `N.n`**: its own plan file, back to the start of CONSTRUCTION's planning. A historical human `route=sublot` always selects this route. The lot's own plan is never touched again. |
 | A **DECISION** changes the spec, and it blocks the lot being built | **a task inside that lot**, once the spec is amended |
 | A **DECISION** changes the spec, and it does not block anything | **a lot inserted after** the current one |
+
+The complete actionable set selects exactly one route. It is never divided between a
+Correction Round and a sub-lot.
 
 **A sub-lot may correct code from any earlier lot.** The code is one tree.
 
@@ -925,9 +936,10 @@ neither is offered**: you receive it, and it interrupts whatever you were doing.
    its boundary **delivered: retire it `done`** — the stop merely performs the
    retirement its route owed a moment later. Everything else — an assignment still
    unsettled — is **`cancelled`**: abandoned before it delivered. `cancelled`
-   describes **the assignment**, never the fate of the feature — a paused run resumes
-   with fresh sessions, and that is why an unsettled child is `cancelled` on a pause
-   as much as on an abort. **The watchdog keeps its own step** — the next one retires
+   describes **the assignment**, never the fate of the feature. A Correction active-attempt
+   implementer has one exact terminal-derived rule: **pause retires it `superseded`; abort
+   retires it `cancelled`**. Do not apply the general unsettled-child status to that
+   Correction pause. **The watchdog keeps its own step** — the next one retires
    it `done`: ticking was its whole assignment, and it did it. Two terminal statuses
    on one session is a journal that contradicts itself — **so a resume tail that
    names a retirement treats the stop's as already satisfied**: a child the stop
@@ -1083,8 +1095,10 @@ header, it changes no behaviour, and no gate or reviewer has anything to say abo
   RARE or EXCEPTIONAL interference analysis, or one exact compatible human ruling. Publish
   through `gate_execution.py`. Proven absence means singleton groups. Every logical gate
   freezes the complete schedule and policy snapshot;
-- **the confirmed-findings file** that closes a review pass — the sub-lot's source,
-  distilled from verdicts only you hold together, and no child is assigned to it;
+- **the confirmed-findings file** that closes a review pass — the exact selected
+  successor's source. It feeds the Correction artifact for a Correction Round or the
+  ordinary plan for a structural sub-lot. It is distilled from verdicts only you hold
+  together, and no child is assigned to it;
 - **the `.superpowers/` ignore rule** when workspace creation refuses —
   `.git/info/exclude`, or the `.gitignore` line edited **and committed, that path
   alone**: this happens before the workspace exists, so there is no implementer to
@@ -1963,10 +1977,23 @@ the journal, the process state, `hidden` or `archived`.
 | `bwr.mode` | `spec` · `construction` · `product-review` · `amendment` — the mode's own name. **One session carries none: the watchdog**, which lives through every mode. |
 | `bwr.feature` | the feature's short name |
 | `bwr.lot` | `lot-1`, `lot-1.1` — **keep the `lot-` prefix**, a bare `1.1` parses as a number |
+| `bwr.correction` | positive Correction Round ordinal. Present only on the Correction work-unit sessions named by a mode contract. Absent on every ordinary work-unit session. |
 | `bwr.task` | integer from 1; implementers only |
 | `bwr.attempt` | integer from 1; implementers only |
 | `bwr.round` | integer from 1; spec reviewers only |
 | `bwr.mandate` | stable lowercase slug; reviewers only. The mode file fixes the list — never invent one. |
+| `bwr.position` | non-negative Product correction position. It is part of the schema-2 Product reviewer group below. |
+| `bwr.pass` | positive Product pass ordinal. It is part of the schema-2 Product reviewer group below. |
+| `bwr.generation` | exact lowercase 64-hex Product pass generation digest. It is part of the schema-2 Product reviewer group below. |
+
+**The three Product pass annotations are one indivisible group.** They are present only
+on schema-2 Product reviewer sessions. Here, schema 2 describes the Product pass account;
+`bwr.schema` remains `1`. The three fields are absent together on schema 1 and on all
+sessions without a Product report. Never copy, infer or add only part of this group.
+
+These three values identify the physical reviewer assignment at session creation. They
+do not enter journal `CONTEXT_FIELDS`. The reviewer start already freezes the complete
+Product pass account in its `data`.
 
 - **You own every annotation.** You set the complete set at creation and make every later
   update. Children never touch their own. Only `status` changes during an assignment.

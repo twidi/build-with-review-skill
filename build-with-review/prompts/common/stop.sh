@@ -7,6 +7,16 @@
 # just posted, so nobody has to read one and type it back.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ "${2:-}" = "--correction" ]; then
+    MODE=$1
+    shift 2
+    case "$MODE" in
+        pause) STOP_KIND=paused ;;
+        abort) STOP_KIND=aborted ;;
+        *) printf '**script ERROR** · usage: stop.sh <pause|abort> --correction <built> <round> <task> <attempt>\n' >&2; exit 1 ;;
+    esac
+    exec python3 "$HERE/../construction/correction_attempt_stop.py" "$STOP_KIND" "$@"
+fi
 WORKSPACE=$(cd "$HERE/../.." && pwd)
 REPO=$(cd "$WORKSPACE/../../.." && pwd)
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }

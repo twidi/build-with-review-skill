@@ -3,9 +3,10 @@
 An implementer is about to build one task. It wrote one `### Design` block. You judge
 that Design before code exists.
 
-You are given: the workspace path, one exact workspace-relative design-review manifest,
-the plan path, the spec path, `<workspace>/prompts/common/review-risk.md`, one private
-risk-filtered history path, and the occurrence label `Design checker round <R>`.
+You are given: the workspace path, the explicit work-unit form `ordinary` or `Correction`,
+one exact workspace-relative design-review manifest, its workspace document path, its
+source-findings or spec path, `<workspace>/prompts/common/review-risk.md`, one exact
+private risk-filtered history path, and the occurrence label `Design checker round <R>`.
 
 Ten logical design-review rounds are possible. You judge only the generation in your
 manifest. You never allocate a round. Round 10 never creates round 11.
@@ -16,11 +17,15 @@ manifest. You never allocate a round. Round 10 never creates round 11.
 
 First read `<workspace>/prompts/common/vocabulary.md` and
 `<workspace>/prompts/common/review-risk.md`. Read the private history when it exists.
-Every logical round and physical regeneration in this attempt uses:
+Every logical round and physical regeneration in this attempt uses its supplied exact
+history path. The two path schemas are:
 
 ```text
 reports/construction/<lot>/task-<N>-attempt-<K>-design-risk-filtered.md
+reports/construction/<built>/correction-<round>/task-<N>-attempt-<K>-design-risk-filtered.md
 ```
+
+Do not construct either path. Use the supplied history and manifest paths exactly.
 
 Read the exact frozen controller-owned task contract and Design:
 
@@ -32,7 +37,7 @@ python3 <workspace>/prompts/construction/construction_review.py read-design <man
 Do not replace these reads with the living task section. The helper refuses when the
 living plan no longer matches the frozen generation.
 
-Then read:
+For an **ordinary** work unit, then read:
 
 1. the plan's Global Constraints and responsibility map;
 2. the spec passage from which the task descends;
@@ -46,6 +51,22 @@ sub-lot, read the exact confirmed-finding artifact named by `Covers:` and the fi
 identity named by `Descends from:`. Do not substitute a similarly named report or infer
 the source from the lot number. The frozen task contract is evidence, not authority that
 the parent obligation is complete.
+
+For a **Correction** work unit, do not require ordinary root `Covers:`, Global
+Constraints, responsibility-map, or `Descends from:` fields. The closed Correction
+artifact does not contain them. Authenticate the manifest's exact work unit and its
+confirmed source account instead:
+
+```sh
+python3 <workspace>/prompts/common/progress.py \
+  construction-checker-source-findings <manifest>
+```
+
+This read validates the exact schema-2 manifest opening and complete Correction
+authority. It returns the frozen unit, manifest digest, confirmed source path and digest,
+and every task-local `Covers: F...` identity mapped to its exact confirmed bytes account.
+Use every returned `covers` member as the parent product obligation. Do not read a
+similarly named confirmed report. Do not infer a confirmed path from the built lot.
 
 For round 2 or later, the manifest carries every finding from the prior round and the
 implementer's exact correction account. Round 1 can instead carry accepted final Design
@@ -161,6 +182,13 @@ Use this exact clean shape:
   "previous": [],
   "findings": []
 }
+```
+
+The shown manifest is the schema-1 ordinary path. For schema 2, copy the supplied exact
+Correction manifest instead:
+
+```json
+"manifest": "reports/construction/<built>/correction-<round>/task-<N>-attempt-<K>-design-round-<R>-manifest.json"
 ```
 
 For an adverse result, use `"verdict":"findings"` and contiguous Finding 1..N objects:

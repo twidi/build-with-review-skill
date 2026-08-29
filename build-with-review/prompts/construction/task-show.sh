@@ -10,6 +10,12 @@ REPO=$(cd "$WORKSPACE/../../.." && pwd)
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 [ -e "$REPO/.git" ] || die "$REPO is not a git repository"
 
+if [ "${1:-}" = manifest ]; then
+    [ $# -eq 4 ] || die "usage: task-show.sh manifest <checker manifest> <prior task N> <path>"
+    exec python3 "$WORKSPACE/prompts/common/progress.py" \
+        construction-checker-task-show "$2" "$3" "$4"
+fi
+
 [ $# -eq 3 ] || die "3 arguments expected, $# given — usage: task-show.sh <lot> <task N> <path>   the path is relative to the repository root"
 LOT=$1 N=$2 FILE=$3
 [[ $LOT =~ ^lot-[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "the lot must read lot-<N> or lot-<N>.<M> — positive integers, no leading zeros — got \`$LOT\`"

@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 
 from gate_file import GateFileError, read_gate_commands
 
@@ -30,6 +31,49 @@ REPORT_GROUND = WORKSPACE / "reports" / "gate"
 OUTPUT_CHUNK_BYTES = 65536
 MARKER_KEYS = (
     "op", "scope", "owner", "lot", "task", "attempt", "head", "base", "tree", "gate", "code"
+)
+CORRECTION_AUTHORITY_KEYS = (
+    "contract_authority_sha256", "execution_authority_sha256",
+    "final_checker_set_sha256",
+)
+CORRECTION_ATTEMPT_AUTHORITY_KEYS = (*CORRECTION_AUTHORITY_KEYS, "attempt_marker_sha256")
+CORRECTION_SCOPES = {"correction-task", "correction-review", "correction-baseline"}
+CORRECTION_OWNER_MARKERS = {
+    "amendment-commit-in-progress",
+    "document-copy-in-progress",
+    "plan-commit-in-progress",
+    "rewind-in-progress",
+    "spec-breach-recovery-in-progress",
+    "spec-commit-in-progress",
+    "correction-allocation-supersede-in-progress",
+    "correction-artifact-in-progress",
+    "correction-attempt-failure-in-progress",
+    "correction-attempt-stop-in-progress",
+    "correction-product-authority-in-progress",
+    "correction-round-built-in-progress",
+    "correction-terminal-restore-in-progress",
+    "correction-round-open-in-progress",
+    "correction-round-revision-in-progress",
+    "correction-round-void-in-progress",
+    "correction-rewind-in-progress",
+    "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+    "correction-round-escalation-in-progress",
+}
+CORRECTION_BASELINE_OWNER_MARKERS = {
+    "correction-round-revision-in-progress",
+    "correction-rewind-in-progress",
+    "final-checker-contract-map-in-progress",
+    "correction-amendment-return-in-progress",
+}
+
+COMMON = WORKSPACE / "prompts" / "common"
+sys.path.insert(0, str(COMMON))
+
+import progress  # noqa: E402
+from correction_authority import (  # noqa: E402
+    CorrectionAuthorityLease,
+    WorkspaceFileAnchor,
 )
 
 
@@ -476,11 +520,21 @@ def read_marker_file(path, subject, *, execution):
             refuse(f"{subject} is malformed")
         marker[key] = value
     expected = set(MARKER_KEYS)
-    allowed = (expected, expected | {"execution"}) if execution else (expected,)
+    correction_draft = expected | {"correction"}
+    correction_baseline = correction_draft | set(CORRECTION_AUTHORITY_KEYS)
+    correction_attempt = correction_draft | set(CORRECTION_ATTEMPT_AUTHORITY_KEYS)
+    allowed = (
+        (
+            expected, expected | {"execution"},
+            correction_baseline, correction_baseline | {"execution"},
+            correction_attempt, correction_attempt | {"execution"},
+        )
+        if execution else (expected, correction_draft, correction_baseline, correction_attempt)
+    )
     if set(marker) not in allowed:
         refuse(f"{subject} has an incomplete identity")
     if not re.fullmatch(r"[0-9a-f]{64}", marker["op"]) \
-            or marker["scope"] not in {"task", "baseline", "review"} \
+            or marker["scope"] not in {"task", "baseline", "review", *CORRECTION_SCOPES} \
             or not re.fullmatch(r"[A-Za-z0-9._:/-]+", marker["owner"]) \
             or not re.fullmatch(r"(?:-|lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?)", marker["lot"]) \
             or not re.fullmatch(r"[0-9]+", marker["task"]) \
@@ -488,6 +542,18 @@ def read_marker_file(path, subject, *, execution):
             or any(not re.fullmatch(r"[0-9a-f]{40,64}", marker[key])
                    for key in ("head", "base", "tree", "gate")):
         refuse(f"{subject} has an invalid identity")
+    if marker["scope"] in CORRECTION_SCOPES:
+        if not re.fullmatch(r"[1-9][0-9]*", marker.get("correction", "")):
+            refuse(f"{subject} has no correction-round identity")
+        required_authority = CORRECTION_AUTHORITY_KEYS \
+            if marker["scope"] == "correction-baseline" \
+            else CORRECTION_ATTEMPT_AUTHORITY_KEYS
+        if (execution or any(key in marker for key in required_authority)) \
+                and any(not re.fullmatch(r"[0-9a-f]{64}", marker.get(key, ""))
+                        for key in required_authority):
+            refuse(f"{subject} has no complete correction authority")
+    elif "correction" in marker:
+        refuse(f"{subject} carries a correction round for an ordinary scope")
     if "execution" in marker and not marker["execution"]:
         refuse(f"{subject} has an empty execution token")
     return marker
@@ -600,6 +666,328 @@ def refuse_live_marker(action):
         refuse(f"finish or abandon the live gate operation before {action}")
 
 
+def correction_attempt_authority(marker):
+    context = {
+        "lot": marker["lot"],
+        "correction": int(marker["correction"]),
+        "task": int(marker["task"]),
+        "attempt": int(marker["attempt"]),
+    }
+    identity = progress.active_attempt_identity(
+        context, "the correction gate admission", include_completion=True,
+    )
+    with WorkspaceFileAnchor(
+        WORKSPACE, "attempt-in-flight", "the correction gate attempt owner",
+    ) as anchored:
+        attempt_payload = anchored.read_regular()
+    return {
+        "contract_authority_sha256": identity["unit_authority_sha256"],
+        "execution_authority_sha256": identity["execution_authority_sha256"],
+        "final_checker_set_sha256": identity[
+            "outstanding_final_checker_set_sha256"
+        ],
+        "attempt_marker_sha256": hashlib.sha256(attempt_payload).hexdigest(),
+    }
+
+
+def current_correction_owner_markers():
+    return [
+        name for name in sorted(CORRECTION_OWNER_MARKERS)
+        if os.path.lexists(WORKSPACE / name)
+    ]
+
+
+def correction_baseline_owner(marker, entries, living_markers):
+    from correction_round_baseline import (  # noqa: E402
+        exact_opening,
+        pending_final_checker_map,
+        pending_revision,
+        pending_rewind,
+    )
+
+    args = SimpleNamespace(
+        built=marker["lot"], correction=int(marker["correction"]),
+        round=int(marker["correction"]),
+    )
+    _opening_entries, opening, _close = exact_opening(args)
+    if not living_markers:
+        expected_owner = f"correction/{args.built}/c{args.round}/{opening['base_commit']}"
+        if marker["owner"] != expected_owner \
+                or marker["head"] != opening["base_commit"] \
+                or marker["base"] != opening["base_commit"]:
+            refuse("the correction base gate changes its frozen opening authority")
+        return
+
+    name = living_markers[0]
+    if name == "correction-rewind-in-progress":
+        account = pending_rewind(args, entries)
+        if account is None:
+            refuse("the correction baseline has no exact pending rewind owner")
+        expected_owner = account["baseline_owner"]
+        expected_commit = account["event_base"]["result_commit"]
+    elif name == "final-checker-contract-map-in-progress":
+        account = pending_final_checker_map(args, entries)
+        if account is None:
+            refuse("the correction baseline has no exact pending final-checker map owner")
+        expected_owner = account["baseline_owner"]
+        expected_commit = account["commit"]
+    else:
+        account = pending_revision(args, entries, opening)
+        if account is None:
+            refuse("the correction baseline has no exact pending revision owner")
+        expected_owner = account["baseline_owner"]
+        expected_commit = account["commit"]
+    if marker["owner"] != expected_owner \
+            or marker["head"] != expected_commit or marker["base"] != expected_commit:
+        refuse("the correction baseline changes its pending transition owner")
+
+
+def validate_correction_gate_owner(marker, entries):
+    progress.require_no_current_correction_stop(
+        entries, len(entries), marker["lot"], int(marker["correction"]),
+        "the correction gate admission",
+    )
+    living = current_correction_owner_markers()
+    return_baseline = marker["scope"] == "correction-baseline" \
+        and living and all(name in {
+            "correction-rewind-in-progress",
+            "correction-amendment-return-in-progress",
+        } for name in living)
+    if not return_baseline:
+        progress.require_no_active_correction_amendment(
+            entries, len(entries), marker["lot"], int(marker["correction"]),
+            "the correction gate admission",
+        )
+    if marker["scope"] != "correction-baseline":
+        if living:
+            refuse(f"the correction gate follows unfinished owner {living[0]}")
+        return
+    foreign = [name for name in living if name not in CORRECTION_BASELINE_OWNER_MARKERS]
+    if foreign:
+        refuse(f"the correction baseline follows unfinished owner {foreign[0]}")
+    if len(living) > 1:
+        refuse("the correction baseline has several pending transition owners")
+    correction_baseline_owner(marker, entries, living)
+
+
+def correction_baseline_authority(marker):
+    entries = progress.journal_entries()
+    built = marker["lot"]
+    correction = int(marker["correction"])
+    validate_correction_gate_owner(marker, entries)
+    state = progress.current_correction_contract_state(
+        entries, len(entries), built, correction, "the correction baseline gate",
+    )
+    current_set = progress.outstanding_final_checker_set(
+        entries, len(entries), built, correction, "the correction baseline gate",
+    )
+    if marker["task"] != "0" or marker["attempt"] != "0":
+        refuse("the correction baseline gate changes its current execution authority")
+    return {
+        "contract_authority_sha256": state["authority_sha256"],
+        "execution_authority_sha256": state["execution_authority_sha256"],
+        "final_checker_set_sha256": progress.final_checker_set_sha256(current_set),
+    }
+
+
+def correction_escalation_gate_lot(marker, entries):
+    lot = marker["lot"] if marker["scope"] in {"task", "review"} else None
+    if marker["scope"] == "baseline":
+        match = re.fullmatch(
+            r"plan/(lot-[1-9][0-9]*(?:\.[1-9][0-9]*)?)/([0-9a-f]{40,64})",
+            marker["owner"],
+        )
+        if match is not None and match.group(2) == marker["head"]:
+            lot = match.group(1)
+        if lot is None:
+            candidates = []
+            for entry in entries:
+                data = progress.note_data(entry)
+                candidate_lot = entry.get("lot")
+                if entry.get("kind") == "plan.written" \
+                        and data.get("schema") == 2 \
+                        and data.get("origin") == "correction-round" \
+                        and data.get("commit") == marker["head"] \
+                        and progress.correction_escalation_plan_origin(entries, candidate_lot):
+                    candidates.append(candidate_lot)
+            if len(set(candidates)) == 1:
+                lot = candidates[0]
+    if lot is None or not progress.correction_escalation_plan_origin(entries, lot):
+        return None
+    return lot
+
+
+def validate_correction_escalation_gate(marker, entries, lot):
+    progress.require_no_open_correction_escalation_c2(
+        entries, len(entries), lot, "the Correction escalation gate admission",
+    )
+    if marker["scope"] != "baseline":
+        return
+    progress.correction_escalation_require_quiescent(
+        entries, len(entries), lot, "the Correction escalation C2.7 baseline",
+        live=True,
+    )
+    clean_c2 = progress.correction_escalation_clean_c2_account(
+        entries, len(entries), lot, "the Correction escalation C2.7 baseline",
+    )
+    commit = clean_c2["plan_account"]["commit"]
+    parent = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", f"{commit}^"],
+        capture_output=True, text=True,
+    )
+    if marker["owner"] != f"plan/{lot}/{commit}" \
+            or marker["head"] != commit or parent.returncode != 0 \
+            or marker["base"] != parent.stdout.strip():
+        refuse("the Correction escalation baseline changes its plan or predecessor authority")
+
+
+def gate_event_data(marker, execution_hash):
+    data = {
+        key: marker[key] for key in MARKER_KEYS
+    }
+    data["task"] = int(data["task"])
+    data["attempt"] = int(data["attempt"])
+    if "correction" in marker:
+        data["correction"] = int(marker["correction"])
+    data.update({
+        key: marker[key] for key in CORRECTION_ATTEMPT_AUTHORITY_KEYS if key in marker
+    })
+    data["execution"] = execution_hash
+    return data
+
+
+def gate_started_args(data):
+    return SimpleNamespace(
+        kind="gate-runner", mandate=None, task=None, round=None,
+        data=json.dumps(data, sort_keys=True, separators=(",", ":")),
+        mode=None, lot=None, job=None, attempt=None,
+    )
+
+
+def correction_gate_start(marker, execution_hash, lease, operation):
+    data = gate_event_data(marker, execution_hash)
+    entries = progress.journal_entries()
+    starts = [
+        entry for entry in entries
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "gate-runner"
+        and progress.note_data(entry).get("op") == marker["op"]
+    ]
+    ends = [
+        entry for entry in entries
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "gate-runner"
+        and progress.note_data(entry).get("op") == marker["op"]
+    ]
+    completed = [entry for entry in ends if "unusable" not in progress.note_data(entry)]
+    if len(starts) > 2 or len(ends) > 2 or len(ends) > len(starts) \
+            or len(starts) - len(ends) > 1 or completed:
+        refuse("the correction gate has malformed durable physical-call brackets")
+    if any(progress.note_data(entry) != data for entry in starts):
+        refuse("the correction gate start changes its durable authority")
+    for entry in ends:
+        terminal = progress.note_data(entry)
+        if any(terminal.get(key) != value for key, value in data.items()) \
+                or terminal.get("unusable") not in {"lost", "unusable"}:
+            refuse("the correction gate has a foreign physical-call terminal")
+    if len(starts) > len(ends):
+        return
+    if len(starts) == 2:
+        refuse("the correction gate exhausted its one physical replacement")
+    progress.cmd_subagent_started(
+        gate_started_args(data),
+        correction_lease=lease,
+        correction_operation=operation,
+    )
+
+
+def gate_ended_args(data):
+    return SimpleNamespace(
+        kind="gate-runner", mandate=None, task=None, round=None,
+        data=json.dumps(data, sort_keys=True, separators=(",", ":")),
+        mode=None, lot=None, job=None, attempt=None,
+    )
+
+
+def correction_gate_terminal(op, outcome):
+    operation = f"correction-gate-terminal:{validate_op(op)}"
+    with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+        with gate_authority():
+            with WorkspaceFileAnchor(
+                WORKSPACE, "gate-check-in-progress", "the correction gate owner",
+            ) as anchored:
+                marker_payload = anchored.read_regular()
+                marker = marker_data(op)
+                if marker["scope"] not in CORRECTION_SCOPES:
+                    refuse("the correction gate terminal names an ordinary gate")
+                expected = correction_baseline_authority(marker) \
+                    if marker["scope"] == "correction-baseline" \
+                    else correction_attempt_authority(marker)
+                if any(marker.get(key) != value for key, value in expected.items()):
+                    refuse("the correction gate terminal changes its frozen authority")
+                token = marker.get("execution")
+                if token is None:
+                    execution_hash = "-"
+                else:
+                    _, execution_hash = decode_execution(
+                        token, marker["gate"], marker["tree"],
+                    )
+                opening_data = gate_event_data(marker, execution_hash)
+                data = dict(opening_data)
+                if outcome == "lost":
+                    data["unusable"] = "lost"
+                elif outcome == "unusable":
+                    data["unusable"] = "unusable"
+                else:
+                    try:
+                        report = json.loads(outcome)
+                    except ValueError as exc:
+                        refuse(f"the correction gate report is not JSON: {exc}")
+                    if not isinstance(report, dict) or set(report) != {
+                        "green", "surface", "report", "report_sha256", "commands",
+                    }:
+                        refuse("the correction gate report has an invalid result shape")
+                    data.update(report)
+                    verify_frozen(marker)
+                entries = progress.journal_entries()
+                starts = [
+                    entry for entry in entries
+                    if entry.get("event") == "subagent-started"
+                    and entry.get("kind") == "gate-runner"
+                    and progress.note_data(entry).get("op") == op
+                ]
+                ends = [
+                    entry for entry in entries
+                    if entry.get("event") == "subagent-ended"
+                    and entry.get("kind") == "gate-runner"
+                    and progress.note_data(entry).get("op") == op
+                ]
+                completed = [
+                    entry for entry in ends
+                    if "unusable" not in progress.note_data(entry)
+                ]
+                if len(starts) not in {1, 2} or len(ends) > 2 \
+                        or len(ends) > len(starts) or len(starts) - len(ends) > 1 \
+                        or len(completed) > 1:
+                    refuse("the correction gate has malformed durable physical-call brackets")
+                if any(progress.note_data(entry) != opening_data for entry in starts):
+                    refuse("the correction gate terminal changes its opening authority")
+                matching = [entry for entry in ends if progress.note_data(entry) == data]
+                if completed:
+                    if outcome in {"lost", "unusable"} or len(matching) != 1:
+                        refuse("the correction gate terminal changes its durable result")
+                else:
+                    if len(starts) != len(ends) + 1:
+                        refuse("the correction gate terminal has no open physical owner")
+                    progress.cmd_subagent_ended(
+                        gate_ended_args(data),
+                        correction_lease=lease,
+                        correction_operation=operation,
+                    )
+                if outcome != "lost":
+                    anchored.remove_exact(hashlib.sha256(marker_payload).hexdigest())
+
+
 def open_marker(source):
     source = pathlib.Path(source)
     if not source.is_absolute():
@@ -609,20 +997,75 @@ def open_marker(source):
     if marker["scope"] == "baseline":
         if (marker["lot"], marker["task"], marker["attempt"], marker["code"]) != ("-", "0", "0", "-"):
             refuse("the gate marker draft has an invalid baseline identity")
+    elif marker["scope"] == "correction-baseline":
+        if marker["lot"] == "-" or (marker["task"], marker["attempt"], marker["code"]) \
+                != ("0", "0", "-"):
+            refuse("the gate marker draft has an invalid correction baseline identity")
     elif marker["lot"] == "-" or marker["task"] == "0" or marker["attempt"] == "0":
         refuse("the gate marker draft has an invalid task identity")
-    if marker["scope"] == "task":
+    if marker["scope"] in {"task", "correction-task"}:
         if not re.fullmatch(r"[0-9]+:[0-9a-f]{64}", marker["code"]):
             refuse("the gate marker draft has no final code-review proof")
     elif marker["code"] != "-":
         refuse("the gate marker draft carries an invalid code-review proof")
-    with gate_authority():
-        refuse_live_marker("opening another gate")
-        verify_frozen(marker)
-        encoded = encode_execution(configured_execution())
-        payload = "".join(f"{key} {marker[key]}\n" for key in MARKER_KEYS)
-        payload += f"execution {encoded['token']}\n"
-        atomic_publish(MARKER, payload.encode(), replace=False)
+    if marker["scope"] in CORRECTION_SCOPES:
+        operation = f"correction-gate:{marker['op']}"
+        with CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+            if marker["scope"] == "correction-baseline":
+                authority = correction_baseline_authority(marker)
+            else:
+                entries = progress.journal_entries()
+                validate_correction_gate_owner(marker, entries)
+                authority = correction_attempt_authority(marker)
+            marker.update(authority)
+            with gate_authority():
+                verify_frozen(marker)
+                encoded = encode_execution(configured_execution())
+                payload = "".join(f"{key} {marker[key]}\n" for key in MARKER_KEYS)
+                payload += f"correction {marker['correction']}\n"
+                payload += "".join(
+                    f"{key} {marker[key]}\n"
+                    for key in CORRECTION_ATTEMPT_AUTHORITY_KEYS if key in marker
+                )
+                payload += f"execution {encoded['token']}\n"
+                if MARKER.exists() or MARKER.is_symlink():
+                    current = marker_data(marker["op"])
+                    if any(current.get(key) != marker.get(key)
+                           for key in (
+                               *MARKER_KEYS, "correction", *CORRECTION_ATTEMPT_AUTHORITY_KEYS,
+                           )):
+                        refuse("the live correction gate belongs to another authority")
+                else:
+                    atomic_publish(MARKER, payload.encode(), replace=False)
+                correction_gate_start(
+                    marker, encoded["sha256"], lease, operation,
+                )
+    else:
+        entries = progress.journal_entries()
+        escalation_lot = correction_escalation_gate_lot(marker, entries)
+
+        def publish_ordinary():
+            nonlocal encoded
+            with gate_authority():
+                refuse_live_marker("opening another gate")
+                verify_frozen(marker)
+                encoded = encode_execution(configured_execution())
+                payload = "".join(f"{key} {marker[key]}\n" for key in MARKER_KEYS)
+                payload += f"execution {encoded['token']}\n"
+                atomic_publish(MARKER, payload.encode(), replace=False)
+
+        encoded = None
+        if escalation_lot is None:
+            publish_ordinary()
+        else:
+            operation = f"correction-escalation-gate:{marker['op']}"
+            try:
+                with CorrectionAuthorityLease.acquire(WORKSPACE, operation):
+                    entries = progress.journal_entries()
+                    validate_correction_escalation_gate(marker, entries, escalation_lot)
+                    publish_ordinary()
+            except (OSError, ValueError) as exc:
+                refuse(f"the Correction escalation gate lease failed: {exc}")
     print(f"FROZEN {encoded['sha256']}")
 
 
@@ -1059,6 +1502,12 @@ def main():
             publish_policy(sys.argv[2])
         elif command == "open-marker" and len(sys.argv) == 3:
             open_marker(sys.argv[2])
+        elif command == "correction-terminal" and len(sys.argv) == 5:
+            if sys.argv[3] not in {"result", "lost", "unusable"}:
+                refuse("the correction gate terminal kind is invalid")
+            correction_gate_terminal(
+                sys.argv[2], sys.argv[4] if sys.argv[3] == "result" else sys.argv[3],
+            )
         elif command == "show" and len(sys.argv) == 2:
             sys.stdout.buffer.write(canonical_bytes(configured_execution()))
         elif command == "token" and len(sys.argv) == 2:
@@ -1091,10 +1540,10 @@ def main():
             assert_idle(sys.argv[2])
         else:
             refuse(
-                "usage: gate_execution.py <policy-show|policy-publish|open-marker|show|token|"
+                "usage: gate_execution.py <policy-show|policy-publish|open-marker|correction-terminal|show|token|"
                 "validate-token|trigger|publish|remove|run|inspect|result|output|idle> [argument]"
             )
-    except (GateExecutionError, OSError) as exc:
+    except (ValueError, OSError) as exc:
         print(f"**gate execution ERROR** · {exc}", file=sys.stderr)
         raise SystemExit(1)
 

@@ -9,7 +9,13 @@ import sys
 import tempfile
 
 from gate_file import GateFileError, read_gate_commands
-from gate_execution import frozen_execution, read_account, run_commands
+from gate_execution import (
+    CORRECTION_ATTEMPT_AUTHORITY_KEYS,
+    MARKER_KEYS,
+    frozen_execution,
+    read_account,
+    run_commands,
+)
 
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -43,8 +49,14 @@ def marker_data(op):
         if not separator or not value or key in data:
             refuse("the gate-check marker is malformed")
         data[key] = value
-    if len(data) not in {11, 12} or data.get("op") != op or data.get("scope") != "review" \
-            or (len(data) == 12 and "execution" not in data):
+    base = set(MARKER_KEYS)
+    correction = data.get("scope") == "correction-review"
+    expected = base | (
+        {"correction", *CORRECTION_ATTEMPT_AUTHORITY_KEYS} if correction else set()
+    )
+    if set(data) not in (expected, expected | {"execution"}) \
+            or data.get("op") != op \
+            or data.get("scope") not in {"review", "correction-review"}:
         refuse("the marker does not own this exact ordinary gate operation")
     return data
 

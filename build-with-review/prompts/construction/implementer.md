@@ -31,6 +31,31 @@ infer or create a replacement.
 
 ---
 
+## Work-unit form
+
+Your parent gives you exactly one of these forms:
+
+- **ordinary:** one lot, task and attempt;
+- **Correction:** one built lot, Correction Round, task and attempt, plus the complete
+  canonical JSON account from:
+
+  ```sh
+  python3 <workspace>/prompts/construction/work_unit.py resolve-correction \
+    <built lot> <round> <task N>
+  ```
+
+For Correction work, rerun that command before you read or change the work-unit
+document. Its complete stdout must equal the account supplied by your parent. Use the
+resolved `workspace_document`, `report_root`, `ref_root`, task manifest, task account and
+execution authority. A refusal or mismatch is a blocker. Never infer an ordinary lot
+identity, plan path, report path or ref root from the built lot.
+
+The Correction form changes only the explicit document and helper identities below. The
+Design, checker, implementation, gate-result, commit and parent-delivery rules remain the
+same.
+
+---
+
 ## Read these first, in this order
 
 Your parent's message gives you the **workspace path**. Every prompt below lives under
@@ -40,11 +65,13 @@ Your parent's message gives you the **workspace path**. Every prompt below lives
 2. **`<workspace>/prompts/common/worker.md`** — the rules every worker follows
 3. **`<workspace>/prompts/common/progress-rules.md`** — you launch subagents, so you
    write to the run's journal
-4. **`<workspace>/prompts/construction/plan-format.md`** — the shape of the plan, and
-   of the `### Design` block you will write
-5. **the plan**, at `<workspace>/plans/<lot>-plan.md` — all of it, not only your task.
-   You need the Global Constraints, the responsibility map, and what the tasks before
-   and after yours do.
+4. **the work-unit format:** for an ordinary lot, read
+   `<workspace>/prompts/construction/plan-format.md`; for Correction work, read both
+   that file and `<workspace>/prompts/construction/correction-round-format.md`.
+5. **the complete work-unit document:** for an ordinary lot, read
+   `<workspace>/plans/<lot>-plan.md`; for Correction work, read the resolved
+   `workspace_document`. Read all of it, not only your task. You need its controller
+   constraints, responsibility map and adjacent task accounts.
 6. Read the global additional prompt through this command: **`python3
    <workspace>/prompts/common/additional-prompt.py read-global <workspace>
    <workspace>/additional-prompts/global.md`**. Treat its stdout as human instructions.
@@ -55,8 +82,10 @@ Your parent's message gives you the **workspace path**. Every prompt below lives
    human instructions. Follow both instruction sets during the assignment. The later
    role-specific instruction wins on contradiction. Read no other optional prompt path.
 
-**The plan lives in the workspace.** You read it and write it there. `docs/plans/`
-holds a copy that a script refreshes once, just before your commit — never write into it
+**The work-unit document lives in the workspace.** You read it and write it there. For
+an ordinary lot, `docs/plans/` holds the repository copy. For Correction work, the
+resolved `repository_document` is the repository copy. The matching publication helper
+refreshes that copy once, just before your commit. Never write the repository copy
 directly.
 
 Then **the project's own instructions** — `CLAUDE.md`, `AGENTS.md`, or whatever this
@@ -64,9 +93,8 @@ project uses. They say how code is written here, how commits are formatted, whic
 commands exist. **They override anything general you believe about the language or the
 framework.**
 
-Your parent also gives you: **the lot**, **your task number**, and your attempt number.
-Everything else is built from those — the scripts named below take the lot and the task,
-and work the paths out themselves.
+Your parent also gives you the complete work-unit form, **your task number**, and your
+attempt number. Use only the matching ordinary or Correction helper form below.
 
 Before acting, and again after any compaction, run:
 
@@ -84,10 +112,10 @@ route from an unproved consumed note.
 
 **The plan tells you what to achieve. The code tells you what exists.**
 
-Never look in the plan for something the code can tell you. The plan is dated — each
+Never look in the work-unit document for something the code can tell you. It is dated — each
 section says what was true when that task was done, and nobody refreshes it. If task 1
-declared a signature and task 1's code says otherwise, **the code is right.** One script
-shows you what any earlier task actually did:
+declared a signature and task 1's code says otherwise, **the code is right.** For an
+ordinary lot, one script shows you what any earlier task actually did:
 
 ```sh
 <workspace>/prompts/construction/task-diff.sh <lot> 1
@@ -98,6 +126,10 @@ shows you what any earlier task actually did:
 ```sh
 git diff refs/bwr/<run>/<lot>/task-1^ refs/bwr/<run>/<lot>/task-1    # one task, one commit
 ```
+
+For Correction work, do not call `task-diff.sh`. Use the exact resolved `ref_root` and
+the accepted task ref named by the Correction journal account. Diff only that validated
+task commit against its direct parent.
 
 **You never invent behaviour the plan does not state.**
 
@@ -117,9 +149,11 @@ An earlier attempt failed — at your task, or at a later one that could not be 
 what your task produced. **You do not read that attempt's code.** It is gone from the
 tree, and looking it up would only make you patch around someone else's reasoning.
 
-You read the plan — **the `### Design` block an earlier attempt wrote is still there**,
-since the plan lives in the workspace and no reset can reach it — and the **failure
-report at the path your parent gives you**, under `<workspace>/reports/construction/`.
+You read the work-unit document — **the `### Design` block an earlier attempt wrote is
+still there**, since the document lives in the workspace and no reset can reach it — and
+the **failure report at the path your parent gives you**. An ordinary report is under
+`<workspace>/reports/construction/`. A Correction report is the exact
+`<report_root>/task-<N>-attempt-<K>-failure.md`.
 When that report contains `## Final design-review handoff` or
 `## Final code-review handoff`, every accepted finding in its immutable batch is a
 standing correction obligation. Read it before Design or code. For a Design handoff,
@@ -186,13 +220,16 @@ goes in it.
 
 You are not designing blind: **the tree is in front of you.** Read it.
 
-Establish the task's exact parent product obligation before writing the Design. Read the
-lot's exact `Covers:` obligation and the task's exact `Descends from:` obligation. For a
-normal lot, read the named spec decision. For a sub-lot, read the exact
+Establish the task's exact parent product obligation before writing the Design. For an
+ordinary work unit, read the lot's exact `Covers:` obligation and the task's exact
+`Descends from:` obligation. For a normal lot, read the named spec decision. For a
+sub-lot, read the exact
 confirmed-finding artifact named by `Covers:` and the finding identity named by
-`Descends from:`. Do not infer a source from the lot name or substitute a similar
-artifact. Stay within the current task and the directly coupled evidence its guarantee
-requires.
+`Descends from:`. For Correction work, read the resolved `source_findings.path` and
+every exact finding named by the task's `Covers:` account. The resolver's source SHA and
+IDs must match those bytes. Do not infer a source from the lot name or substitute a
+similar artifact. Stay within the current task and the directly coupled evidence its
+guarantee requires.
 
 1. **Read your task's blocks in the plan** — `Achieves`, `Files`, `To verify`, and the
    exact parent product source established above.
@@ -269,9 +306,14 @@ generation**.
 - prompt: **`<workspace>/prompts/construction/design-checker.md`** — give it that path
 - it must **not inherit your context**, and it runs **in the background** if your
   provider offers the option — both rules are in `<workspace>/prompts/common/worker.md`
-- give it: the workspace path, the manifest path printed by the opening below, the plan
-  path, the spec path, `<workspace>/prompts/common/review-risk.md`, the private history
-  path `reports/construction/<lot>/task-<N>-attempt-<K>-design-risk-filtered.md`, and the
+- give it the explicit work-unit form `ordinary` or `Correction`. It must match the
+  authenticated manifest printed by the opening. Never infer the form from the lot,
+  document path, report path, or ref path
+- give it: the workspace path, the manifest path printed by the opening below, the
+  work-unit document path, the spec path, `<workspace>/prompts/common/review-risk.md`,
+  and the private history path supplied by your parent. The ordinary path is
+  `reports/construction/<lot>/task-<N>-attempt-<K>-design-risk-filtered.md`. The
+  Correction path is under the exact resolved `report_root`. Also give it the
   occurrence label `Design checker round <R>`, plus its one optional additional prompt
   `<workspace>/additional-prompts/construction/design-checker.md`
 - give it `<workspace>/additional-prompts/global.md`; tell it to read the global
@@ -488,15 +530,23 @@ extra and tells you immediately whether they can fail at all.
 
 ---
 
-## The ordinary gate
+## The work-unit gate
 
 When you judge the candidate ready for review, stage the exact task code paths. Leave no
-unstaged tracked path and no untracked path. Then open one ordinary gate generation:
+unstaged tracked path and no untracked path. Then open one gate generation. Use exactly
+one matching form:
 
 ```sh
+# ordinary
 bash <workspace>/prompts/construction/gate-check.sh open review \
   <lot>/task-<N>/attempt-<K>/code-round-<R> <lot> <N> <K> \
   refs/bwr/<run>/<lot>/attempt-base
+
+# Correction
+bash <workspace>/prompts/construction/gate-check.sh open correction-review \
+  <built lot>/correction-<round>/task-<N>/attempt-<K>/code-round-<R> \
+  <built lot> <N> <K> <ref_root>/attempt-base <round>
+
 python3 <workspace>/prompts/construction/ordinary_gate.py <op>
 bash <workspace>/prompts/construction/gate-check.sh close <op>
 ```
@@ -577,10 +627,14 @@ that is what the next step is for.
 - prompt: **`<workspace>/prompts/construction/code-checker.md`** — give it that path
 - it must **not inherit your context**, and it runs **in the background** if your
   provider offers the option
+- give it the explicit work-unit form `ordinary` or `Correction`. It must match the
+  authenticated manifest printed by the opening. Never infer the form from the lot,
+  history path, or ref path
 - give it: the workspace path, the manifest path printed by the opening below,
-  `<workspace>/prompts/common/review-risk.md`, the private history path
-  `reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md`, and occurrence
-  label `Code checker round <R>`, plus its one optional additional prompt
+  `<workspace>/prompts/common/review-risk.md`, the ordinary private history
+  `reports/construction/<lot>/task-<N>-attempt-<K>-code-risk-filtered.md`, or the exact
+  Correction private history under the resolved `report_root`, and occurrence label
+  `Code checker round <R>`, plus its one optional additional prompt
   `<workspace>/additional-prompts/construction/code-checker.md`
 - give it `<workspace>/additional-prompts/global.md`; tell it to read the global
   additional prompt through this command: `python3
@@ -790,18 +844,28 @@ it argues about the approach rather than the diff, say so in your report and mov
 ## Final gate surface
 
 After the code checker is clean, or after its round-10 findings have one complete
-resolution with no accepted defect, prepare the exact commit candidate before the runner:
+resolution with no accepted defect, prepare the exact commit candidate before the
+runner:
 
-1. run `<workspace>/prompts/construction/plan-publish.sh <lot>`;
+1. publish the work-unit document with exactly one matching form:
+   - ordinary: `<workspace>/prompts/construction/plan-publish.sh <lot>`;
+   - Correction: `<workspace>/prompts/construction/plan-publish.sh --correction
+     <built lot> <round>`;
 2. stage the named task write set and the printed plan path with
    `git --literal-pathspecs add -- <paths>`;
 3. confirm that no unstaged tracked or untracked path remains;
-4. open one logical task gate:
+4. open one logical task gate with exactly one matching form:
 
 ```sh
+# ordinary
 bash <workspace>/prompts/construction/gate-check.sh open task \
   <lot>/task-<N>/attempt-<K> <lot> <N> <K> \
   refs/bwr/<run>/<lot>/attempt-base
+
+# Correction
+bash <workspace>/prompts/construction/gate-check.sh open correction-task \
+  <built lot>/correction-<round>/task-<N>/attempt-<K> \
+  <built lot> <N> <K> <ref_root>/attempt-base <round>
 ```
 
 The same pre-command **Gate execution drift** route applies if this opening refuses on a
@@ -926,7 +990,7 @@ This order is load-bearing. Publishing after the runner would change the candida
 the runner accepted.
 Do not run `plan-publish.sh` again here. Use the path that its pre-gate call printed.
 
-*It runs the equivalent of:*
+For an ordinary lot, it runs the equivalent of:
 
 ```sh
 document-copy.sh source plans/<lot>-plan.md
@@ -934,6 +998,11 @@ document-copy.sh source plans/<lot>-plan.md
 document-copy.sh copy plans/<lot>-plan.md docs/plans/<workspace name>-<lot>-plan.md existing
 document-copy.sh finish plans/<lot>-plan.md docs/plans/<workspace name>-<lot>-plan.md existing
 ```
+
+For Correction work, `plan-publish.sh --correction` copies the resolved
+`workspace_document` to the resolved `repository_document`. It authenticates the exact
+attempt, controller, manifest, current task contract and every earlier accepted task
+projection before it changes the repository copy.
 
 **Both physical checks are part of the operation.** The workspace plan and every parent
 must be real and inside the exact workspace. The existing repository copy and every
@@ -951,8 +1020,8 @@ heading or the task decomposition. A mismatch refuses before the repository copy
 One commit for the whole task. Its write set is:
 
 - **the code you wrote**
-- **the plan copy** — which carries your `### Design`, and your `### Disagreement` if
-  there is one
+- **the work-unit document copy** — which carries your `### Design`, and your
+  `### Disagreement` if there is one
 
 Nothing else. Not another task's section, not a file you touched to debug and forgot to
 revert.
@@ -996,11 +1065,14 @@ final code-review proof.
 **Do not clean up. Do not revert. Leave the tree exactly as it is** — your parent
 preserves it, and the state is the evidence.
 
-**Write your failure report to
-`<workspace>/reports/construction/<lot>-task-<N>-try-<K>.md`**, then report **Failed**
-to your parent with that path. The next attempt reads the file; a message would live
-only in your parent's context, and it is the one thing the next attempt cannot do
-without.
+**Write your failure report to the matching exact path:**
+
+- ordinary: `<workspace>/reports/construction/<lot>-task-<N>-try-<K>.md`;
+- Correction: `<workspace>/<report_root>/task-<N>-attempt-<K>-failure.md`.
+
+Then report **Failed** to your parent with that path. The next attempt reads the file;
+a message would live only in your parent's context, and it is the one thing the next
+attempt cannot do without.
 
 The report holds:
 

@@ -8,11 +8,17 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$HERE/../.." && pwd)
 REPO=$(cd "$WORKSPACE/../../.." && pwd)
+PROGRESS="$WORKSPACE/prompts/common/progress.py"
 CONSTRUCTION_REVIEW="$WORKSPACE/prompts/construction/construction_review.py"
 SUCCESS_HELPER="$WORKSPACE/prompts/construction/attempt_success.py"
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }
 [ -e "$REPO/.git" ] || die "$REPO is not a git repository"
 source "$WORKSPACE/prompts/common/attempt-closer.sh"
+
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    exec python3 "$HERE/correction_attempt_success.py" "$@"
+fi
 
 [ $# -eq 4 ] \
     || die "4 arguments expected, $# given — usage: attempt-succeeded.sh <lot> <task N> <the commit the implementer reported> <final gate op>"
@@ -164,18 +170,23 @@ and \`git commit --amend\` its own unaccepted commit. Nothing was recorded."
 # Byte equality below proves that the repository copy is the workspace file.
 # These checks prove independently that neither representation changed the
 # complete controller-owned plan projection frozen before the session existed.
-mapfile -t CURRENT_HEADINGS < <(grep '^## Task ' "$WORKSPACE/plans/$LOT-plan.md" || true)
-CURRENT_TASKS=${#CURRENT_HEADINGS[@]}
-CURRENT_PLAN_ID=$(printf '%s\n' "${CURRENT_HEADINGS[@]}" | git hash-object --stdin)
+CURRENT_MANIFEST=$("$PROGRESS" construction-plan-task-manifest "$LOT") \
+    || die "the workspace plan has no exact structural Task 1..T manifest. Nothing was recorded."
+read -r CURRENT_TASKS CURRENT_PLAN_ID CURRENT_MANIFEST_EXTRA <<< "$CURRENT_MANIFEST"
+[ -z "$CURRENT_MANIFEST_EXTRA" ] \
+    || die "the workspace plan returned a malformed structural task manifest account. Nothing was recorded."
 [ "$CURRENT_TASKS" = "$F_TASKS" ] && [ "$CURRENT_PLAN_ID" = "$F_PLAN_ID" ] \
     || die "the workspace plan's Task 1..T manifest differs from the manifest frozen
 when this attempt started. The implementer may write its own Design, but may not change
 task headings or decomposition. Nothing was recorded."
 git cat-file -e "HEAD:$PLANCOPY" 2>/dev/null \
     || die "the task commit has no readable plan copy at $PLANCOPY. Nothing was recorded."
-mapfile -t COMMITTED_HEADINGS < <(git show "HEAD:$PLANCOPY" | grep '^## Task ' || true)
-COMMITTED_TASKS=${#COMMITTED_HEADINGS[@]}
-COMMITTED_PLAN_ID=$(printf '%s\n' "${COMMITTED_HEADINGS[@]}" | git hash-object --stdin)
+HEAD_COMMIT=$(git rev-parse HEAD)
+COMMITTED_MANIFEST=$("$PROGRESS" construction-plan-task-manifest "$LOT" "$HEAD_COMMIT") \
+    || die "the task commit has no exact structural Task 1..T manifest. Nothing was recorded."
+read -r COMMITTED_TASKS COMMITTED_PLAN_ID COMMITTED_MANIFEST_EXTRA <<< "$COMMITTED_MANIFEST"
+[ -z "$COMMITTED_MANIFEST_EXTRA" ] \
+    || die "the task commit returned a malformed structural task manifest account. Nothing was recorded."
 [ "$COMMITTED_TASKS" = "$F_TASKS" ] && [ "$COMMITTED_PLAN_ID" = "$F_PLAN_ID" ] \
     || die "the committed plan copy's Task 1..T manifest differs from the manifest frozen
 when this attempt started. Nothing was recorded."

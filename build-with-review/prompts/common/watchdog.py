@@ -28,6 +28,8 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
+from journal_context import CONTEXT_FIELDS
+
 TERMINAL = {"done", "failed", "cancelled", "superseded"}
 TITLE_MAX = 58
 
@@ -101,7 +103,7 @@ def provider_subagent_blocks(rows):
         context = row.get("context") or {}
         context_text = " · ".join(
             f"{key}={context[key]}"
-            for key in ("mode", "lot", "task", "attempt", "round", "mandate", "job")
+            for key in CONTEXT_FIELDS
             if key in context
         ) or "no workflow context"
         blocks.append(

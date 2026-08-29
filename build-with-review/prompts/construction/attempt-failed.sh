@@ -7,6 +7,10 @@
 # back, and only the try-<K> ref keeps that commit alive.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ "${1:-}" = "--correction" ]; then
+    shift
+    exec python3 "$HERE/correction_attempt_failure.py" "$@"
+fi
 WORKSPACE=$(cd "$HERE/../.." && pwd)
 REPO=$(cd "$WORKSPACE/../../.." && pwd)
 die() { printf '**script ERROR** · %s\n' "$*" >&2; exit 1; }

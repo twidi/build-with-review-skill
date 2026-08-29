@@ -34,6 +34,7 @@ N=$1 SPEC=$2 SUBJECT=$3 LOT=$4
 # `docs/plans/` receives a copy here and nowhere else, with the same stem as
 # every plan of this feature: the workspace's name.
 DOCUMENT_COPY="$WORKSPACE/prompts/common/document-copy.sh"
+PROGRESS="$WORKSPACE/prompts/common/progress.py"
 SOURCE_REL="amendments/$N.md"
 # Authenticate every source component before accepting this document.
 "$DOCUMENT_COPY" source "$SOURCE_REL" >/dev/null
@@ -41,6 +42,23 @@ AMENDMENT="docs/plans/$(basename "$WORKSPACE")-amendment-$N.md"
 
 cd "$REPO"
 [ -f "$SPEC" ] || die "no spec at $SPEC"
+
+# A Correction-origin AMENDMENT is one exclusive transition of its suspended
+# round. The shell retains this lease through copy, index, marker, commit, ref,
+# journal, and cleanup. The in-process append consumes the same descriptor.
+CORRECTION_SCOPE=$("$PROGRESS" correction-amendment-commit-scope "$N") \
+    || die "the current AMENDMENT commit has no exact authority scope. Nothing was changed."
+CORRECTION_LEASE_FD= CORRECTION_LEASE_OPERATION=
+if [ "$CORRECTION_SCOPE" = "correction" ]; then
+    CORRECTION_LEASE_OPERATION="correction-amendment-commit:$N"
+    exec {CORRECTION_LEASE_FD}<>"$WORKSPACE/correction-authority.lock"
+    flock -x "$CORRECTION_LEASE_FD"
+    "$PROGRESS" correction-amendment-commit-lease-check \
+        "$N" "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION" \
+        || die "the Correction AMENDMENT changed before its commit owner acquired the lease. Nothing was changed."
+elif [ "$CORRECTION_SCOPE" != "ordinary" ]; then
+    die "the current AMENDMENT commit returned an unknown authority scope. Nothing was changed."
+fi
 
 # The marker identity is %q-encoded to ONE line: a pathname may carry any byte,
 # newlines included — vocabulary.md's own rule — and a raw newline in the spec
@@ -267,7 +285,12 @@ fi
 NOTE_DATA=$(printf '{"amendment":%s,"sha":"%s","op":"%s","opening_sha256":"%s","written_sha256":"%s","sweep":%s,"sweep_sha256":"%s","consolidation_round":%s,"amendment_sha256":"%s","spec_sha256":"%s","review_sha256":"%s"}' \
     "$N" "$SHA" "$OP_NONCE" "$P_OPENING" "$P_WRITTEN" "$P_SWEEP" "$P_SWEEP_SHA" \
     "$P_CONSOLIDATION" "$P_AMENDMENT_SHA" "$P_SPEC_SHA" "$P_REVIEW")
-NOTE=("$WORKSPACE/prompts/common/progress.py" note amendment.committed --data "$NOTE_DATA")
+if [ "$CORRECTION_SCOPE" = "correction" ]; then
+    NOTE=("$PROGRESS" correction-amendment-commit-append "$N" "$NOTE_DATA" \
+          "$CORRECTION_LEASE_FD" "$CORRECTION_LEASE_OPERATION")
+else
+    NOTE=("$PROGRESS" note amendment.committed --data "$NOTE_DATA")
+fi
 JOURNAL_MISSING=
 "${NOTE[@]}" || JOURNAL_MISSING=$(printf '%q ' "${NOTE[@]}")
 # The marker lives until the whole tail is durable — the journal line included.

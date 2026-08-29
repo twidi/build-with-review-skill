@@ -86,7 +86,7 @@ is stated so that it can be checked rather than believed.
 | What is read | a specification, before it is built | a product, after it runs |
 | Unit of work | a **round** | a **pass** |
 | How it is cut | by **mandate** | by **lens** |
-| What answers a finding | a **fixer** edits the document | a **sub-lot** builds the correction |
+| What answers a finding | a **fixer** edits the document | a **Correction Round** builds a bounded implementation correction; a **sub-lot** builds a structural correction |
 | Where | MODE SPEC, phase S3 | MODE PRODUCT REVIEW, phases R1 and R2 |
 
 **Never say just "the review".** The words that go with each are different on purpose:
@@ -97,6 +97,12 @@ reading one of those words, you already know which review you are in.
 finding, close what proof disproves, dedupe what remains, ask the human only for
 DECISIONs, and route the surviving work. It is not a second review and it makes no
 product choice.
+
+**Correction Round** — one bounded task graph attached to the reviewed built unit and an
+immutable Correction artifact. It is not a lot, sub-lot, plan, pass, or spec-review round.
+The complete actionable set selects exactly one route: a bounded implementation correction
+opens one Correction Round; a structural correction opens one sub-lot. A historical human
+`route=sublot` always selects the structural sub-lot route. The set is never split.
 
 ---
 
@@ -176,7 +182,9 @@ F/D item-and-verdict index. Each completed batch recheck replaces that whole ver
 index. One decision batch can open **one amendment containing all of
 its built-part rulings**, initial, supplemental and conflict-resolved. It stays open until
 every answer has reached the spec or its close, and every remaining correction has
-entered a sub-lot or been disproved against the changed spec.
+entered the exactly one route selected for its complete actionable set — a Correction
+Round for a bounded implementation correction or a sub-lot for a structural correction —
+or been disproved against the changed spec.
 
 **Recheck snapshot** — the complete latest state after an in-place spec commit. For a
 batch owner, it repeats every stable local claim, its new verdict and exact observation.

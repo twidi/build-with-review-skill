@@ -4,7 +4,10 @@
 Run from the skill root with: python3 test_gate.py
 """
 import atexit
+import contextlib
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -40,6 +43,7 @@ class Fixture:
         (self.workspace / "progress.jsonl").write_bytes(b"")
         shutil.copytree(HERE / "prompts", self.workspace / "prompts")
         self.fake = self.temp / "fake_twicc.py"
+        self._progress_module = None
         self.current_attempt = 1
         self.write_context()
 
@@ -155,6 +159,21 @@ else:
     def progress(self):
         return self.workspace / "prompts" / "common" / "progress.py"
 
+    def load_progress_module(self):
+        if self._progress_module is not None:
+            return self._progress_module
+        module_name = f"_bwr_gate_progress_{id(self)}"
+        specification = importlib.util.spec_from_file_location(module_name, self.progress)
+        module = importlib.util.module_from_spec(specification)
+        common = str(self.progress.parent)
+        sys.path.insert(0, common)
+        try:
+            specification.loader.exec_module(module)
+        finally:
+            sys.path.remove(common)
+        self._progress_module = module
+        return module
+
     def publish_gate_schedule(self, maximum, groups):
         helper = self.workspace / "prompts" / "construction" / "gate_execution.py"
         policy = self.temp / "gate-policy-draft.json"
@@ -187,7 +206,49 @@ else:
         self.run(sys.executable, helper, "publish", draft, ok=True)
 
     def progress_call(self, *args, ok=True):
-        return self.run(sys.executable, self.progress, *args, ok=ok)
+        progress = self.load_progress_module()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        returncode = 0
+        previous_argv = sys.argv
+        previous_cwd = os.getcwd()
+        previous_environment = dict(os.environ)
+        previous_twicc = progress.TWICC
+        try:
+            os.environ.clear()
+            os.environ.update(self.env)
+            os.chdir(self.repo)
+            sys.argv = [str(self.progress), *map(str, args)]
+            progress.TWICC = [sys.executable, str(self.fake)]
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    progress.main()
+                except SystemExit as exc:
+                    returncode = exc.code if isinstance(exc.code, int) else 1
+                except Exception:
+                    traceback.print_exc()
+                    returncode = 1
+        finally:
+            progress.TWICC = previous_twicc
+            sys.argv = previous_argv
+            os.chdir(previous_cwd)
+            os.environ.clear()
+            os.environ.update(previous_environment)
+        result = subprocess.CompletedProcess(
+            [str(self.progress), *map(str, args)],
+            returncode,
+            stdout.getvalue(),
+            stderr.getvalue(),
+        )
+        if ok is True and result.returncode != 0:
+            raise AssertionError(
+                f"command failed: {result.args}\n{result.stdout}\n{result.stderr}"
+            )
+        if ok is False and result.returncode == 0:
+            raise AssertionError(
+                f"command unexpectedly succeeded: {result.args}\n{result.stdout}"
+            )
+        return result
 
     def journal(self):
         path = self.workspace / "progress.jsonl"
@@ -677,6 +738,7 @@ def clone_fixture(template, prefix):
     clone.repo = clone.temp / "repo"
     clone.workspace = clone.repo / ".superpowers" / "bwr" / "2026-08-19-demo"
     clone.fake = clone.temp / "fake_twicc.py"
+    clone._progress_module = None
     clone.current_attempt = template.current_attempt
     clone.env = dict(template.env)
     clone.env["TWICC_BIN"] = f"{sys.executable} {clone.fake}"
@@ -3454,7 +3516,9 @@ def controller_document_commits_bypass_mutating_project_hooks():
         fixture.progress.write_text(
             "#!/usr/bin/env python3\n"
             "import sys\n"
-            "if sys.argv[1] == 'amendment-close-check':\n"
+            "if sys.argv[1:] == ['correction-amendment-commit-scope', '1']:\n"
+            "    print('ordinary')\n"
+            "elif sys.argv[1] == 'amendment-close-check':\n"
             "    print('a' * 64)\n"
             "    print('b' * 64)\n"
             "    print('c' * 64)\n"
