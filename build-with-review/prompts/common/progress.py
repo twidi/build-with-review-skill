@@ -7178,6 +7178,8 @@ def normalize_plan_written(entries, data, context, subject):
 
 def validate_plan_written_entry(entries, index, entry):
     data = note_data(entry)
+    if correction_escalation_plan_origin(entries[:index], entry.get("lot")):
+        return validate_correction_escalation_plan_written_entry(entries, index, entry)
     if data.get("schema") != 2:
         if set(data) != {"tasks", "op"}:
             fail("a durable legacy plan publication is malformed")
@@ -20947,11 +20949,18 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         )
 
     if kind == "plan.written":
-        data = normalize_plan_written(
-            journal_entries(), data or {}, context, "a Construction plan publication",
-        )
+        entries = journal_entries()
+        if correction_escalation_plan_origin(entries, context.get("lot")):
+            data = normalize_correction_escalation_plan_written(
+                entries, data or {}, context.get("lot"),
+                "a Correction escalation plan publication",
+            )
+        else:
+            data = normalize_plan_written(
+                entries, data or {}, context, "a Construction plan publication",
+            )
         validate_construction_lot_origin(
-            journal_entries(), len(journal_entries()), context.get("lot"),
+            entries, len(entries), context.get("lot"),
             "plan.written construction entry",
         )
 
@@ -20960,17 +20969,6 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             journal_entries(), len(journal_entries()), context.get("lot"),
             f"{kind} construction entry",
         )
-    if kind == "plan.written" and any(
-        entry.get("kind") == "sublot.allocated"
-        and entry.get("text") == context.get("lot")
-        and note_data(entry).get("origin") == "correction-round"
-        for entry in journal_entries()
-    ):
-        data = normalize_correction_escalation_plan_written(
-            journal_entries(), data or {}, context.get("lot"),
-            "a Correction escalation plan publication",
-        )
-
     if kind == "pass.opened":
         data = normalize_pass_opened(data or {}, context)
 

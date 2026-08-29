@@ -28827,6 +28827,7 @@ def correction_amendment_structural_return_publishes_one_escalation():
     progress.validate_correction_escalation_plan_written_entry(
         entries, plan_index, plan_event,
     )
+    progress.validate_plan_written_entry(entries, plan_index, plan_event)
     planned = progress.outstanding_correction_escalation_sublot_set(
         entries, len(entries), "lot-1.1", "the structural correction plan",
     )
