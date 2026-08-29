@@ -9513,6 +9513,21 @@ def product_review_amendment_uses_the_exact_sublot_spec_when_its_plan_omits_spec
         "source_task": 0, "source_attempt": 0,
     }, by=CALLER, mode="product-review", lot="lot-1.1", job="controller")
     seed_review_receipts("lot-1.1", confirmed=1)
+    entries = journal_lines()
+    transitioned = load_common_module("progress").product_review_amendment_spec_file(
+        entries,
+        len(entries),
+        {
+            "event": "note",
+            "kind": "amendment.opened",
+            "data": {"amendment": 2, "origin": "product-review", "built": "lot-1.1"},
+        },
+        "the post-Amendment Product successor",
+    )
+    check(
+        os.path.relpath(transitioned, REPO) == spec_relative,
+        f"the post-Amendment Product successor selected another specification: {transitioned}",
+    )
     allocation = run_progress(
         "note", "sublot.allocated", "--text", "lot-1.2",
         "--data", json.dumps(allocation_data("lot-1.1"), separators=(",", ":")),

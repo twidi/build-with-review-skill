@@ -3152,8 +3152,10 @@ def product_review_amendment_spec_file(entries, opening_index, opening, subject)
         commit, plan_relative, subject,
         fallback_spec=spec_source["spec"] if spec_source is not None else None,
     )
-    if used_fallback and committed["spec_sha256"] != spec_source["spec_sha256"]:
-        fail(f"{subject}'s source-pass and reviewed specifications differ")
+    if used_fallback:
+        validate_inherited_spec_transition(
+            entries, spec_source, committed, pass_index, subject,
+        )
     return exact_real_file(
         project_root(), committed["spec"], f"{subject}'s product-review specification",
     )
