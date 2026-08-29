@@ -526,7 +526,7 @@ def append_code_correction(round_number, *, runner=run_progress):
 
 def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
                            round_number=1, findings=0, text=None, impacts=None,
-                           runner=run_progress):
+                           runner=run_progress, finding_where=None):
     round_limit = {"design": 10, "code": 10}[check]
     helper = os.path.join(WORKSPACE, "prompts", "construction", "construction_review.py")
     plan_path = os.path.join(WORKSPACE, "plans", f"{lot}-plan.md")
@@ -568,6 +568,24 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
         "disagreement_sha256": state["disagreement_sha256"],
         "retry": retry,
     }
+    if active:
+        physical_starts = [
+            entry for entry in journal_lines()
+            if entry.get("event") == "session-started"
+            and entry.get("mode") == "construction"
+            and entry.get("job") == "implementer"
+            and entry.get("lot") == lot
+            and entry.get("task") == task
+            and entry.get("attempt") == attempt
+        ]
+        if len(physical_starts) == 1:
+            physical_identity = (physical_starts[0].get("data") or {}).get(
+                "attempt_identity", {}
+            )
+            if "escalation_baseline" in physical_identity:
+                logical["escalation_baseline"] = json.loads(json.dumps(
+                    physical_identity["escalation_baseline"],
+                ))
     context = {"mode": "construction", "lot": lot, "task": task,
                "attempt": attempt, "round": round_number}
     if check == "code":
@@ -710,7 +728,7 @@ def append_checker_verdict(check="code", *, lot="lot-1", task=1, attempt=1,
         ended_data = {**logical, "call": 1, **audited}
     else:
         report = design_result_payload({"manifest": logical["manifest"]}, findings=[
-            {"id": number, "where": f"Design step {number}",
+            {"id": number, "where": finding_where or f"Design step {number}",
              "what": f"Design finding {number}",
              "why": "The accepted task contract is not met.",
              "impact": impacts[number - 1] if impacts else "IMPORTANT", "previous": []}
@@ -2241,11 +2259,11 @@ def append_reach_retirement(sweep, session, status):
         }, separators=(",", ":")) + "\n")
 
 
-def configure_reach_session(session, sweep):
+def configure_reach_session(session, sweep, *, lot="lot-1"):
     cfg = default_config()
     controller = {
         "schema": 1, "job": "controller", "mode": "amendment",
-        "feature": "demo-feature", "lot": "lot-1", "status": "working",
+        "feature": "demo-feature", "lot": lot, "status": "working",
     }
     cfg["whoami"] = {"session_id": CALLER,
                      "session": {"id": CALLER, "annotations": {"bwr": controller}}}
@@ -2321,9 +2339,11 @@ def seed_written_amendment_for_reach(order="apply the reach order; return to pro
 
 def seed_clean_amendment_landing(
         opening_data, order="apply amendment; return to caller", *, commit=True,
-        progress_runner=run_progress,
+        progress_runner=run_progress, seed_context=True, spec_relative=None,
+        lot="lot-1",
 ):
-    seed_amendment_context()
+    if seed_context:
+        seed_amendment_context()
     if not any(entry.get("kind") == "amendment.opened" for entry in journal_lines()):
         opened = progress_runner(
             "note", "amendment.opened", "--data", json.dumps(opening_data), "--text", order,
@@ -2350,7 +2370,7 @@ def seed_clean_amendment_landing(
     report = reach_report(sources=sources)
     write_report(f"reports/amendment/{number}/sweep-1.md", report)
     session = f"clean-amendment-{number}-reach"
-    configure_reach_session(session, 1)
+    configure_reach_session(session, 1, lot=lot)
     append_live_reach_session(1, session)
     preflight = progress_runner("amendment-sweep-check", "1")
     check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
@@ -2369,7 +2389,9 @@ def seed_clean_amendment_landing(
         "note", "fixer.returned", "--data", '{"applied":1,"declined":0}',
     )
     check(returned.returncode == 0, returned.stdout + returned.stderr)
-    relative = next(entry["text"] for entry in journal_lines() if entry.get("kind") == "spec.written")
+    relative = spec_relative or next(
+        entry["text"] for entry in journal_lines() if entry.get("kind") == "spec.written"
+    )
     write_project(relative, spec_document(status="amended"))
     started = progress_runner("subagent-started", "consolidation", "--round", "1")
     check(started.returncode == 0, started.stdout + started.stderr)
@@ -2396,8 +2418,9 @@ def seed_clean_amendment_landing(
                 f"docs/plans/{os.path.basename(WORKSPACE)}-amendment-{number}.md"
             ),
         }
+    mark = lot if opening["data"]["origin"] == "construction" else "-"
     committed = subprocess.run(
-        [script, str(number), relative, "docs: land amendment", "-"], cwd=REPO,
+        [script, str(number), relative, "docs: land amendment", mark], cwd=REPO,
         capture_output=True, text=True, env=ENV, timeout=120,
     )
     check(committed.returncode == 0, committed.stdout + committed.stderr)
@@ -25421,12 +25444,17 @@ def seed_committed_correction_amendment(
         token, *, task_count=2, finding_count=1, pending_obligation=False,
         accepted_task=False, source_mandates=("unlooked",), commit=True,
         progress_runner=None, accepted_task_spec_change=False,
+        construction_only=False,
 ):
     if progress_runner is None:
         progress_runner = in_process_progress_runner(
             retain_projection_cache=True,
         ) if pending_obligation else run_progress
-    spec_relative = seed_spec()
+    if construction_only:
+        spec_relative = CONSTRUCTION_ONLY_SPEC
+        write_project(spec_relative, spec_document())
+    else:
+        spec_relative = seed_spec()
     pending = None
     task_one = None
     if accepted_task:
@@ -25509,6 +25537,8 @@ def seed_committed_correction_amendment(
     opening_index = len(journal_lines()) - 1
     prepared = seed_clean_amendment_landing(
         {}, order, commit=commit, progress_runner=progress_runner,
+        seed_context=not construction_only,
+        spec_relative=spec_relative if construction_only else None,
     )
     if not commit:
         return {
@@ -27888,10 +27918,13 @@ def correction_amendment_rebase_consumes_exact_immutable_return():
 
 
 @test
-def retained_authority_rewind_escalates_without_moving_accepted_refs():
+def retained_authority_rewind_escalates_without_moving_accepted_refs(
+        *, construction_only=False, return_plan_seed=False,
+):
     state = seed_committed_correction_amendment(
         "retained-authority-escalation", accepted_task=True,
         accepted_task_spec_change=True,
+        construction_only=construction_only,
     )
     progress = load_common_module("progress")
     previous_state = progress.current_correction_contract_state(
@@ -28138,7 +28171,11 @@ def retained_authority_rewind_escalates_without_moving_accepted_refs():
         "source": escalation_proof,
         "items": [{
             "id": item["id"],
-            "sources": sorted(set(item["origins"] + [item["blocker"]["sha256"]])),
+            "sources": sorted(set(item["origins"] + [
+                progress.correction_escalation_blocker_identity(
+                    item, "the bounded structural escalation item",
+                ),
+            ])),
             "carries": carries_by_item[item["id"]],
         } for item in escalation_data["items"]],
         "retry_transition": allocation_transition,
@@ -28183,6 +28220,19 @@ def retained_authority_rewind_escalates_without_moving_accepted_refs():
         "[written at C3.1 - see below]\n"
     )
     write_report("plans/lot-1.1-plan.md", plan_text)
+    if return_plan_seed:
+        return {
+            "progress_runner": progress_runner,
+            "expected_set": expected_set,
+            "source": {
+                "allocation_proof": journal_proof(allocation_index),
+                "opening_index": sublot_opening_index,
+                "opening_proof": journal_proof(sublot_opening_index),
+                "terminal_data": escalation_data,
+            },
+            "spec_relative": state["spec_relative"],
+            "plan_text": plan_text,
+        }
     plan_relative = "docs/plans/test-run-lot-1.1-plan.md"
     write_project(plan_relative, plan_text)
     subprocess.run(
@@ -30858,6 +30908,777 @@ def correction_escalation_plan_covers_every_terminal_item_without_obligations():
         }],
         mixed_account,
     )
+
+
+@test
+def correction_escalation_amendment_plan_composes_one_exact_publication_account():
+    progress = load_common_module("progress")
+    correction_preflight = {
+        "schema": 1,
+        "origin": "correction-escalation-plan",
+        "tasks": 1,
+        "source": "1:" + "1" * 64,
+        "opening": "2:" + "2" * 64,
+        "plan": "docs/plans/test-run-lot-1.1-plan.md",
+        "plan_sha256": "3" * 64,
+        "map_predecessor": {
+            "publication": "3:" + "4" * 64,
+            "transition_id": "5" * 64,
+            "c2": {
+                "opening": "4:" + "6" * 64,
+                "terminal": "5:" + "7" * 64,
+            },
+            "rewind": None,
+        },
+        "final_checker_consumer_map": [],
+        "retry_transition": {
+            "schema": 1,
+            "input_sha256": "8" * 64,
+            "transition_id": "9" * 64,
+            "additions": [],
+            "dispositions": [],
+            "output_sha256": "a" * 64,
+        },
+    }
+    correction_publication = {
+        **correction_preflight,
+        "schema": 2,
+        "origin": "correction-round",
+        "op": "combined-plan-publication",
+        "commit": "b" * 40,
+        "preflight_sha256": progress.canonical_digest(correction_preflight),
+    }
+    amendment_preflight = {
+        "failure": "6:" + "c" * 64,
+        "previous_publication": "3:" + "4" * 64,
+        "c2": "7:" + "d" * 64,
+    }
+    amendment_supersession = {
+        **amendment_preflight,
+        "root_replacement_task_sha256": "e" * 64,
+        "task": 1,
+        "task_state_sha256": "f" * 64,
+    }
+    amendment_publication = {
+        "schema": 2,
+        "tasks": 1,
+        "op": "combined-plan-publication",
+        "commit": "b" * 40,
+        "plan_sha256": "3" * 64,
+        "amendment_supersession": amendment_supersession,
+    }
+    originals = {
+        name: getattr(progress, name)
+        for name in (
+            "active_amendment_plan_supersession",
+            "amendment_plan_publication_account",
+            "correction_escalation_plan_written_account",
+            "correction_escalation_sublot_account",
+            "outstanding_correction_escalation_sublot_set",
+        )
+    }
+    active = [False]
+
+    def correction_account(*_args, **_kwargs):
+        return correction_preflight if _args[5] is None else correction_publication
+
+    def amendment_account(*_args, commit=None, **_kwargs):
+        return amendment_preflight if commit is None else amendment_publication
+
+    progress.active_amendment_plan_supersession = (
+        lambda *_args, **_kwargs: (0, {}, {}) if active[0] else None
+    )
+    progress.amendment_plan_publication_account = amendment_account
+    progress.correction_escalation_plan_written_account = correction_account
+    progress.correction_escalation_sublot_account = (
+        lambda *_args, **_kwargs: {"source": "exact"}
+    )
+    progress.outstanding_correction_escalation_sublot_set = (
+        lambda *_args, **_kwargs: {"schema": 1, "entries": []}
+    )
+    try:
+        pure = progress.correction_escalation_plan_publication_account(
+            [], 0, "lot-1.1", 1, "combined-plan-publication", "b" * 40,
+            {"schema": 1, "entries": []}, {"source": "exact"},
+            "the pure Correction publication",
+        )
+        check(pure == correction_publication, pure)
+
+        active[0] = True
+        preflight = progress.correction_escalation_plan_publication_account(
+            [], 0, "lot-1.1", 1, "preflight", None,
+            {"schema": 1, "entries": []}, {"source": "exact"},
+            "the combined publication preflight", live=True,
+        )
+        check(preflight == {
+            **correction_preflight,
+            "amendment_supersession": amendment_preflight,
+        }, preflight)
+        combined = progress.correction_escalation_plan_publication_account(
+            [], 0, "lot-1.1", 1, "combined-plan-publication", "b" * 40,
+            {"schema": 1, "entries": []}, {"source": "exact"},
+            "the combined publication",
+        )
+        check(combined == {
+            **correction_publication,
+            "preflight_sha256": progress.canonical_digest(preflight),
+            "amendment_supersession": amendment_supersession,
+        }, combined)
+        entry = {
+            "event": "note",
+            "kind": "plan.written",
+            "mode": "construction",
+            "job": "controller",
+            "lot": "lot-1.1",
+            "data": combined,
+        }
+        progress.validate_correction_escalation_plan_written_entry(
+            [entry], 0, entry,
+            current={"schema": 1, "entries": []}, source={"source": "exact"},
+        )
+        for label, changed in (
+            ("Correction-only", correction_publication),
+            ("AMENDMENT-only", amendment_publication),
+            ("changed AMENDMENT", {
+                **combined,
+                "amendment_supersession": {
+                    **amendment_supersession,
+                    "failure": "8:" + "0" * 64,
+                },
+            }),
+        ):
+            changed_entry = {**entry, "data": changed}
+            try:
+                progress.validate_correction_escalation_plan_written_entry(
+                    [changed_entry], 0, changed_entry,
+                    current={"schema": 1, "entries": []}, source={"source": "exact"},
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(f"the {label} publication half was accepted")
+    finally:
+        for name, value in originals.items():
+            setattr(progress, name, value)
+
+
+def seed_bounded_correction_escalation_successor(token):
+    """Open one real structural successor without a full retained-rewind workflow."""
+    progress_runner = in_process_progress_runner(retain_projection_cache=True)
+    spec_relative = f"docs/plans/{token}-design.md"
+    write_project(spec_relative, spec_document())
+    state = seed_correction_task_attempt(
+        token, task_count=1, spec_relative=spec_relative,
+        progress_runner=progress_runner,
+    )
+    progress = progress_runner.progress_module
+    provider = correction_implementer_session(token, 1)
+    restore_correction_implementer_caller(provider, 1)
+    opening = open_design_round(1, progress_runner=progress_runner)
+    finish_design_round(1, opening, findings=[{
+        "id": 1,
+        "where": "frozen task contract",
+        "what": "The current task cannot own the required structural correction.",
+        "why": "One structural successor must own the remaining product boundary.",
+        "impact": "IMPORTANT",
+        "previous": [],
+    }], progress_runner=progress_runner)
+    blocked = progress_runner(
+        "note", "design.review.blocked", "--round", "1",
+        "--data", '{"check":"design"}',
+    )
+    check(blocked.returncode == 0, blocked.stdout + blocked.stderr)
+    admitted = progress_runner(
+        "construction-failure-check", "lot-1", "1", "1", "C3.9d",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    fail_correction_attempt_in_process(1, 1, "C3.9d", progress_runner)
+    entries = journal_lines()
+    blocker_index = len(entries) - 1
+    blocker_entry = entries[blocker_index]
+    check(blocker_entry.get("kind") == "attempt.failed", blocker_entry)
+    blocker = journal_proof(blocker_index)
+    progress_runner.project(
+        lambda _progress: progress.validate_attempt_failed_entry(
+            entries, blocker_index, blocker_entry,
+        )
+    )
+    restore_correction_controller_with_implementer(provider, 1)
+    retired = progress_runner(
+        "session-retired", provider, "superseded", "--archive", "--hide",
+    )
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+
+    contract_state = progress_runner.project(
+        lambda _progress: progress.current_correction_contract_state(
+            journal_lines(), len(journal_lines()), "lot-1", 1,
+            "the bounded structural escalation fixture",
+        )
+    )
+    current = progress_runner.project(
+        lambda _progress: progress.outstanding_final_checker_set(
+            journal_lines(), len(journal_lines()), "lot-1", 1,
+            "the bounded structural escalation fixture",
+        )
+    )
+    check(current == {"schema": 1, "entries": []}, current)
+    head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    required_outcome = "Publish one bounded structural successor."
+    artifact_relative = "corrections/lot-1/round-1-escalation.md"
+    write_report(
+        artifact_relative,
+        "# Bounded subject — lot-1 correction round 1 escalation\n\n"
+        "Schema: 1\n"
+        "Built unit: lot-1\n"
+        "Correction round: 1\n"
+        f"Correction authority: {contract_state['proof']}\n"
+        f"Current commit: {head}\n"
+        f"Structural blocker: {blocker}\n\n"
+        "## Accepted contributions\n\n"
+        "## Unresolved account\n\n"
+        f"### F1 - {required_outcome}\n"
+        "Origins: correction/c1/F1\n"
+        "Sources: unlooked/F1\n"
+        "Accepted contributions: -\n"
+        f"Blocker: {blocker}\n"
+        f"Required outcome: {required_outcome}\n\n"
+        "## Required sub-lot outcome\n"
+        f"{required_outcome}\n\n"
+        "## Final-checker consumer requirements\n",
+    )
+    escalated = run_correction_escalation_in_process(blocker, progress_runner)
+    check("CORRECTION ROUND ESCALATED" in escalated, escalated)
+    terminal_entries = journal_lines()
+    terminal_index = len(terminal_entries) - 1
+    terminal = terminal_entries[terminal_index]
+    check(
+        terminal.get("kind") == "correction.round.escalated"
+        and terminal["data"]["producer"] == "ordinary",
+        terminal,
+    )
+    progress_runner.project(
+        lambda _progress: progress.validate_correction_round_escalated_entry(
+            terminal_entries, terminal_index, terminal,
+        )
+    )
+
+    obligations = load_common_module("final_checker_obligations")
+    escalation_proof = journal_proof(terminal_index)
+    escalation_data = terminal["data"]
+    carried = progress_runner.project(
+        lambda _progress: progress.outstanding_final_checker_set(
+            terminal_entries, len(terminal_entries), "lot-1", 1,
+            "the bounded structural escalation allocation",
+        )
+    )
+    dispositions = []
+    carries_by_item = {item["id"]: [] for item in escalation_data["items"]}
+    for member in carried["entries"]:
+        requirement = member["assignment"]["consumer_requirement"]
+        obligation_id = member["source"]["obligation_id"]
+        carries_by_item[requirement["escalation_item"]].append(obligation_id)
+        dispositions.append({
+            "obligation_id": obligation_id,
+            "outcome": "carried",
+            "assignment": {
+                "unit": {
+                    "kind": "sublot-plan", "lot": "lot-1.1",
+                    "source": escalation_proof,
+                },
+                "task": None,
+                "phase": "publish-consumer-map",
+                "owner": "sublot-plan",
+                "consumer_requirement": requirement,
+            },
+            "evidence": None,
+        })
+    allocation_transition, expected_set = obligations.materialize_transition(
+        carried, additions=[], dispositions=dispositions,
+        transfer_kind="sublot-allocation",
+    )
+    allocation_data = {
+        "schema": 2,
+        "origin": "correction-round",
+        "built": "lot-1",
+        "source": escalation_proof,
+        "items": [{
+            "id": item["id"],
+            "sources": sorted(set(item["origins"] + [
+                progress.correction_escalation_blocker_identity(
+                    item, "the bounded IR-005 structural escalation item",
+                ),
+            ])),
+            "carries": carries_by_item[item["id"]],
+        } for item in escalation_data["items"]],
+        "retry_transition": allocation_transition,
+    }
+    allocated = progress_runner(
+        "note", "sublot.allocated", "--text", "lot-1.1",
+        "--data", json.dumps(allocation_data),
+    )
+    check(allocated.returncode == 0, allocated.stdout + allocated.stderr)
+    allocated_entries = journal_lines()
+    allocation_index = len(allocated_entries) - 1
+    progress_runner.project(
+        lambda _progress: progress.validate_sublot_allocation(
+            allocated_entries[:allocation_index],
+            allocated_entries[allocation_index]["data"],
+            allocated_entries[allocation_index]["text"],
+            "the bounded structural escalation allocation",
+        )
+    )
+    projected = progress_runner.project(
+        lambda _progress: progress.outstanding_final_checker_set(
+            allocated_entries, len(allocated_entries), "lot-1", 1,
+            "the bounded structural escalation allocation",
+        )
+    )
+    check(projected == expected_set, projected)
+    opened = progress_runner("note", "sublot.opened", "--text", "lot-1.1")
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    sublot_opening_index = len(journal_lines()) - 1
+    escalation_artifact = progress.correction_escalation_artifact_identity(
+        escalation_data, "the bounded IR-005 structural escalation",
+    )
+    plan_text = (
+        "# Bounded structural successor plan\n\n"
+        f"Covers: {escalation_artifact}\n\n"
+        "## Task 1 - Preserve bounded authority\n\n"
+        "Covers: F1\n"
+        "Depends on: -\n"
+        "Consumes final-checker obligations: -\n"
+        "Achieves:\n"
+        "  - The retained authority has one bounded structural successor.\n"
+        "Files: src/structural.py and its focused tests\n"
+        "To verify: The retained authority remains complete.\n\n"
+        "### Design\n"
+        "[written at C3.1 - see below]\n"
+    )
+    write_report("plans/lot-1.1-plan.md", plan_text)
+    _origin, spec_source = progress_runner.project(
+        lambda _progress: progress.construction_lot_origin_and_spec(
+            journal_lines(), len(journal_lines()), "lot-1.1",
+            "the bounded IR-005 structural successor",
+        )
+    )
+    return {
+        "progress_runner": progress_runner,
+        "expected_set": expected_set,
+        "source": {
+            "allocation_proof": journal_proof(allocation_index),
+            "opening_index": sublot_opening_index,
+            "opening_proof": journal_proof(sublot_opening_index),
+            "terminal_data": escalation_data,
+        },
+        "spec_relative": spec_source["spec"],
+        "plan_text": plan_text,
+    }
+
+
+@test
+def correction_escalation_successor_amendment_publishes_one_composed_plan():
+    seed = seed_bounded_correction_escalation_successor(
+        "ir005-composed-structural-successor",
+    )
+    check(not any(entry.get("kind") == "run.started" for entry in journal_lines()),
+          "the bounded structural successor already has a Construction run owner")
+    append_note(
+        "run.started", {"cap": 3}, "IR-005 composed structural successor",
+        mode="construction", lot="lot-1", job="controller",
+    )
+    check(not any(entry.get("kind") == "spec.written" for entry in journal_lines()),
+          "the bounded structural successor unexpectedly gained root SPEC readiness")
+    plan_script = os.path.join(
+        WORKSPACE, "prompts", "construction", "plan-commit.sh",
+    )
+
+    def configure_controller(*, mode="construction", provider=None):
+        controller = {
+            "schema": 1, "job": "controller", "mode": mode,
+            "feature": "demo-feature", "lot": "lot-1.1", "status": "working",
+        }
+        config = default_config()
+        config["whoami"]["session"]["annotations"]["bwr"] = controller
+        config["sessions"][CALLER]["annotations"]["bwr"] = controller
+        if provider is not None:
+            implementer = {
+                "schema": 1, "job": "implementer", "mode": "construction",
+                "feature": "demo-feature", "lot": "lot-1.1", "task": 1,
+                "attempt": 1, "status": "working",
+            }
+            config["sessions"][provider] = {
+                "id": provider, "annotations": {"bwr": implementer},
+            }
+        set_config(config)
+
+    configure_controller()
+    plan_relative = "docs/plans/test-run-lot-1.1-plan.md"
+    write_project(plan_relative, seed["plan_text"])
+    subprocess.run(
+        ["git", "-C", REPO, "add", plan_relative], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", REPO, "commit", "-qm", "seed structural successor plan"],
+        check=True,
+    )
+    first_commit = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    subprocess.run([
+        "git", "-C", REPO, "update-ref",
+        "refs/bwr/test-run/lot-1.1/task-0", first_commit,
+    ], check=True)
+    progress = seed["progress_runner"].progress_module
+    first_account = seed["progress_runner"].project(
+        lambda _progress: progress.correction_escalation_plan_publication_account(
+            journal_lines(), len(journal_lines()), "lot-1.1", 1,
+            "ir005-initial-plan", first_commit, seed["expected_set"],
+            seed["source"], "the initial structural successor plan",
+        )
+    )
+    first_publication_index = len(journal_lines())
+    append_note(
+        "plan.written", first_account, mode="construction", lot="lot-1.1",
+        job="controller",
+    )
+    first_publication = journal_lines()[first_publication_index]
+    check(
+        first_publication.get("kind") == "plan.written"
+        and first_publication["data"].get("origin") == "correction-round"
+        and "amendment_supersession" not in first_publication["data"],
+        first_publication,
+    )
+    seed["progress_runner"].project(
+        lambda _progress: progress.validate_plan_written_entry(
+            journal_lines(), first_publication_index, first_publication,
+        )
+    )
+    first_parent = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", f"{first_commit}^"], text=True,
+    ).strip()
+    configure_controller()
+    first_c2_opened = seed["progress_runner"](
+        "subagent-started", "completeness",
+    )
+    check(first_c2_opened.returncode == 0,
+          first_c2_opened.stdout + first_c2_opened.stderr)
+    first_c2_event = journal_lines()[-1]
+    check(
+        first_c2_event.get("event") == "subagent-started"
+        and first_c2_event.get("kind") == "completeness",
+        first_c2_event,
+    )
+    first_c2_account = first_c2_event["data"]
+    first_c2_totals = first_c2_account["semantic_totals"]
+    first_c2_ended = seed["progress_runner"](
+        "subagent-ended", "completeness",
+        "--data", json.dumps({
+            "decisions": (
+                f"{first_c2_totals['decisions']}/"
+                f"{first_c2_totals['decisions']}"
+            ),
+            "tasks": f"{first_c2_totals['tasks']}/{first_c2_totals['tasks']}",
+            "deps": f"{first_c2_totals['deps']}/{first_c2_totals['deps']}",
+            "constraints": "ok",
+            "parent": "ok",
+        }),
+    )
+    check(first_c2_ended.returncode == 0,
+          first_c2_ended.stdout + first_c2_ended.stderr)
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    seed_baseline_gate(
+        f"plan/lot-1.1/{first_commit}", first_commit, first_parent,
+    )
+
+    construction = load_construction_module("construction_review")
+    manifest = progress.plan_task_manifest_account(
+        pathlib.Path(WORKSPACE, "plans", "lot-1.1-plan.md").read_bytes(),
+        "the bounded structural successor attempt",
+    )
+    task_state = construction.plan_state("lot-1.1", 1)
+    attempt_base = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    subprocess.run([
+        "git", "-C", REPO, "update-ref",
+        "refs/bwr/test-run/lot-1.1/attempt-base", attempt_base,
+    ], check=True)
+    pathlib.Path(WORKSPACE, "attempt-in-flight").write_text(
+        "lot-1.1 1 1\n"
+        f"plan {manifest['manifest_sha']} {manifest['tasks']} "
+        f"ownership {task_state['plan_ownership_sha256']} "
+        f"contract {task_state['contract_sha256']} retry -\n",
+        encoding="utf-8",
+    )
+    provider = "combined-plan-implementer"
+    implementer = {
+        "schema": 1, "job": "implementer", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1.1", "task": 1,
+        "attempt": 1, "status": "working",
+    }
+    config = default_config()
+    config["whoami"]["session"]["annotations"]["bwr"] = implementer
+    config["sessions"][CALLER]["annotations"]["bwr"] = implementer
+    config["sessions"][provider] = {
+        "id": provider, "annotations": {"bwr": implementer},
+    }
+    set_config(config)
+    physical = seed["progress_runner"]("session-started", provider)
+    check(physical.returncode == 0, physical.stdout + physical.stderr)
+    append_checker_verdict(
+        "design", lot="lot-1.1", task=1, attempt=1, findings=1,
+        finding_where="frozen task contract", runner=seed["progress_runner"],
+    )
+    design_verdict_index = len(journal_lines()) - 1
+    seed["progress_runner"].project(
+        lambda _progress: progress.validate_construction_verdict_entry(
+            journal_lines(), design_verdict_index,
+            journal_lines()[design_verdict_index],
+        )
+    )
+    block_design_contract(1, runner=seed["progress_runner"])
+
+    configure_controller(provider=provider)
+    ruling_path = seed_direct_ruling(ruling="R1", route="amendment")
+    order = "apply R1 and return to lot-1.1 task 1 attempt 1"
+    opened = seed["progress_runner"](
+        "note", "amendment.opened",
+        "--data", json.dumps({
+            "amendment": 1,
+            "origin": "construction",
+            "ruling": "R1",
+            "authority_kind": "ruling.ready",
+            "authority_ref": "R1",
+            "authority_sha256": file_sha256(ruling_path),
+        }),
+        "--text", order,
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    amendment_opening = journal_lines()[-1]
+    check(
+        amendment_opening["data"].get("construction_source", {}).get("lot")
+        == "lot-1.1",
+        amendment_opening,
+    )
+    configure_controller(mode="amendment", provider=provider)
+    amendment_landing = seed_clean_amendment_landing(
+        {}, order, progress_runner=seed["progress_runner"], seed_context=False,
+        spec_relative=seed["spec_relative"], lot="lot-1.1", commit=False,
+    )
+
+    plan_path = os.path.join(WORKSPACE, "plans", "lot-1.1-plan.md")
+    original_plan = open(plan_path, encoding="utf-8").read()
+    amended_plan = original_plan.replace(
+        "The retained authority has one bounded structural successor.",
+        "The retained authority has one amended structural successor.",
+    )
+    check(amended_plan != original_plan, "the fixture did not change its task boundary")
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(amended_plan)
+    configure_controller(provider=provider)
+    admitted = seed["progress_runner"](
+        "construction-failure-check", "lot-1.1", "1", "1", "C3.9b",
+    )
+    check(admitted.returncode == 0, admitted.stdout + admitted.stderr)
+    failure_data = json.loads(admitted.stdout)
+    failed = seed["progress_runner"](
+        "note", "attempt.failed", "--task", "1",
+        "--data", json.dumps(failure_data),
+    )
+    check(failed.returncode == 0, failed.stdout + failed.stderr)
+    failure_index = max(
+        index for index, entry in enumerate(journal_lines())
+        if entry.get("kind") == "attempt.failed" and entry.get("lot") == "lot-1.1"
+    )
+    failure_proof = journal_proof(failure_index)
+    seed["progress_runner"].project(
+        lambda _progress: progress.validate_attempt_failed_entry(
+            journal_lines(), failure_index, journal_lines()[failure_index],
+        )
+    )
+    pathlib.Path(WORKSPACE, "attempt-in-flight").unlink()
+    retired = seed["progress_runner"](
+        "session-retired", provider, "superseded", "--archive", "--hide",
+    )
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+    try:
+        seed["progress_runner"].project(
+            lambda _progress: progress.correction_escalation_completeness_amendment_account(
+                journal_lines(), len(journal_lines()), "lot-1.1",
+                "the pre-commit combined C2",
+            )
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("the combined C2 accepted an uncommitted AMENDMENT")
+    configure_controller(mode="amendment")
+    committed = subprocess.run(
+        [
+            amendment_landing["script"], "1", amendment_landing["spec"],
+            "docs: land bounded structural Amendment", "-",
+        ],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(committed.returncode == 0, committed.stdout + committed.stderr)
+    amendment_terminal_index = len(journal_lines()) - 1
+    amendment_terminal = journal_lines()[-1]
+    check(amendment_terminal.get("kind") == "amendment.committed", amendment_terminal)
+    amendment_commit = amendment_terminal["data"]["sha"]
+    check(re.fullmatch(r"[0-9a-f]{40}", amendment_commit), amendment_commit)
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(original_plan)
+    configure_controller()
+    c2_opened = seed["progress_runner"](
+        "subagent-started", "completeness",
+    )
+    check(c2_opened.returncode == 0, c2_opened.stdout + c2_opened.stderr)
+    c2_opening_index = len(journal_lines()) - 1
+    c2_event = journal_lines()[-1]
+    check(
+        c2_event.get("event") == "subagent-started"
+        and c2_event.get("kind") == "completeness",
+        c2_event,
+    )
+    c2_account = c2_event["data"]
+    check(
+        c2_account["amendment_supersession"]["commit"]
+        == journal_proof(amendment_terminal_index),
+        c2_account,
+    )
+    totals = c2_account["semantic_totals"]
+    c2_ended = seed["progress_runner"](
+        "subagent-ended", "completeness",
+        "--data", json.dumps({
+            "decisions": f"{totals['decisions']}/{totals['decisions']}",
+            "tasks": f"{max(0, totals['tasks'] - 1)}/{totals['tasks']}",
+            "deps": f"{totals['deps']}/{totals['deps']}",
+            "constraints": "ok",
+            "parent": "ok",
+        }),
+    )
+    check(c2_ended.returncode == 0, c2_ended.stdout + c2_ended.stderr)
+    c2_terminal_index = len(journal_lines()) - 1
+    with open(plan_path, "w", encoding="utf-8") as target:
+        target.write(amended_plan)
+
+    preflight = seed["progress_runner"](
+        "construction-plan-publication-check", "lot-1.1", "1",
+    )
+    check(preflight.returncode == 0, preflight.stdout + preflight.stderr)
+
+    progress_path = pathlib.Path(SCRIPT)
+    real_progress = progress_path.with_name("progress-ir005-real.py")
+    progress_mode = progress_path.stat().st_mode
+    progress_path.rename(real_progress)
+    progress_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == "
+        "'construction-plan-publication-append':\n"
+        "    print('injected append interruption', file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        f"os.execv(sys.executable, [sys.executable, {str(real_progress)!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    progress_path.chmod(progress_mode)
+    try:
+        interrupted = subprocess.run(
+            [plan_script, "lot-1.1", "test: publish amended structural successor"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+    finally:
+        progress_path.unlink()
+        real_progress.rename(progress_path)
+        progress_path.chmod(progress_mode)
+    marker = pathlib.Path(WORKSPACE) / "plan-commit-in-progress"
+    check(interrupted.returncode != 0 and marker.is_file(),
+          interrupted.stdout + interrupted.stderr)
+    committed_head = subprocess.check_output(
+        ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+    ).strip()
+    terminal_count = len([
+        entry for entry in journal_lines()
+        if entry.get("kind") == "plan.written" and entry.get("lot") == "lot-1.1"
+    ])
+    recovered = subprocess.run(
+        [plan_script, "lot-1.1", "test: publish amended structural successor"],
+        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    check(
+        subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"], text=True,
+        ).strip() == committed_head
+        and not marker.exists(),
+        "the retained plan retry repeated its commit or retained its marker",
+    )
+    entries = journal_lines()
+    check(len([
+        entry for entry in entries
+        if entry.get("kind") == "plan.written" and entry.get("lot") == "lot-1.1"
+    ]) == terminal_count + 1, "the retained retry did not append one terminal")
+    terminal_index = len(entries) - 1
+    terminal = entries[terminal_index]
+    terminal_data = terminal["data"]
+    check(
+        terminal_data["amendment_supersession"]["failure"] == failure_proof
+        and terminal_data["amendment_supersession"]["previous_publication"] is None
+        and terminal_data["map_predecessor"]["publication"]
+        == journal_proof(first_publication_index)
+        and terminal_data["amendment_supersession"]["c2"] is not None
+        and terminal_data["map_predecessor"]["c2"] is not None,
+        terminal_data,
+    )
+    seed["progress_runner"].project(
+        lambda progress: progress.validate_plan_written_entry(
+            entries, terminal_index, terminal,
+        )
+    )
+    for label, changed_data in (
+        ("Correction-only", {
+            key: value for key, value in terminal_data.items()
+            if key != "amendment_supersession"
+        }),
+        ("changed AMENDMENT", {
+            **terminal_data,
+            "amendment_supersession": {
+                **terminal_data["amendment_supersession"],
+                "failure": journal_proof(first_publication_index),
+            },
+        }),
+    ):
+        changed = json.loads(json.dumps(entries))
+        changed[terminal_index]["data"] = changed_data
+        try:
+            seed["progress_runner"].project(
+                lambda progress: progress.validate_plan_written_entry(
+                    changed, terminal_index, changed[terminal_index],
+                )
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"the historical {label} plan half was accepted")
+    changed = json.loads(json.dumps(entries))
+    foreign_commit = journal_proof(first_publication_index)
+    for c2_index in (c2_opening_index, c2_terminal_index):
+        changed[c2_index]["data"]["amendment_supersession"]["commit"] = foreign_commit
+    try:
+        seed["progress_runner"].project(
+            lambda progress: progress.validate_plan_written_entry(
+                changed, terminal_index, changed[terminal_index],
+            )
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError(
+            "the synchronized historical C2 AMENDMENT commit was accepted"
+        )
 
 
 @test

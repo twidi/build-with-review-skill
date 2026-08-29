@@ -2008,7 +2008,7 @@ def committed_plan_spec_account(commit, plan_relative, subject, *, fallback_spec
 
 
 def validate_inherited_spec_transition(
-        entries, inherited, source, pass_index, subject,
+        entries, inherited, source, transition_index, subject, *, source_built=None,
 ):
     """Authenticate a changed inherited Spec through the latest exact Amendment."""
     if source["spec_sha256"] == inherited["spec_sha256"]:
@@ -2016,14 +2016,15 @@ def validate_inherited_spec_transition(
     inherited_pass_index, _ = journal_entry_from_proof(
         entries, inherited.get("pass"), subject,
     )
-    source_built = note_data(entries[pass_index]).get("built")
+    if source_built is None:
+        source_built = note_data(entries[transition_index]).get("built")
     openings = {
         note_data(entry).get("amendment"): (index, entry)
-        for index, entry in amendment_openings(entries, pass_index)
+        for index, entry in amendment_openings(entries, transition_index)
     }
     commits = []
     for index, entry in enumerate(
-            entries[inherited_pass_index + 1:pass_index], inherited_pass_index + 1,
+            entries[inherited_pass_index + 1:transition_index], inherited_pass_index + 1,
     ):
         data = note_data(entry)
         opening = openings.get(data.get("amendment"))
@@ -2032,6 +2033,8 @@ def validate_inherited_spec_transition(
         opening_data = note_data(opening[1])
         opening_lot = opening_data.get("built") \
             if opening_data.get("origin") == "product-review" \
+            else opening_data.get("built") \
+            if opening_data.get("origin") == "correction-round" \
             else (opening_data.get("construction_source") or {}).get("lot")
         if opening_lot == source_built:
             commits.append((index, entry))
@@ -2058,7 +2061,40 @@ def construction_lot_origin_and_spec(entries, before, lot, subject):
     origin, close = construction_lot_origin_account(entries, before, lot, subject)
     if origin == "root":
         return origin, None
-    pass_index, pass_opening, _, _, _, built = close
+    escalation = None
+    if isinstance(close, dict) and close == {
+        "schema": 2,
+        "origin": "correction-round",
+        "allocation": close.get("allocation"),
+    }:
+        escalation = correction_escalation_sublot_account(
+            entries, before, lot, subject,
+        )
+        terminal_data = escalation["terminal_data"]
+        correction_openings = [
+            (index, entry) for index, entry in enumerate(
+                entries[:escalation["source_index"]]
+            )
+            if entry.get("kind") == "correction.round.opened"
+            and note_data(entry).get("built") == terminal_data.get("built")
+            and note_data(entry).get("round") == terminal_data.get("round")
+        ]
+        if len(correction_openings) != 1:
+            fail(f"{subject} has no one exact Correction Round source opening")
+        correction_opening_index, correction_opening = correction_openings[0]
+        correction_opening_data = normalize_correction_round_opening(
+            entries[:correction_opening_index], note_data(correction_opening),
+            f"{subject}'s Correction Round source opening", historical=True,
+        )
+        source_close = current_pass_close(
+            entries[:correction_opening_index],
+            f"{subject}'s Correction Round source pass", historical=True,
+        )
+        if correction_opening_data["pass_close"] != journal_line_proof(source_close[2]):
+            fail(f"{subject}'s Correction Round source changes its Product pass close")
+        pass_index, pass_opening, _, _, _, built = source_close
+    else:
+        pass_index, pass_opening, _, _, _, built = close
     source_commit = note_data(pass_opening).get("commit")
     source_plan = f"docs/plans/{os.path.basename(WORKSPACE)}-{built}-plan.md"
     inherited_spec = None
@@ -2070,6 +2106,16 @@ def construction_lot_origin_and_spec(entries, before, lot, subject):
         source_commit, source_plan, subject,
         fallback_spec=inherited_spec["spec"] if inherited_spec is not None else None,
     )
+    if escalation is not None:
+        transitioned, _ = committed_plan_spec_account(
+            escalation["terminal_data"]["commit"], source_plan, subject,
+            fallback_spec=source["spec"],
+        )
+        validate_inherited_spec_transition(
+            entries, source, transitioned, escalation["source_index"], subject,
+            source_built=built,
+        )
+        source = transitioned
     if used_fallback:
         validate_inherited_spec_transition(
             entries, inherited_spec, source, pass_index, subject,
@@ -4282,7 +4328,7 @@ def construction_escalation_session_start_identity(
     if plan_index >= index:
         fail(f"{subject}'s escalation plan does not precede the implementer start")
     plan_account = correction_escalation_completeness_plan_account(
-        entries, plan_index, context["lot"], subject,
+        entries, plan_index, context["lot"], subject, before=index,
     )
     if plan_account["commit"] != baseline.get("commit"):
         fail(f"{subject}'s escalation plan and baseline use different commits")
@@ -6804,6 +6850,22 @@ def active_amendment_plan_supersession(entries, before, lot, subject):
     return candidates[0]
 
 
+def amendment_supersession_commit(
+        entries, failure_index, before, supersession, subject,
+):
+    amendment = supersession.get("amendment") \
+        if isinstance(supersession, dict) else None
+    commits = [(index, entry) for index, entry in enumerate(
+        entries[failure_index + 1:before], failure_index + 1,
+    ) if entry.get("kind") == "amendment.committed"
+        and note_data(entry).get("amendment") == amendment]
+    if len(commits) != 1:
+        fail(f"{subject} has no one exact prior committed AMENDMENT")
+    commit_index, commit = commits[0]
+    validate_amendment_commit_entry(entries, commit_index, commit)
+    return commit_index, commit
+
+
 def normalized_committed_plan_state(lot, task, commit, subject):
     result = subprocess.run(
         [sys.executable, CONSTRUCTION_REVIEW, "committed-plan-state",
@@ -7023,6 +7085,7 @@ def deferred_amendment_c2_account(entries, before, lot, subject, *, recorded=Non
 
 def amendment_plan_publication_account(
         entries, before, lot, tasks, operation, subject, *, commit=None, live=False,
+        correction_escalation=False,
 ):
     if not isinstance(tasks, int) or isinstance(tasks, bool) or tasks < 1 \
             or not isinstance(operation, str) or not operation:
@@ -7084,25 +7147,53 @@ def amendment_plan_publication_account(
         root_digest = supersession["replacement_task_sha256"]
     previous_publication = journal_line_proof(prior[-1][0]) if prior else None
     c2_proof = None
+    correction_c2 = None
+    if correction_escalation:
+        if prior:
+            c2_after = prior[-1][0]
+        else:
+            base_plans = [(index, entry) for index, entry in enumerate(
+                entries[:failure_index],
+            ) if entry.get("kind") == "plan.written" and entry.get("lot") == lot
+                and note_data(entry).get("schema") == 2
+                and note_data(entry).get("origin") == "correction-round"]
+            if not base_plans:
+                fail(f"{subject} has no Correction escalation plan before its AMENDMENT")
+            c2_after = base_plans[-1][0]
+        correction_c2 = correction_escalation_amendment_c2_bracket(
+            entries, c2_after, before, lot, failure_proof, subject,
+            require_incomplete=True,
+        )
+        c2_proof = correction_c2["terminal"]
     if not prior:
         if deferred:
-            c2_proof = deferred_amendment_c2_result_proof(
-                entries, amendment_commit_index, before, lot, subject,
-                require_incomplete=False,
-            )
-            c2_index, c2_terminal = journal_entry_from_proof(entries, c2_proof, subject)
-            c2_account = note_data(c2_terminal).get("deferred_amendment_plan")
+            if correction_c2 is None:
+                c2_proof = deferred_amendment_c2_result_proof(
+                    entries, amendment_commit_index, before, lot, subject,
+                    require_incomplete=False,
+                )
+                c2_index, c2_terminal = journal_entry_from_proof(
+                    entries, c2_proof, subject,
+                )
+                c2_account = note_data(c2_terminal).get("deferred_amendment_plan")
+                c2_openings = [(index, opening) for index, opening
+                               in open_subagent_brackets(entries[:c2_index])
+                               if opening.get("kind") == "completeness"
+                               and subagent_terminal_matches(opening, c2_terminal)]
+                if len(c2_openings) != 1:
+                    fail(f"{subject} has no one exact deferred C2 physical opening")
+                c2_opening_proof = journal_line_proof(c2_openings[0][0])
+            else:
+                amendment_c2 = correction_c2["plan_account"].get(
+                    CORRECTION_ESCALATION_COMPLETENESS_AMENDMENT_KEY,
+                )
+                c2_account = amendment_c2.get("deferred") \
+                    if isinstance(amendment_c2, dict) else None
+                c2_opening_proof = correction_c2["opening"]
             previous = supersession["previous_task"]
             if not isinstance(c2_account, dict) or c2_account.get("task_state") != previous \
                     or c2_account.get("amendment_commit") != amendment_commit_proof:
                 fail(f"{subject} does not consume C2 on the unchanged prior task generation")
-            c2_openings = [(index, opening) for index, opening in open_subagent_brackets(
-                entries[:c2_index]
-            ) if opening.get("kind") == "completeness"
-                and subagent_terminal_matches(opening, c2_terminal)]
-            if len(c2_openings) != 1:
-                fail(f"{subject} has no one exact deferred C2 physical opening")
-            c2_opening_proof = journal_line_proof(c2_openings[0][0])
             if state["contract_sha256"] == previous["contract_sha256"] \
                     or state["plan_ownership_sha256"] == previous["plan_ownership_sha256"] \
                     or state["design_sha256"] != previous["design_sha256"] \
@@ -7111,9 +7202,10 @@ def amendment_plan_publication_account(
         elif state != replacement:
             fail(f"{subject} changes the AMENDMENT replacement before its first publication")
     else:
-        c2_proof = incomplete_completeness_proof(
-            entries, prior[-1][0], before, lot, subject,
-        )
+        if correction_c2 is None:
+            c2_proof = incomplete_completeness_proof(
+                entries, prior[-1][0], before, lot, subject,
+            )
         previous = supersession["previous_task"]
         if state["contract_sha256"] == previous["contract_sha256"] \
                 or state["plan_ownership_sha256"] == previous["plan_ownership_sha256"] \
@@ -12086,6 +12178,9 @@ CORRECTION_ESCALATION_PLAN_KEYS = {
     "plan", "plan_sha256", "preflight_sha256", "map_predecessor",
     "final_checker_consumer_map", "retry_transition",
 }
+CORRECTION_ESCALATION_AMENDMENT_PLAN_KEYS = (
+    CORRECTION_ESCALATION_PLAN_KEYS | {"amendment_supersession"}
+)
 
 
 def correction_escalation_artifact_identity(data, subject):
@@ -12116,9 +12211,11 @@ CORRECTION_ESCALATION_COMPLETENESS_AUTHORITY_KEYS = {
 CORRECTION_ESCALATION_COMPLETENESS_PUBLICATION_KEYS = {
     "workspace_path", "committed_path", "task_manifest", "semantic_totals",
 }
+CORRECTION_ESCALATION_COMPLETENESS_AMENDMENT_KEY = "amendment_supersession"
 CORRECTION_ESCALATION_COMPLETENESS_KEYS = (
     CORRECTION_ESCALATION_COMPLETENESS_AUTHORITY_KEYS
     | CORRECTION_ESCALATION_COMPLETENESS_PUBLICATION_KEYS
+    | {CORRECTION_ESCALATION_COMPLETENESS_AMENDMENT_KEY}
 )
 CORRECTION_ESCALATION_C2_RESULT_KEYS = {
     "decisions", "tasks", "deps", "constraints", "parent",
@@ -12192,11 +12289,44 @@ def correction_escalation_completeness_semantics(
     }
 
 
-def correction_escalation_completeness_plan_account(
-        entries, plan_index, lot, subject, *, frozen=None, live=False,
+def correction_escalation_completeness_amendment_account(
+        entries, before, lot, subject,
 ):
+    active = active_amendment_plan_supersession(entries, before, lot, subject)
+    if active is None:
+        return None
+    failure_index, failure, supersession = active
+    validate_attempt_failed_entry(entries, failure_index, failure)
+    commit_index, _commit = amendment_supersession_commit(
+        entries, failure_index, before, supersession, subject,
+    )
+    commit_proof = journal_line_proof(commit_index)
+    deferred = None
+    if supersession.get("phase") == AMENDMENT_DEFERRED_PHASE:
+        deferred = deferred_amendment_c2_account(
+            entries, before, lot, subject,
+        )
+        if deferred is None:
+            fail(f"{subject} has no exact completed deferred AMENDMENT generation")
+        if deferred.get("amendment_commit") != commit_proof:
+            fail(f"{subject} changes its deferred committed AMENDMENT")
+    return {
+        "failure": journal_line_proof(failure_index),
+        "commit": commit_proof,
+        "authority": supersession,
+        "authority_sha256": canonical_digest(supersession),
+        "deferred": deferred,
+    }
+
+
+def correction_escalation_completeness_plan_account(
+        entries, plan_index, lot, subject, *, before=None, frozen=None, live=False,
+):
+    before = len(entries) if before is None else before
     if not isinstance(plan_index, int) or plan_index < 0 or plan_index >= len(entries):
         fail(f"{subject} has no exact current plan publication")
+    if not isinstance(before, int) or before <= plan_index or before > len(entries):
+        fail(f"{subject} has no exact C2 authority prefix")
     entry = entries[plan_index]
     data = note_data(entry)
     transition = data.get("retry_transition")
@@ -12232,6 +12362,11 @@ def correction_escalation_completeness_plan_account(
             entries, plan_index, lot, payload, data, subject,
         ),
     }
+    amendment = correction_escalation_completeness_amendment_account(
+        entries, before, lot, subject,
+    )
+    if amendment is not None:
+        account[CORRECTION_ESCALATION_COMPLETENESS_AMENDMENT_KEY] = amendment
     if live:
         path = real_workspace_file(workspace_relative, f"{subject}'s workspace plan")
         try:
@@ -12262,13 +12397,16 @@ def current_correction_escalation_completeness_account(
     )
     plan_index, _ = plans[-1]
     return correction_escalation_completeness_plan_account(
-        entries, plan_index, lot, subject, live=live,
+        entries, plan_index, lot, subject, before=before, live=live,
     )
 
 
 def correction_escalation_c2_bracket(
         entries, after, before, lot, subject, *, allow_absent=False,
 ):
+    expected_plan_account = correction_escalation_completeness_plan_account(
+        entries, after, lot, subject, before=before,
+    )
     terminals = []
     for index, entry in enumerate(entries[after + 1:before], after + 1):
         if entry.get("event") != "subagent-ended" \
@@ -12280,41 +12418,44 @@ def correction_escalation_c2_bracket(
                 )):
             continue
         terminal_data = note_data(entry)
+        starts = [(start_index, candidate) for start_index, candidate
+                  in open_subagent_brackets(entries[:index])
+                  if start_index > after
+                  and candidate.get("event") == "subagent-started"
+                  and candidate.get("kind") == "completeness"
+                  and candidate.get("lot") == lot
+                  and candidate.get("mode") == "construction"
+                  and candidate.get("job") == "controller"
+                  and all(candidate.get(key) is None for key in (
+                      "correction", "task", "attempt", "round", "mandate",
+                  ))
+                  and subagent_terminal_matches(candidate, entry)]
+        if len(starts) != 1:
+            fail(f"{subject}'s C2 re-cut has no one exact physical checker opening")
+        start_index, start = starts[0]
         plan_account = correction_escalation_completeness_plan_account(
-            entries, after, lot, subject, frozen=terminal_data,
+            entries, after, lot, subject, before=start_index,
+            frozen=terminal_data,
         )
+        if note_data(start) != plan_account:
+            fail(f"{subject}'s C2 opening changes its frozen plan account")
         result = correction_escalation_completeness_terminal_account(
             terminal_data, plan_account, f"{subject}'s C2 terminal",
         )
-        if result["kind"] == "result":
-            terminals.append((index, entry, result, plan_account))
+        if result["kind"] == "result" and plan_account == expected_plan_account:
+            terminals.append((index, entry, result, plan_account, start_index))
     if not terminals and allow_absent:
         return None
     if len(terminals) != 1:
         fail(f"{subject} has no one exact C2 result for its current plan",
              f"found {len(terminals)}")
-    terminal_index, terminal, result, plan_account = terminals[0]
-    data = note_data(terminal)
-    starts = [(index, candidate) for index, candidate in open_subagent_brackets(
-        entries[:terminal_index],
-    ) if index > after and candidate.get("event") == "subagent-started"
-        and candidate.get("kind") == "completeness"
-        and candidate.get("lot") == lot
-        and candidate.get("mode") == "construction"
-        and candidate.get("job") == "controller"
-        and all(candidate.get(key) is None for key in (
-            "correction", "task", "attempt", "round", "mandate",
-        ))
-        and note_data(candidate) == plan_account
-        and subagent_terminal_matches(candidate, terminal)]
-    if len(starts) != 1:
-        fail(f"{subject}'s C2 re-cut has no one exact physical checker opening")
+    terminal_index, terminal, result, plan_account, opening_index = terminals[0]
     correction_escalation_require_quiescent(
-        entries, starts[0][0], lot, f"{subject}'s C2 opening", live=False,
+        entries, opening_index, lot, f"{subject}'s C2 opening", live=False,
     )
     open_subagent_brackets(entries[:terminal_index + 1])
     return {
-        "opening": journal_line_proof(starts[0][0]),
+        "opening": journal_line_proof(opening_index),
         "terminal": journal_line_proof(terminal_index),
         "clean": result["clean"],
         "plan_account": plan_account,
@@ -12334,6 +12475,30 @@ def correction_escalation_incomplete_c2_bracket(
             return None
         fail(f"{subject}'s C2 result does not authorize another plan generation")
     return {key: account[key] for key in ("opening", "terminal")}
+
+
+def correction_escalation_amendment_c2_bracket(
+        entries, after, before, lot, failure_proof, subject, *, require_incomplete,
+):
+    account = correction_escalation_c2_bracket(
+        entries, after, before, lot, subject,
+    )
+    amendment = account["plan_account"].get(
+        CORRECTION_ESCALATION_COMPLETENESS_AMENDMENT_KEY,
+    )
+    if not isinstance(amendment, dict) or set(amendment) != {
+        "failure", "commit", "authority", "authority_sha256", "deferred",
+    } or amendment.get("failure") != failure_proof \
+            or not re.fullmatch(
+                r"[1-9][0-9]*:[0-9a-f]{64}", str(amendment.get("commit")),
+            ) \
+            or amendment.get("authority_sha256") != canonical_digest(
+                amendment.get("authority"),
+            ):
+        fail(f"{subject} has no exact AMENDMENT-bound Correction C2 authority")
+    if require_incomplete and account["clean"]:
+        fail(f"{subject}'s C2 result does not authorize another plan generation")
+    return account
 
 
 def correction_escalation_clean_c2_account(entries, before, lot, subject):
@@ -12429,12 +12594,18 @@ def correction_escalation_attempt_terminal(
         "paused": "cancelled",
         "aborted": "cancelled",
     }.get(terminal["kind"], "failed")
-    if terminal["kind"] == "attempt.failed" and any(
-        isinstance(note_data(terminal).get(review), dict)
-        and "blocked" in note_data(terminal)[review]
-        for review in ("design_review", "code_review")
-    ):
-        retirement_status = "superseded"
+    if terminal["kind"] == "attempt.failed":
+        terminal_data = note_data(terminal)
+        supersession = terminal_data.get("amendment_supersession")
+        failure_source = supersession.get("failure_source") \
+            if isinstance(supersession, dict) else None
+        if any(
+            isinstance(terminal_data.get(review), dict)
+            and "blocked" in terminal_data[review]
+            for review in ("design_review", "code_review")
+        ) or isinstance(failure_source, dict) \
+                and failure_source.get("type") == "controller-blocker":
+            retirement_status = "superseded"
     retirements = [(index, entry) for index, entry in enumerate(
         entries[terminal_index + 1:before], terminal_index + 1,
     ) if entry.get("event") == "session-retired"
@@ -13186,9 +13357,27 @@ def correction_escalation_plan_written_account(
             fail(f"{subject} has both C2 and C3.9d re-cut authority")
         if structural_recut is None and c2_recut is None:
             fail(f"{subject} has no exact C2 or C3.9d re-cut authority")
-    expected_parent = source["terminal_data"]["commit"] if not prior else (
-        structural_recut["result_commit"] if structural_recut is not None
-        else note_data(prior[-1][1]).get("commit")
+    amendment_parent = None
+    active_amendment = active_amendment_plan_supersession(
+        entries, index, lot, subject,
+    )
+    if active_amendment is not None:
+        failure_index, _failure, supersession = active_amendment
+        failure_proof = journal_line_proof(failure_index)
+        combined_prior = [entry for _position, entry in prior
+                          if (note_data(entry).get("amendment_supersession") or {}).get(
+                              "failure"
+                          ) == failure_proof]
+        if not combined_prior:
+            _commit_index, amendment_commit = amendment_supersession_commit(
+                entries, failure_index, index, supersession, subject,
+            )
+            amendment_parent = note_data(amendment_commit).get("sha")
+    expected_parent = amendment_parent or (
+        source["terminal_data"]["commit"] if not prior else (
+            structural_recut["result_commit"] if structural_recut is not None
+            else note_data(prior[-1][1]).get("commit")
+        )
     )
     if commit is None:
         head = subprocess.run(
@@ -13332,6 +13521,71 @@ def correction_escalation_plan_written_account(
     }
 
 
+def correction_escalation_plan_preflight_from_publication(account, subject):
+    if not isinstance(account, dict) or set(account) != CORRECTION_ESCALATION_PLAN_KEYS:
+        fail(f"{subject} has no exact Correction escalation publication account")
+    return {
+        "schema": 1,
+        "origin": "correction-escalation-plan",
+        "tasks": account["tasks"],
+        "source": account["source"],
+        "opening": account["opening"],
+        "plan": account["plan"],
+        "plan_sha256": account["plan_sha256"],
+        "map_predecessor": account["map_predecessor"],
+        "final_checker_consumer_map": account["final_checker_consumer_map"],
+        "retry_transition": account["retry_transition"],
+    }
+
+
+def amendment_plan_preflight_from_publication(account, subject):
+    supersession = account.get("amendment_supersession") \
+        if isinstance(account, dict) else None
+    if not isinstance(supersession, dict) or not {
+        "failure", "previous_publication", "c2",
+    }.issubset(supersession):
+        fail(f"{subject} has no exact AMENDMENT publication account")
+    return {
+        "failure": supersession["failure"],
+        "previous_publication": supersession["previous_publication"],
+        "c2": supersession["c2"],
+    }
+
+
+def correction_escalation_plan_publication_account(
+        entries, index, lot, tasks, operation, commit, current, source, subject,
+        *, live=False,
+):
+    correction = correction_escalation_plan_written_account(
+        entries, index, lot, tasks, operation, commit, current, source, subject,
+        live=live,
+    )
+    if active_amendment_plan_supersession(entries, index, lot, subject) is None:
+        return correction
+    if commit is None:
+        amendment_preflight = amendment_plan_publication_account(
+            entries, index, lot, tasks, "preflight", subject,
+            correction_escalation=True,
+        )
+        return {**correction, "amendment_supersession": amendment_preflight}
+    amendment = amendment_plan_publication_account(
+        entries, index, lot, tasks, operation, subject,
+        commit=commit, live=live, correction_escalation=True,
+    )
+    amendment_preflight = amendment_plan_preflight_from_publication(
+        amendment, subject,
+    )
+    composed_preflight = {
+        **correction_escalation_plan_preflight_from_publication(correction, subject),
+        "amendment_supersession": amendment_preflight,
+    }
+    return {
+        **correction,
+        "preflight_sha256": canonical_digest(composed_preflight),
+        "amendment_supersession": amendment["amendment_supersession"],
+    }
+
+
 def validate_correction_escalation_plan_written_entry(
         entries, index, entry, current=None, source=None,
 ):
@@ -13339,7 +13593,10 @@ def validate_correction_escalation_plan_written_entry(
     lot = entry.get("lot")
     if entry.get("event") != "note" or entry.get("kind") != "plan.written" \
             or entry.get("mode") != "construction" or entry.get("job") != "controller" \
-            or entry.get("correction") is not None or set(data) != CORRECTION_ESCALATION_PLAN_KEYS \
+            or entry.get("correction") is not None or frozenset(data) not in {
+                frozenset(CORRECTION_ESCALATION_PLAN_KEYS),
+                frozenset(CORRECTION_ESCALATION_AMENDMENT_PLAN_KEYS),
+            } \
             or data.get("schema") != 2 or data.get("origin") != "correction-round":
         fail("a durable Correction escalation plan publication is malformed")
     source = source or correction_escalation_sublot_account(
@@ -13349,7 +13606,7 @@ def validate_correction_escalation_plan_written_entry(
         entries, index, lot, "a durable Correction escalation plan publication",
         source=source,
     )
-    expected = correction_escalation_plan_written_account(
+    expected = correction_escalation_plan_publication_account(
         entries, index, lot, data.get("tasks"), data.get("op"), data.get("commit"),
         current, source, "a durable Correction escalation plan publication",
     )
@@ -13395,7 +13652,7 @@ def correction_escalation_plan_preflight(entries, lot, tasks, subject):
     current = outstanding_correction_escalation_sublot_set(
         entries, len(entries), lot, subject, source=source,
     )
-    return correction_escalation_plan_written_account(
+    return correction_escalation_plan_publication_account(
         entries, len(entries), lot, tasks, "preflight", None,
         current, source, subject, live=True,
     )
@@ -13404,6 +13661,7 @@ def correction_escalation_plan_preflight(entries, lot, tasks, subject):
 def normalize_correction_escalation_plan_written(entries, data, lot, subject):
     if not isinstance(data, dict) or set(data) not in (
         {"tasks", "op"}, CORRECTION_ESCALATION_PLAN_KEYS,
+        CORRECTION_ESCALATION_AMENDMENT_PLAN_KEYS,
     ):
         fail(f"{subject} has malformed helper-owned input")
     source = correction_escalation_sublot_account(entries, len(entries), lot, subject)
@@ -13416,11 +13674,14 @@ def normalize_correction_escalation_plan_written(entries, data, lot, subject):
     )
     if head.returncode != 0:
         fail(f"{subject} has no current plan commit")
-    expected = correction_escalation_plan_written_account(
+    expected = correction_escalation_plan_publication_account(
         entries, len(entries), lot, data.get("tasks"), data.get("op"),
         head.stdout.strip(), current, source, subject, live=True,
     )
-    if set(data) == CORRECTION_ESCALATION_PLAN_KEYS and data != expected:
+    if frozenset(data) in {
+        frozenset(CORRECTION_ESCALATION_PLAN_KEYS),
+        frozenset(CORRECTION_ESCALATION_AMENDMENT_PLAN_KEYS),
+    } and data != expected:
         fail(f"{subject} changes its exact consumer-map account", expected)
     return expected
 
@@ -22777,29 +23038,47 @@ def validate_subagent_transition(entries, event, owner, kind, context, data, *, 
             )
             expected = correction_escalation_completeness_plan_account(
                 entries, plan_index, context.get("lot"),
-                "the Correction escalation completeness opening",
+                "the Correction escalation completeness opening", before=len(entries),
                 frozen=data, live=live,
             )
-            if set(data) != CORRECTION_ESCALATION_COMPLETENESS_KEYS \
+            accepted_keys = {
+                frozenset(CORRECTION_ESCALATION_COMPLETENESS_KEYS),
+                frozenset(CORRECTION_ESCALATION_COMPLETENESS_KEYS - {
+                    CORRECTION_ESCALATION_COMPLETENESS_AMENDMENT_KEY,
+                }),
+            }
+            if frozenset(data) not in accepted_keys \
                     or data != expected:
                 fail("the Correction escalation completeness opening changes its plan")
             completed = []
             lost = []
-            for terminal in entries[plan_index + 1:]:
+            for terminal_index, terminal in enumerate(
+                    entries[plan_index + 1:], plan_index + 1):
                 if terminal.get("event") != "subagent-ended" \
                         or terminal.get("kind") != "completeness" \
                         or subagent_event_context(terminal) != context:
                     continue
                 terminal_data = note_data(terminal)
+                starts = [(start_index, start) for start_index, start
+                          in open_subagent_brackets(entries[:terminal_index])
+                          if start_index > plan_index
+                          and start.get("kind") == "completeness"
+                          and start.get("lot") == context.get("lot")
+                          and subagent_terminal_matches(start, terminal)]
+                if len(starts) != 1:
+                    fail("a durable Correction escalation completeness terminal "
+                         "has no one exact physical opening")
                 terminal_account = correction_escalation_completeness_plan_account(
                     entries, plan_index, context.get("lot"),
                     "a durable Correction escalation completeness terminal",
-                    frozen=terminal_data,
+                    before=starts[0][0], frozen=terminal_data,
                 )
                 result = correction_escalation_completeness_terminal_account(
                     terminal_data, terminal_account,
                     "a durable Correction escalation completeness terminal",
                 )
+                if terminal_account != data:
+                    continue
                 if result["kind"] == "result":
                     completed.append(terminal)
                 else:
@@ -24046,7 +24325,7 @@ def cmd_construction_plan_publication_account(args):
     )
     if head.returncode != 0:
         fail("the Construction escalation plan publication has no committed HEAD")
-    account = correction_escalation_plan_written_account(
+    account = correction_escalation_plan_publication_account(
         entries, len(entries), args.lot, args.tasks, args.operation,
         head.stdout.strip(), current, source,
         "the Construction escalation plan publication", live=True,
@@ -24093,7 +24372,7 @@ def cmd_construction_plan_publication_append(args):
         )
         if head.returncode != 0:
             fail("the Construction escalation plan publication has no committed HEAD")
-        account = correction_escalation_plan_written_account(
+        account = correction_escalation_plan_publication_account(
             entries, len(entries), args.lot, args.tasks, args.operation,
             head.stdout.strip(), current, source,
             "the Construction escalation plan publication", live=True,
