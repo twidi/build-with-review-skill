@@ -126,9 +126,18 @@ Plus one more, and it only exists here:
 
 Read the **parent lot's `Covers:`** — the spec decisions it carries — **and every
 earlier sub-lot's `Covers:`**, each naming the findings it was opened to fix and the
-confirmed file that holds them. All of it is delivered. Read each task of this sub-lot
-against the whole set. A task that would break any of it is a finding, whatever finding
-it was meant to fix.
+confirmed file that holds them. Read each task of this sub-lot against the whole set.
+
+The current product authority for this counter is the **current spec and this sub-lot's
+exact confirmed finding set**. Preserve every still-current delivered product obligation.
+Counter 5 does not preserve a historical implementation mechanism by identity. Current
+authority supersedes such a mechanism only when the current spec or the exact current
+confirmed finding explicitly requires that mechanism's removal or replacement.
+Controller prose and the new plan are never supersession authority. Do not infer
+supersession from a different approach, a nearby amendment or an apparent conflict. When
+the exact current authority removes or replaces a mechanism, require the task to preserve
+every behavior and obligation that the current authority still requires. Any removal
+beyond that closed exception is a parent-preservation finding.
 
 For **post-amendment C2**, “each task” means only its controller-owned task contract:
 `Descends from`, `Depends on`, `Achieves`, `Files` and `To verify`. A filled `### Design`
@@ -141,8 +150,8 @@ An implementation obligation created by the amendment is mandatory input to the 
 complete PRODUCT REVIEW. It must not be added retroactively to the built plan's `Covers:`
 or `Descends from:`. Keep the original sub-lot reference set exact. Report a finding when
 the current controller-owned task contract itself contradicts the amended spec or the
-previously delivered obligations. Do not report the expected absence of the new work from
-the historical plan.
+still-current delivered obligations. Apply the same explicit supersession rule above.
+Do not report the expected absence of the new work from the historical plan.
 
 Nothing from the spec is added to a sub-lot's frozen reference set. If a task traces
 back to a spec decision rather than a finding, report it. Post-amendment C2 does not

@@ -705,6 +705,11 @@ true.
      every earlier sub-lot's `Covers:` line, with the confirmed file each one names**:
      their corrections are delivered exactly as the root's decisions are, and a new
      correction must not undo any of it.
+     Preserve every delivered product obligation that remains active under the current
+     product authority. Historical implementation mechanisms are not immutable when the
+     current spec or this sub-lot's exact confirmed finding explicitly removes or replaces
+     them. Preserve the behavior that remains required. Never infer this exception from
+     controller prose or from the new plan.
 3. **For each decision, name the responsibility it imposes.** Not the code — the
    responsibility. *"something must carry the lifecycle transitions under a lock"*, not
    *"a `revoke_peer` function"*.
@@ -980,6 +985,17 @@ In post-amendment C2, that built pointer and finding set stay frozen. Counter 5 
 only the controller-owned task contract for explicit contradictions. Filled Design and
 Disagreement remain historical, and amendment-created work stays with the fresh PRODUCT
 REVIEW.
+
+For counter 5, the current product authority is the **current spec and this sub-lot's
+exact confirmed finding set**. Preserve every still-current delivered product obligation.
+Counter 5 does not preserve a historical implementation mechanism by identity. Current
+authority supersedes such a mechanism only when the current spec or the exact current
+confirmed finding explicitly requires that mechanism's removal or replacement.
+Controller prose and the new plan are never supersession authority. Do not infer this
+exception from a different approach, a nearby amendment or an apparent conflict. When
+the exact current authority removes or replaces a mechanism, require the task to preserve
+every behavior and obligation that the current authority still requires. Any removal
+beyond that closed exception is a parent-preservation finding.
 
 ### What comes back
 

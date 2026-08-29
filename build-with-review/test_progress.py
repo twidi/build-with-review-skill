@@ -34590,6 +34590,49 @@ def post_amendment_completeness_keeps_built_design_historical():
 
 
 @test
+def sublot_completeness_preserves_current_obligations_not_superseded_mechanisms():
+    completeness = open(
+        os.path.join(HERE, "prompts", "construction", "completeness.md"),
+        encoding="utf-8",
+    ).read()
+    construction = open(
+        os.path.join(HERE, "prompts", "construction", "MODE.md"), encoding="utf-8",
+    ).read()
+
+    counter = completeness[
+        completeness.index("### 5 ·"):completeness.index("## What you never do")
+    ]
+    counter = " ".join(counter.split())
+    c2 = construction[
+        construction.index("## C2 — Completeness"):construction.index("## C3 — Task by task")
+    ]
+    c1 = construction[
+        construction.index("## C1 — The plan"):construction.index("## C2 — Completeness")
+    ]
+    c2 = " ".join(c2.split())
+    c1 = " ".join(c1.split())
+
+    for subject, contract in (("counter 5", counter), ("Construction C2", c2)):
+        check("current spec and this sub-lot's exact confirmed finding set" in contract,
+              f"{subject} has no closed current product authority")
+        check("every still-current delivered product obligation" in contract,
+              f"{subject} can discard a delivered obligation that remains active")
+        check("does not preserve a historical implementation mechanism by identity" in contract,
+              f"{subject} makes a superseded implementation mechanism permanent")
+        check("explicitly requires that mechanism's removal or replacement" in contract,
+              f"{subject} permits inferred supersession of delivered work")
+        check("Controller prose and the new plan are never supersession authority" in contract,
+              f"{subject} lets the controller invent a parent exception")
+        check("preserve every behavior and obligation that the current authority still requires"
+              in contract,
+              f"{subject} lets a mechanism replacement discard its active behavior")
+
+    check("implementation mechanisms are not immutable" in c1
+          and "explicitly removes or replaces them" in c1,
+          "Construction C1 still treats every historical mechanism as immutable")
+
+
+@test
 def sweep_receipt_binds_each_disposition_to_one_exact_place_block():
     seed_written_amendment_for_reach()
     valid = reach_report((2, 0), ("kept", "removed"))
