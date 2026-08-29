@@ -481,7 +481,9 @@ def raw_journal_entries():
 
 
 def journal_entries():
-    return project_subagent_opening_recoveries(raw_journal_entries())
+    raw_entries = raw_journal_entries()
+    opening_projected = project_subagent_opening_recoveries(raw_entries)
+    return project_subagent_terminal_recoveries(raw_entries, opening_projected)
 
 
 CONSTRUCTION_HISTORY_DEPENDENCY_PAIRS = (
@@ -10481,6 +10483,13 @@ def validate_construction_verdict_entries(entries, start=0):
             if raw_entries is None:
                 raw_entries = raw_journal_entries()
             validate_recovered_construction_opening_history(
+                entries, raw_entries, index, entry,
+            )
+        elif entry.get("event") == "note" \
+                and entry.get("kind") == "subagent.terminal.recovered":
+            if raw_entries is None:
+                raw_entries = raw_journal_entries()
+            validate_recovered_construction_terminal_history(
                 entries, raw_entries, index, entry,
             )
     for index, entry in enumerate(entries[start:], start):
@@ -22968,6 +22977,156 @@ def validate_recovered_construction_opening_history(entries, raw_entries, index,
         fail(f"{subject} does not preserve one canonical open physical call")
 
 
+def exact_subagent_terminal_duplicate(first, second):
+    if first.get("event") != "subagent-ended" \
+            or second.get("event") != "subagent-ended" \
+            or set(first) != set(second):
+        return False
+    return all(first[key] == second[key] for key in first if key != "ts")
+
+
+def subagent_terminal_identity_sha256(terminal):
+    identity = {
+        "by": terminal.get("by"), "kind": terminal.get("kind"),
+        "context": subagent_event_context(terminal), "data": note_data(terminal),
+    }
+    return sha256_bytes(json.dumps(
+        identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8"))
+
+
+def subagent_terminal_recovery_account(
+        entries, before, canonical_index, duplicate_index, subject,
+):
+    if canonical_index + 1 != duplicate_index or duplicate_index != before - 1:
+        fail(f"{subject} does not select one adjacent final duplicate-terminal pair")
+    canonical = entries[canonical_index]
+    duplicate = entries[duplicate_index]
+    canonical_context = subagent_event_context(canonical)
+    if canonical.get("kind") not in CONSTRUCTION_CHECKERS.values() \
+            or not isinstance(canonical.get("ts"), str) or not canonical["ts"] \
+            or not isinstance(canonical.get("by"), str) or not canonical["by"] \
+            or set(canonical) != {
+                "ts", "by", "event", "kind", "data", *canonical_context,
+            } or not exact_subagent_terminal_duplicate(canonical, duplicate):
+        fail(f"{subject} does not select two exact Construction checker terminals")
+
+    opening_projected = project_subagent_opening_recoveries(entries[:before])
+    openings = [(index, entry) for index, entry in enumerate(opening_projected)
+                if entry.get("event") == "subagent-started"
+                and subagent_terminal_matches(entry, canonical)]
+    if len(openings) != 1:
+        fail(f"{subject} has no one exact physical opening")
+    opening_index, opening = openings[0]
+    if opening_index >= canonical_index:
+        fail(f"{subject} has its terminal before its opening")
+    logical = dict(note_data(opening))
+    call = logical.pop("call", None)
+    if not construction_positive_integer(call) \
+            or note_data(canonical).get("call") != call:
+        fail(f"{subject} has no exact physical call identity")
+    construction_result_shape(note_data(canonical), logical, call, subject)
+    matching_terminals = [
+        index for index, entry in enumerate(entries[:before])
+        if entry.get("event") == "subagent-ended"
+        and subagent_terminal_matches(opening, entry)
+    ]
+    if matching_terminals != [canonical_index, duplicate_index]:
+        fail(f"{subject} does not select one exact duplicate-terminal pair")
+    return {
+        "schema": 1,
+        "opening": journal_line_proof(opening_index),
+        "canonical_terminal": journal_line_proof(canonical_index),
+        "duplicate_terminal": journal_line_proof(duplicate_index),
+        "identity_sha256": subagent_terminal_identity_sha256(canonical),
+    }
+
+
+def validate_subagent_terminal_recovery_entry(entries, index, entry):
+    data = note_data(entry)
+    if set(data) != {
+        "schema", "opening", "canonical_terminal", "duplicate_terminal",
+        "identity_sha256",
+    } or data.get("schema") != 1 \
+            or not re.fullmatch(r"[0-9a-f]{64}", data.get("identity_sha256", "")) \
+            or not isinstance(entry.get("ts"), str) or not entry["ts"]:
+        fail("a durable subagent-terminal recovery has malformed authority")
+    opening_index, opening = journal_entry_from_proof(
+        entries, data.get("opening"), "the durable subagent-terminal recovery",
+    )
+    canonical_index, canonical = journal_entry_from_proof(
+        entries, data.get("canonical_terminal"),
+        "the durable subagent-terminal recovery",
+    )
+    duplicate_index, _duplicate = journal_entry_from_proof(
+        entries, data.get("duplicate_terminal"),
+        "the durable subagent-terminal recovery",
+    )
+    expected = subagent_terminal_recovery_account(
+        entries, index, canonical_index, duplicate_index,
+        "the durable subagent-terminal recovery",
+    )
+    expected_context = subagent_event_context(canonical)
+    if opening.get("event") != "subagent-started" \
+            or not subagent_terminal_matches(opening, canonical) \
+            or data != expected or entry.get("event") != "note" \
+            or entry.get("kind") != "subagent.terminal.recovered" \
+            or entry.get("by") != canonical.get("by") \
+            or subagent_event_context(entry) != expected_context \
+            or set(entry) != {"ts", "by", "event", "kind", "data", *expected_context}:
+        fail("a durable subagent-terminal recovery changes its exact owner", expected)
+    earlier = [candidate for candidate in entries[:index]
+               if candidate.get("event") == "note"
+               and candidate.get("kind") == "subagent.terminal.recovered"
+               and note_data(candidate).get("canonical_terminal")
+               == data["canonical_terminal"]]
+    if earlier:
+        fail("a provider-subagent terminal identity has more than one recovery")
+    return opening_index, canonical_index, duplicate_index, opening, canonical
+
+
+def project_subagent_terminal_recoveries(raw_entries, opening_projected):
+    projected = list(opening_projected)
+    replaced = set()
+    for index, entry in enumerate(raw_entries):
+        if entry.get("event") != "note" \
+                or entry.get("kind") != "subagent.terminal.recovered":
+            continue
+        _opening_index, _canonical_index, duplicate_index, _opening, _canonical = \
+            validate_subagent_terminal_recovery_entry(raw_entries, index, entry)
+        if duplicate_index in replaced:
+            fail("a duplicate provider-subagent terminal has more than one recovery")
+        replaced.add(duplicate_index)
+        duplicate = raw_entries[duplicate_index]
+        projected[duplicate_index] = {
+            "ts": duplicate["ts"], "by": duplicate["by"], "event": "note",
+            "kind": "subagent.terminal.duplicate",
+            "data": {"recovery": journal_line_proof(index)},
+        }
+    return projected
+
+
+def validate_recovered_construction_terminal_history(entries, raw_entries, index, entry):
+    opening_index, canonical_index, _duplicate_index, opening, canonical = \
+        validate_subagent_terminal_recovery_entry(raw_entries, index, entry)
+    logical = dict(note_data(opening))
+    call = logical.pop("call")
+    prefix = entries[:index + 1]
+    subject = "the durable recovered Construction checker terminal"
+    if logical.get("check") == "design":
+        validate_design_generation_history(prefix, len(prefix), logical, subject)
+    elif logical.get("check") == "code":
+        validate_code_generation_history(prefix, len(prefix), logical, subject)
+    else:
+        fail(f"{subject} has an unknown checker identity")
+    calls = construction_physical_calls(
+        prefix, len(prefix), logical, subject, require_closed=True,
+    )
+    if call > len(calls) or calls[call - 1][0] is not prefix[opening_index] \
+            or calls[call - 1][1] is not prefix[canonical_index]:
+        fail(f"{subject} does not preserve one canonical closed physical call")
+
+
 def subagent_terminal_matches(opening, terminal):
     if opening.get("by") != terminal.get("by") \
             or opening.get("kind") != terminal.get("kind") \
@@ -23760,6 +23919,73 @@ def cmd_construction_spend_recover(args):
         )
         validate_construction_spend_recovery_entry(
             [*entries, candidate], len(entries), candidate,
+        )
+        return candidate
+
+    write_validated_line(build)
+
+
+def cmd_construction_terminal_duplicate_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+    expected_context = {
+        "mode": "construction", "lot": caller.get("lot"),
+        "task": caller.get("task"), "attempt": caller.get("attempt"),
+        "round": args.round, "job": "implementer",
+    }
+    if caller != expected_context \
+            or not isinstance(caller.get("lot"), str) or not caller["lot"] \
+            or not construction_positive_integer(caller.get("task")) \
+            or not construction_positive_integer(caller.get("attempt")):
+        fail("duplicate-terminal recovery requires the exact Construction implementer context")
+
+    def build(entries):
+        validate_construction_verdict_history(entries)
+        raw_entries = raw_journal_entries()
+        if raw_entries and raw_entries[-1].get("event") == "note" \
+                and raw_entries[-1].get("kind") == "subagent.terminal.recovered" \
+                and raw_entries[-1].get("by") == me["session_id"] \
+                and subagent_event_context(raw_entries[-1]) == expected_context:
+            _opening_index, _canonical_index, _duplicate_index, opening, _canonical = \
+                validate_subagent_terminal_recovery_entry(
+                    raw_entries, len(raw_entries) - 1, raw_entries[-1],
+                )
+            if note_data(opening).get("check") != args.check:
+                fail("the retained duplicate-terminal recovery belongs to another checker")
+            return None
+        if len(raw_entries) < 2:
+            fail("duplicate-terminal recovery has no exact terminal pair")
+        canonical_index = len(raw_entries) - 2
+        duplicate_index = len(raw_entries) - 1
+        data = subagent_terminal_recovery_account(
+            raw_entries, len(raw_entries), canonical_index, duplicate_index,
+            "the duplicate Construction checker terminal recovery",
+        )
+        _opening_index, opening = journal_entry_from_proof(
+            raw_entries, data["opening"],
+            "the duplicate Construction checker terminal recovery",
+        )
+        if note_data(opening).get("check") != args.check \
+                or opening.get("by") != me["session_id"] \
+                or subagent_event_context(opening) != expected_context:
+            fail("duplicate-terminal recovery does not own the exact requested checker call")
+        candidate = event_entry(
+            me["session_id"], "note", kind="subagent.terminal.recovered",
+            data=data, **expected_context,
+        )
+        raw_with_candidate = [*raw_entries, candidate]
+        validate_subagent_terminal_recovery_entry(
+            raw_with_candidate, len(raw_entries), candidate,
+        )
+        projected_with_candidate = [*entries, candidate]
+        duplicate = raw_entries[duplicate_index]
+        projected_with_candidate[duplicate_index] = {
+            "ts": duplicate["ts"], "by": duplicate["by"], "event": "note",
+            "kind": "subagent.terminal.duplicate",
+            "data": {"recovery": "pending"},
+        }
+        validate_recovered_construction_terminal_history(
+            projected_with_candidate, raw_with_candidate, len(raw_entries), candidate,
         )
         return candidate
 
@@ -24794,6 +25020,11 @@ def build_parser():
     sp.add_argument("check", choices=(*CONSTRUCTION_CHECKERS, "diagnostic"))
     sp.add_argument("round", nargs="?", type=positive_int)
     sp.set_defaults(func=cmd_construction_spend_recover)
+
+    sp = sub.add_parser("construction-terminal-duplicate-recover", help=argparse.SUPPRESS)
+    sp.add_argument("check", choices=tuple(CONSTRUCTION_CHECKERS))
+    sp.add_argument("round", type=positive_int)
+    sp.set_defaults(func=cmd_construction_terminal_duplicate_recover)
 
     sp = sub.add_parser("pass-opening-context-recover", help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_pass_opening_context_recover)

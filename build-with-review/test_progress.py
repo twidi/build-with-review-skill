@@ -3635,6 +3635,129 @@ def code_checker_exact_rerun_recovers_the_active_legacy_duplicate():
 
 
 @test
+def code_checker_exact_duplicate_terminal_has_one_append_only_recovery():
+    seed_active_attempt()
+    append_checker_verdict("design", lot="lot-1", task=3, attempt=2)
+    gate = seed_review_gate()
+    set_caller_bwr(
+        job="implementer", lot="lot-1", task=3, attempt=2, round=1, mandate=None,
+    )
+    opened = run_progress(
+        "subagent-started", "code-checker", "--round", "1",
+        "--data", json.dumps({"gate": gate}),
+    )
+    check(opened.returncode == 0, opened.stdout + opened.stderr)
+    spent = run_progress(
+        "note", "bound.spent", "--round", "1",
+        "--text", "code checker round 1 of 10",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    started = next(
+        entry["data"] for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-started"
+        and entry.get("kind") == "code-checker"
+    )
+    result = code_result_source(started, findings=1)
+    ended = run_progress(
+        "subagent-ended", "code-checker", "--round", "1",
+        "--data", json.dumps({"result": result}),
+    )
+    check(ended.returncode == 0, ended.stdout + ended.stderr)
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    terminal = next(
+        entry for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "code-checker"
+    )
+    duplicate = json.loads(json.dumps(terminal))
+    duplicate["ts"] = "legacy-code-terminal-output-loss-duplicate"
+    with open(journal_path, "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+
+    with open(journal_path, "rb") as source:
+        before = source.read()
+    refused_verdict = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"code","outcome":"findings"}',
+    )
+    with open(journal_path, "rb") as source:
+        after_refusal = source.read()
+    check(refused_verdict.returncode != 0 and after_refusal == before,
+          "a multiply closed code call reached its verdict")
+
+    set_caller_bwr(job="controller", task=None, attempt=None, round=None)
+    foreign = run_progress(
+        "construction-terminal-duplicate-recover", "code", "1",
+    )
+    with open(journal_path, "rb") as source:
+        after_foreign = source.read()
+    check(foreign.returncode != 0 and after_foreign == before,
+          "a foreign controller recovered an implementer terminal")
+    set_caller_bwr(
+        job="implementer", lot="lot-1", task=3, attempt=2, round=1, mandate=None,
+    )
+
+    changed_lines = journal_lines()
+    changed_lines[-1]["data"]["report_sha256"] = "f" * 64
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in changed_lines:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    with open(journal_path, "rb") as source:
+        changed_before = source.read()
+    changed_pair = run_progress(
+        "construction-terminal-duplicate-recover", "code", "1",
+    )
+    with open(journal_path, "rb") as source:
+        changed_after = source.read()
+    check(changed_pair.returncode != 0 and changed_after == changed_before,
+          "a changed duplicate terminal received recovery authority")
+    with open(journal_path, "wb") as target:
+        target.write(before)
+
+    recovered = run_progress(
+        "construction-terminal-duplicate-recover", "code", "1",
+    )
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    recoveries = [entry for entry in journal_lines()
+                  if entry.get("kind") == "subagent.terminal.recovered"]
+    check(len(recoveries) == 1, recoveries)
+    recovered_lines = journal_lines()
+    check(recovered_lines[-3] == terminal and recovered_lines[-2] == duplicate,
+          "duplicate-terminal recovery changed a historical terminal")
+    with open(journal_path, "rb") as source:
+        after_recovery = source.read()
+    retried = run_progress(
+        "construction-terminal-duplicate-recover", "code", "1",
+    )
+    with open(journal_path, "rb") as source:
+        after_retry = source.read()
+    check(retried.returncode == 0 and after_retry == after_recovery,
+          "an exact terminal recovery retry changed the journal")
+    listed = run_progress("subagents-open")
+    check(listed.returncode == 0 and json.loads(listed.stdout) == [],
+          "the recovered closed checker remains physically open")
+    verdict = run_progress(
+        "note", "verdict.consumed", "--round", "1",
+        "--data", '{"check":"code","outcome":"findings"}',
+    )
+    check(verdict.returncode == 0, verdict.stdout + verdict.stderr)
+    history = run_progress("construction-verdict-check", "history")
+    check(history.returncode == 0, history.stdout + history.stderr)
+
+    exact = journal_lines()
+    changed = json.loads(json.dumps(exact))
+    recovery = next(entry for entry in changed
+                    if entry.get("kind") == "subagent.terminal.recovered")
+    recovery["data"]["identity_sha256"] = "f" * 64
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in changed:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_history = run_progress("construction-verdict-check", "history")
+    check(refused_history.returncode != 0,
+          "a changed duplicate-terminal recovery passed historical replay")
+
+
+@test
 def subagent_recovery_discovery_closes_lost_before_regeneration():
     started = run_progress(
         "subagent-started", "gate-runner", "--data", '{"scope":"discovery"}'
