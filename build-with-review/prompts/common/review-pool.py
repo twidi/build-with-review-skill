@@ -25,6 +25,10 @@ REOPEN_PREFIXES = (
 CONTEXT_FIELDS = ("mode", "lot", "task", "attempt", "round", "mandate", "job")
 PRODUCT_RETIREMENT_RECOVERY_KIND = "product.reviewer.retirement.recovered"
 PRODUCT_LEGACY_CHAIN_RECOVERY_KIND = "product.reviewer.legacy-chain.recovered"
+PASS_OPENING_DUPLICATE_RECOVERY_KIND = "pass.opening.duplicate.recovered"
+PASS_OPENING_DUPLICATE_RECOVERY_KEYS = {
+    "schema", "canonical", "duplicate", "owner", "built", "commit", "gate",
+}
 PRODUCT_RECEIPT_COUNT_KEYS = {"critical", "important", "minor", "decision"}
 PRODUCT_RECEIPT_KEYS = PRODUCT_RECEIPT_COUNT_KEYS | {
     "pass_commit", "pass_gate", "report_sha256",
@@ -206,6 +210,86 @@ def pass_opening_stop_account(state):
     }
 
 
+def pass_opening_durable_identity(entry):
+    return {key: value for key, value in entry.items()
+            if key not in {"ts", "_journal_proof"}}
+
+
+def entry_index_from_proof(entries, before, proof, subject):
+    matches = [index for index, entry in enumerate(entries[:before])
+               if entry.get("_journal_proof") == proof]
+    if len(matches) != 1:
+        fail(f"{subject} has no one exact journal proof")
+    return matches[0]
+
+
+def validate_pass_opening_duplicate_recovery(entries, recovery_index, recovery, subject):
+    recovery_data = data(recovery)
+    if recovery.get("event") != "note" \
+            or recovery.get("kind") != PASS_OPENING_DUPLICATE_RECOVERY_KIND \
+            or set(recovery_data) != PASS_OPENING_DUPLICATE_RECOVERY_KEYS \
+            or recovery_data.get("schema") != 1:
+        fail(f"{subject} has a malformed duplicate-opening recovery")
+    canonical_index = entry_index_from_proof(
+        entries, recovery_index, recovery_data.get("canonical"), subject,
+    )
+    duplicate_index = entry_index_from_proof(
+        entries, recovery_index, recovery_data.get("duplicate"), subject,
+    )
+    if duplicate_index != canonical_index + 1 or recovery_index != duplicate_index + 1:
+        fail(f"{subject} does not recover one adjacent duplicate-opening pair")
+    canonical, duplicate = entries[canonical_index], entries[duplicate_index]
+    if canonical.get("event") != "note" or canonical.get("kind") != "pass.opened" \
+            or duplicate.get("event") != "note" or duplicate.get("kind") != "pass.opened" \
+            or pass_opening_durable_identity(canonical) \
+            != pass_opening_durable_identity(duplicate):
+        fail(f"{subject} changes one member of its duplicate-opening pair")
+    opening_data = data(canonical)
+    expected_context = {
+        "mode": "product-review", "lot": opening_data.get("built"), "job": "controller",
+    }
+    expected_data = {
+        "schema": 1,
+        "canonical": canonical.get("_journal_proof"),
+        "duplicate": duplicate.get("_journal_proof"),
+        "owner": canonical.get("by"),
+        "built": opening_data.get("built"),
+        "commit": opening_data.get("commit"),
+        "gate": opening_data.get("gate"),
+    }
+    if recovery.get("by") != canonical.get("by") \
+            or context(recovery) != expected_context or recovery_data != expected_data:
+        fail(f"{subject} changes its exact duplicate-opening authority")
+    return canonical_index, duplicate_index
+
+
+def latest_effective_pass_opening(entries, before, subject):
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "pass.opened"]
+    if not openings:
+        return None
+    latest_index, latest = openings[-1]
+    recoveries = [(index, entry) for index, entry in enumerate(
+        entries[latest_index + 1:before], latest_index + 1,
+    ) if entry.get("kind") == PASS_OPENING_DUPLICATE_RECOVERY_KIND]
+    duplicate_pair = len(openings) >= 2 \
+        and openings[-2][0] + 1 == latest_index \
+        and pass_opening_durable_identity(openings[-2][1]) \
+        == pass_opening_durable_identity(latest)
+    if not duplicate_pair:
+        if recoveries:
+            fail(f"{subject} has a foreign duplicate-opening recovery")
+        return latest_index, latest
+    if len(recoveries) != 1:
+        fail(f"{subject} has no one exact duplicate-opening recovery")
+    canonical_index, duplicate_index = validate_pass_opening_duplicate_recovery(
+        entries, recoveries[0][0], recoveries[0][1], subject,
+    )
+    if duplicate_index != latest_index:
+        fail(f"{subject} recovers another pass-opening generation")
+    return canonical_index, entries[canonical_index]
+
+
 def current_generation(entries, proofs, mode, *, projector=False):
     if mode == "spec":
         openings = [(index, entry) for index, entry in enumerate(entries)
@@ -223,11 +307,12 @@ def current_generation(entries, proofs, mode, *, projector=False):
             fail("the current SPEC round has a malformed assignment set")
         return index, tuple(mandates), {"round": round_number}, f"round-{round_number}", None
 
-    openings = [(index, entry) for index, entry in enumerate(entries)
-                if entry.get("kind") == "pass.opened"]
-    if not openings:
+    current = latest_effective_pass_opening(
+        entries, len(entries), "the current PRODUCT REVIEW pass",
+    )
+    if current is None:
         fail("there is no current PRODUCT REVIEW pass")
-    index, opening = openings[-1]
+    index, opening = current
     if any(entry.get("kind") == "pass.closed" for entry in entries[index + 1:]):
         fail("the latest PRODUCT REVIEW pass is already closed")
     built = data(opening).get("built")

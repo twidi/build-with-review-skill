@@ -23208,6 +23208,98 @@ def correction_resolution_opens_one_generation_bound_product_pass():
 
 
 @test
+def schema_two_duplicate_product_pass_opening_projects_one_canonical_review_pool_generation():
+    append_note(
+        "run.started", {"cap": 3}, "schema-2 duplicate Product pass",
+        mode="construction", lot="lot-1", job="controller",
+    )
+    correction_resolution_opens_one_generation_bound_product_pass()
+    canonical_index = len(journal_lines()) - 1
+    canonical = journal_lines()[canonical_index]
+    check(canonical.get("kind") == "pass.opened"
+          and canonical.get("data", {}).get("schema") == 2,
+          "the combined duplicate recovery test has no schema-2 Product opening")
+    append_note(
+        "pass.opened", canonical["data"], by=canonical["by"],
+        mode="product-review", lot="lot-1", job="controller",
+    )
+    duplicate_index = len(journal_lines()) - 1
+    runner = in_process_progress_runner(retain_projection_cache=True)
+    recovered = runner("pass-opening-duplicate-recover")
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+
+    review_pool = os.path.join(WORKSPACE, "prompts", "common", "review-pool.py")
+
+    def run_pool():
+        return subprocess.run(
+            [sys.executable, review_pool, "product-review"],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        )
+
+    accepted = run_pool()
+    check(accepted.returncode == 0, accepted.stdout + accepted.stderr)
+    exact_journal = pathlib.Path(WORKSPACE, "progress.jsonl").read_bytes()
+    exact_entries = journal_lines()
+    recovery_index = len(exact_entries) - 1
+    check(exact_entries[recovery_index].get("kind")
+          == "pass.opening.duplicate.recovered",
+          "the public recovery did not append its exact authority")
+
+    for label, mutate in (
+        ("foreign", lambda entry: entry.__setitem__("by", "foreign-controller")),
+        ("changed", lambda entry: entry["data"].__setitem__(
+            "canonical", journal_proof(duplicate_index),
+        )),
+    ):
+        changed = json.loads(json.dumps(exact_entries))
+        mutate(changed[recovery_index])
+        pathlib.Path(WORKSPACE, "progress.jsonl").write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in changed),
+            encoding="utf-8",
+        )
+        changed_journal = pathlib.Path(WORKSPACE, "progress.jsonl").read_bytes()
+        refused = run_pool()
+        check(refused.returncode != 0,
+              f"the standalone review pool accepted a {label} duplicate recovery")
+        check(pathlib.Path(WORKSPACE, "progress.jsonl").read_bytes() == changed_journal,
+              f"the {label} read-only refusal changed the journal")
+        pathlib.Path(WORKSPACE, "progress.jsonl").write_bytes(exact_journal)
+
+    account_result = runner("product-pass-generation", "user")
+    check(account_result.returncode == 0, account_result.stdout + account_result.stderr)
+    account = json.loads(account_result.stdout)
+    config = default_config()
+    controller = {
+        "schema": 1, "job": "controller", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1", "status": "working",
+    }
+    config["whoami"]["session"]["annotations"]["bwr"] = controller
+    config["sessions"][CALLER]["annotations"]["bwr"] = controller
+    config["sessions"][TARGET]["annotations"]["bwr"] = {
+        "schema": 1, "job": "reviewer", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1", "mandate": "user",
+        "status": "working", "position": account["position"],
+        "pass": account["pass"], "generation": account["generation_sha256"],
+    }
+    set_config(config)
+    started = runner("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+    check(journal_lines()[-1].get("data") == account,
+          "the reviewer start did not freeze the canonical schema-2 account")
+    report_sha = write_report(account["report"], product_report_text("user"))
+    receipt = runner(
+        "note", "report.received", "--mandate", "user",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    check(journal_lines()[-1]["data"] == {**account, "critical": 0, "important": 0,
+          "minor": 0, "decision": 0, "report_sha256": report_sha},
+          "the receipt did not preserve the canonical schema-2 authority")
+    after_receipt = run_pool()
+    check(after_receipt.returncode == 0, after_receipt.stdout + after_receipt.stderr)
+
+
+@test
 def correction_resolved_terminal_uses_shared_artifact_restoration_projector():
     helper = load_construction_module("correction_round_restore")
     canonical_relative = "corrections/lot-1/round-1.md"
