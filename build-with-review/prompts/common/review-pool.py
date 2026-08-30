@@ -8,8 +8,6 @@ import subprocess
 import re
 import sys
 
-from correction_authority import product_pass_generation_account
-
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.path.dirname(os.path.dirname(SCRIPT_DIR))
@@ -31,6 +29,11 @@ PRODUCT_RECEIPT_COUNT_KEYS = {"critical", "important", "minor", "decision"}
 PRODUCT_RECEIPT_KEYS = PRODUCT_RECEIPT_COUNT_KEYS | {
     "pass_commit", "pass_gate", "report_sha256",
 }
+
+
+def product_pass_generation_account(opening_proof, opening, mandate):
+    from correction_authority import product_pass_generation_account as projector
+    return projector(opening_proof, opening, mandate)
 
 
 def fail(message):
@@ -203,7 +206,7 @@ def pass_opening_stop_account(state):
     }
 
 
-def current_generation(entries, proofs, mode):
+def current_generation(entries, proofs, mode, *, projector=False):
     if mode == "spec":
         openings = [(index, entry) for index, entry in enumerate(entries)
                     if entry.get("kind") == "round.opened"]
@@ -275,23 +278,27 @@ def current_generation(entries, proofs, mode):
         if not os.path.isfile(progress) or os.path.islink(progress):
             fail("the current PRODUCT REVIEW pass has no real generation projector")
         for mandate in PRODUCT_MANDATES:
-            projected = subprocess.run(
-                [sys.executable, progress, "product-pass-generation", mandate],
-                cwd=WORKSPACE, capture_output=True, text=True,
-            )
-            if projected.returncode != 0:
-                fail(
-                    f"the current PRODUCT REVIEW pass failed its {mandate} generation projection: "
-                    f"{projected.stderr.strip() or projected.stdout.strip()}"
-                )
             try:
-                account = json.loads(projected.stdout)
                 expected = product_pass_generation_account(proofs[index], opening_data, mandate)
             except (ValueError, json.JSONDecodeError) as exc:
                 fail(f"the current PRODUCT REVIEW pass has malformed generation authority: {exc}")
-            if account != expected:
-                fail(f"the current PRODUCT REVIEW pass changes its {mandate} generation account")
-            product_generation["accounts"][mandate] = account
+            if not projector:
+                projected = subprocess.run(
+                    [sys.executable, progress, "product-pass-generation", mandate],
+                    cwd=WORKSPACE, capture_output=True, text=True,
+                )
+                if projected.returncode != 0:
+                    fail(
+                        f"the current PRODUCT REVIEW pass failed its {mandate} generation "
+                        f"projection: {projected.stderr.strip() or projected.stdout.strip()}"
+                    )
+                try:
+                    account = json.loads(projected.stdout)
+                except json.JSONDecodeError as exc:
+                    fail(f"the current PRODUCT REVIEW pass has malformed generation authority: {exc}")
+                if account != expected:
+                    fail(f"the current PRODUCT REVIEW pass changes its {mandate} generation account")
+            product_generation["accounts"][mandate] = expected
         account = product_generation["accounts"]["unlooked"]
         name = f"{built}-c{account['position']}-p{account['pass']}"
     else:
@@ -459,7 +466,21 @@ def exact_product_identity(receipt, authority=None, built=None, mandate=None):
             journal_proof(opening, "the Product receipt opening"), opening_data, mandate,
         ) if opening_data is not None and opening_data.get("schema") == 2 else None
     if account is not None:
-        if any(receipt_data.get(key) != value for key, value in account.items()):
+        expected_context = {
+            "mode": "product-review", "lot": built,
+            "mandate": mandate, "job": "controller",
+        }
+        expected_keys = PRODUCT_RECEIPT_COUNT_KEYS | set(account) | {"report_sha256"}
+        if opening is None or receipt.get("event") != "note" \
+                or receipt.get("kind") != "report.received" \
+                or receipt.get("by") != opening.get("by") \
+                or context(receipt) != expected_context \
+                or set(receipt_data) != expected_keys \
+                or any(not isinstance(receipt_data.get(key), int)
+                       or isinstance(receipt_data.get(key), bool) or receipt_data[key] < 0
+                       for key in PRODUCT_RECEIPT_COUNT_KEYS) \
+                or any(receipt_data.get(key) != value for key, value in account.items()) \
+                or not re.fullmatch(r"[0-9a-f]{64}", str(receipt_data.get("report_sha256"))):
             fail("a PRODUCT REVIEW receipt changes its pass generation")
         identity = {**account, "report_sha256": receipt_data.get("report_sha256")}
         if not isinstance(identity["report_sha256"], str) or not identity["report_sha256"]:
@@ -981,9 +1002,15 @@ def validate_product_malformed_return(
 
 
 def product_reviewer_generation(entries, session):
-    opening_index, mandates, generation, built = current_generation(entries, "product-review")
+    proofs = [entry.get("_journal_proof") for entry in entries]
+    opening_index, mandates, generation, _name, product_generation = current_generation(
+        entries, proofs, "product-review", projector=True,
+    )
+    built = generation["lot"]
     opening = entries[opening_index]
-    records = session_records(entries, opening_index, "product-review", mandates, generation)
+    records = session_records(
+        entries, opening_index, "product-review", mandates, generation, product_generation,
+    )
     record = records.get(session)
     if record is None:
         fail("the Product reviewer generation has no exact session start")

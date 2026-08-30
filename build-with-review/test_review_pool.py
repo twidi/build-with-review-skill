@@ -717,12 +717,14 @@ class ReviewPoolTest(unittest.TestCase):
             )
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            projected = module.read_entries()
-            opening_index, mandates, generation, built = module.current_generation(
-                projected, "product-review",
+            projected, proofs = module.read_entries()
+            opening_index, mandates, generation, _name, product_generation = (
+                module.current_generation(projected, proofs, "product-review")
             )
+            built = generation["lot"]
             records = module.session_records(
                 projected, opening_index, "product-review", mandates, generation,
+                product_generation,
             )
             module.validate_product_malformed_return(
                 projected, opening_index, projected[opening_index], built,

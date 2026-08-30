@@ -541,11 +541,13 @@ def product_reviewer_recovery_account(entries, session, subject):
     module = product_review_pool_module()
     projected = product_reviewer_projector_entries(entries)
     try:
-        opening_index, mandates, generation, _built = module.current_generation(
-            projected, "product-review",
+        opening_index, mandates, generation, _name, product_generation = module.current_generation(
+            projected, [entry.get("_journal_proof") for entry in projected],
+            "product-review", projector=True,
         )
         records = module.session_records(
             projected, opening_index, "product-review", mandates, generation,
+            product_generation,
             allow_pending_recovery=True,
         )
         record = records.get(session)
@@ -574,11 +576,13 @@ def product_reviewer_legacy_chain_account(entries, session, subject):
     module = product_review_pool_module()
     projected = product_reviewer_projector_entries(entries)
     try:
-        opening_index, mandates, generation, _built = module.current_generation(
-            projected, "product-review",
+        opening_index, mandates, generation, _name, product_generation = module.current_generation(
+            projected, [entry.get("_journal_proof") for entry in projected],
+            "product-review", projector=True,
         )
         records = module.session_records(
             projected, opening_index, "product-review", mandates, generation,
+            product_generation,
         )
         record = records.get(session)
         if record is None:
@@ -597,7 +601,16 @@ def product_reviewer_receipt_sequence(entries, opening_index, built, mandate, su
     try:
         records = module.session_records(
             projected, opening_index, "product-review", module.PRODUCT_MANDATES,
-            {"lot": built},
+            {"lot": built}, {
+                "proof": opening.get("_journal_proof"),
+                "opening": module.data(opening),
+                "accounts": {
+                    item: module.product_pass_generation_account(
+                        opening.get("_journal_proof"), module.data(opening), item,
+                    )
+                    for item in module.PRODUCT_MANDATES
+                } if module.data(opening).get("schema") == 2 else {},
+            },
         )
         return module.product_reviewer_receipt_sequence(
             projected, opening_index, opening, built, mandate, records,
@@ -612,11 +625,14 @@ def validate_product_malformed_return(entries, data, text, mandate, context, own
     module = product_review_pool_module()
     projected = product_reviewer_projector_entries(entries)
     try:
-        opening_index, mandates, generation, built = module.current_generation(
-            projected, "product-review",
+        opening_index, mandates, generation, _name, product_generation = module.current_generation(
+            projected, [entry.get("_journal_proof") for entry in projected],
+            "product-review", projector=True,
         )
+        built = generation["lot"]
         records = module.session_records(
             projected, opening_index, "product-review", mandates, generation,
+            product_generation,
         )
         candidate = {
             "event": "note", "kind": "bound.spent", "text": text,
@@ -22535,11 +22551,13 @@ def cmd_product_reviewer_legacy_chain_recover(args):
         module = product_review_pool_module()
         projected = product_reviewer_projector_entries([*entries, candidate])
         try:
-            opening_index, mandates, generation, _built = module.current_generation(
-                projected, "product-review",
+            opening_index, mandates, generation, _name, product_generation = module.current_generation(
+                projected, [entry.get("_journal_proof") for entry in projected],
+                "product-review", projector=True,
             )
             module.session_records(
                 projected, opening_index, "product-review", mandates, generation,
+                product_generation,
             )
         except ProductReviewerProjectorError as exc:
             fail("the Product legacy-chain recovery is not historically exact", exc)
