@@ -65,9 +65,12 @@ cd <exact verification copy> && env -u VIRTUAL_ENV TWICC_DATA_DIR=<exact verific
 
 Keep both paths equal to the opaque output from `verify-open.sh`.
 
-**A yielded command is still running.** Retain its session ID and collect its final exit
-status, stdout, and stderr. An empty yielded output chunk is not empty command output.
-Never classify or replace the verifier from a partial tool result.
+Apply `vocabulary.md`'s **shared command-completion contract** to `verify-open.sh`, every
+proof command and `verify-close.sh`. A yielded or otherwise intermediate result does not
+complete the command. Retain its opaque process handle and continue the same process
+through the provider-native mechanism. Never classify or replace the verifier from a
+partial tool result. A successful `verify-open.sh` still requires its exact non-empty
+opaque path output.
 
 **A technical failure is not a verdict.** Read its complete error. Diagnose the cause.
 Correct a local command, working directory, dependency, or in-copy test fixture when the

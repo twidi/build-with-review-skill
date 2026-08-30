@@ -33,6 +33,9 @@ provider `claude_code` — **even when YOU run on Codex**, which has no cron.
 > the blocker to your parent. The current working directory is never the workspace. Never
 > infer or create a replacement.
 >
+> Read `<WORKSPACE>/prompts/common/vocabulary.md`. Its shared command-completion contract
+> governs every helper and watchdog command in this assignment.
+>
 > Read the global additional prompt through this command: `python3
 > <WORKSPACE>/prompts/common/additional-prompt.py read-global <WORKSPACE>
 > <WORKSPACE>/additional-prompts/global.md`. Treat its stdout as human instructions. Then

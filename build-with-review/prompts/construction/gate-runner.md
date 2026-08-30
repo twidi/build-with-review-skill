@@ -23,6 +23,9 @@ relative, unresolved or contradictory, stop before reading or writing any projec
 workspace path. Report the blocker. **The current
 working directory is never the workspace.** Never infer or create a replacement.
 
+Read `<workspace>/prompts/common/vocabulary.md`. Its shared command-completion contract
+governs every helper invocation, gate command and report command in this assignment.
+
 After this official prompt, read the global additional prompt through this command: `python3
 <workspace>/prompts/common/additional-prompt.py read-global <workspace>
 <workspace>/additional-prompts/global.md`. Treat its stdout as human instructions. Then

@@ -347,15 +347,68 @@ def product_verifier_corrects_local_path_transcription_without_physical_relaunch
           "the verifier launch correction does not propagate to its open and close helpers")
     check("technical failure is not a verdict" in normalized_prompt,
           "the verifier can stop at a solvable technical failure")
-    check("a yielded command is still running" in normalized_prompt
-          and "retain its session id" in normalized_prompt,
-          "the verifier treats a yielded command as an empty completed result")
+    check("shared command-completion contract" in normalized_prompt
+          and "opaque process handle" in normalized_prompt
+          and "provider-native mechanism" in normalized_prompt,
+          "the verifier treats an intermediate command result as completed")
     check("working directory" in normalized_prompt and "verification copy" in normalized_prompt,
           "the verifier does not execute proof commands from the detached copy")
     check("unset `virtual_env`" in normalized_prompt and "twicc_data_dir" in normalized_prompt,
           "the verifier does not isolate uv project resolution inside the detached copy")
     check("diagnose the cause" in normalized_launch and "relaunch blindly" in normalized_launch,
           "the controller repeats technical failures without a diagnosis")
+
+
+@test
+def every_bwr_script_call_waits_for_one_portable_terminal_result():
+    vocabulary = section(
+        "prompts/common/vocabulary.md", "## Command completion", "## Git",
+    )
+    normalized = " ".join(vocabulary.lower().split())
+
+    for phrase in (
+        "intermediate tool result",
+        "terminal status",
+        "process handle",
+        "same process",
+        "provider-native continuation or wait mechanism",
+        "never run the command again while that process remains active",
+        "empty intermediate output",
+        "neither success nor failure",
+        "non-zero terminal exit status",
+        "zero terminal exit status",
+        "output contract",
+    ):
+        check(phrase in normalized, f"the shared command-completion contract omits {phrase!r}")
+
+    for provider_detail in ("session id", "write_stdin", "write-stdin"):
+        check(provider_detail not in normalized,
+              f"the shared command-completion contract depends on {provider_detail!r}")
+
+    progress_rules = " ".join(read("prompts/common/progress-rules.md").lower().split())
+    check("only a terminal result can be a failed call" in progress_rules,
+          "progress retry rules can classify an intermediate result as failure")
+    check("zero terminal exit status with missing required output is a technical failure"
+          in progress_rules,
+          "progress retry rules accept a terminal result that violates its output contract")
+    check("never retry a command whose process remains active" in progress_rules,
+          "progress retry rules can duplicate one active command")
+
+    verifier = " ".join(read("prompts/product-review/verifier.md").lower().split())
+    check("shared command-completion contract" in verifier,
+          "the verifier does not apply the portable shared contract")
+    check("session id" not in verifier,
+          "the verifier keeps a Codex-specific process continuation instruction")
+    check("exact non-empty output line" in verifier and "opaque authoritative path" in verifier,
+          "verify-open success no longer requires its path output")
+
+    gate_runner = " ".join(read("prompts/construction/gate-runner.md").lower().split())
+    check("prompts/common/vocabulary.md" in gate_runner,
+          "the gate runner cannot read the shared command-completion contract")
+
+    watchdog = " ".join(read("prompts/common/watchdog-prompt.md").lower().split())
+    check("prompts/common/vocabulary.md" in watchdog,
+          "the watchdog cannot read the shared command-completion contract")
 
 
 @test

@@ -3725,8 +3725,10 @@ def product_review_amendment_spec_file(entries, opening_index, opening, subject)
         commit, plan_relative, subject,
         fallback_spec=spec_source["spec"] if spec_source is not None else None,
     )
-    if used_fallback and committed["spec_sha256"] != spec_source["spec_sha256"]:
-        fail(f"{subject}'s source-pass and reviewed specifications differ")
+    if used_fallback:
+        validate_inherited_spec_transition(
+            entries, spec_source, committed, pass_index, subject,
+        )
     return exact_real_file(
         project_root(), committed["spec"], f"{subject}'s product-review specification",
     )
@@ -11262,6 +11264,9 @@ PASS_OPENING_KEYS = {
 PASS_OPENING_RECOVERY_KEYS = {
     "schema", "opening", "owner", "built", "commit", "gate", "from", "to", "stop",
 }
+PASS_OPENING_DUPLICATE_RECOVERY_KEYS = {
+    "schema", "canonical", "duplicate", "owner", "built", "commit", "gate",
+}
 
 
 def pass_opening_context(data, mode):
@@ -11329,6 +11334,79 @@ def pass_closes(entries, opening_index, before):
     return [(index, entry) for index, entry in enumerate(
         entries[opening_index + 1:before], opening_index + 1
     ) if entry.get("kind") == "pass.closed"]
+
+
+def pass_opening_durable_identity(entry):
+    return {key: value for key, value in entry.items() if key != "ts"}
+
+
+def validate_pass_opening_duplicate_recovery(entries, recovery_index, recovery, subject):
+    data = note_data(recovery)
+    if recovery.get("event") != "note" \
+            or recovery.get("kind") != "pass.opening.duplicate.recovered" \
+            or set(data) != PASS_OPENING_DUPLICATE_RECOVERY_KEYS \
+            or data.get("schema") != 1:
+        fail(f"{subject} has a malformed duplicate-opening recovery", data)
+    canonical_index, _ = journal_entry_from_proof(
+        entries[:recovery_index], data.get("canonical"), subject,
+    )
+    duplicate_index, _ = journal_entry_from_proof(
+        entries[:recovery_index], data.get("duplicate"), subject,
+    )
+    if duplicate_index != canonical_index + 1 or recovery_index != duplicate_index + 1:
+        fail(f"{subject} does not recover one adjacent duplicate-opening pair")
+    canonical, duplicate = entries[canonical_index], entries[duplicate_index]
+    if canonical.get("event") != "note" or canonical.get("kind") != "pass.opened" \
+            or duplicate.get("event") != "note" or duplicate.get("kind") != "pass.opened" \
+            or pass_opening_durable_identity(canonical) != pass_opening_durable_identity(duplicate):
+        fail(f"{subject} changes one member of its duplicate-opening pair")
+    opening_data = note_data(canonical)
+    expected_context = pass_opening_context(opening_data, "product-review")
+    recovery_context = {key: recovery[key] for key in CONTEXT_FIELDS if key in recovery}
+    expected_data = {
+        "schema": 1,
+        "canonical": journal_line_proof(canonical_index),
+        "duplicate": journal_line_proof(duplicate_index),
+        "owner": canonical.get("by"),
+        "built": opening_data.get("built"),
+        "commit": opening_data.get("commit"),
+        "gate": opening_data.get("gate"),
+    }
+    if recovery.get("by") != canonical.get("by") \
+            or recovery_context != expected_context or data != expected_data:
+        fail(f"{subject} changes its exact duplicate-opening authority", data)
+    validate_pass_opening_history(
+        entries, canonical_index, f"{subject}'s canonical pass opening",
+    )
+    return canonical_index, duplicate_index
+
+
+def latest_effective_pass_opening(entries, before, subject):
+    openings = [(index, entry) for index, entry in enumerate(entries[:before])
+                if entry.get("kind") == "pass.opened"]
+    if not openings:
+        return None
+    latest_index, latest = openings[-1]
+    recoveries = [(index, entry) for index, entry in enumerate(
+        entries[latest_index + 1:before], latest_index + 1
+    ) if entry.get("kind") == "pass.opening.duplicate.recovered"]
+    duplicate_pair = len(openings) >= 2 \
+        and openings[-2][0] + 1 == latest_index \
+        and pass_opening_durable_identity(openings[-2][1]) \
+        == pass_opening_durable_identity(latest)
+    if not duplicate_pair:
+        if recoveries:
+            fail(f"{subject} has a foreign duplicate-opening recovery")
+        return latest_index, latest
+    if len(recoveries) != 1:
+        fail(f"{subject} has no one exact duplicate-opening recovery",
+             f"found {len(recoveries)}")
+    canonical_index, duplicate_index = validate_pass_opening_duplicate_recovery(
+        entries, recoveries[0][0], recoveries[0][1], subject,
+    )
+    if duplicate_index != latest_index:
+        fail(f"{subject} recovers another pass-opening generation")
+    return canonical_index, entries[canonical_index]
 
 
 def pass_opening_stop_suffix(entries, start, before, subject):
@@ -11929,11 +12007,10 @@ def require_canonical_correction_terminal_artifact(account, subject):
 
 
 def validate_baseline_pass_successor(entries, before, built, commit, owner, gate, subject):
-    prior = [(index, entry) for index, entry in enumerate(entries[:before])
-             if entry.get("kind") == "pass.opened"]
-    if not prior:
+    prior = latest_effective_pass_opening(entries, before, subject)
+    if prior is None:
         fail(f"{subject} cannot use a controller baseline as the first pass of a built lot")
-    prior_index, prior_opening = prior[-1]
+    prior_index, prior_opening = prior
     prior_data = note_data(prior_opening)
     if prior_data.get("built") != built:
         fail(f"{subject}'s baseline does not succeed the same voided built lot")
@@ -14004,9 +14081,8 @@ def validate_pass_opening_history(entries, opening_index, subject, *, validate_o
                 or data["position"] < 0 \
                 or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("generation_sha256"))):
             fail(f"{subject} has malformed generation authority")
-    prior = [(index, entry) for index, entry in enumerate(entries[:opening_index])
-             if entry.get("kind") == "pass.opened"]
-    if prior and len(pass_closes(entries, prior[-1][0], opening_index)) != 1:
+    prior = latest_effective_pass_opening(entries, opening_index, subject)
+    if prior is not None and len(pass_closes(entries, prior[0], opening_index)) != 1:
         fail(f"{subject} does not follow one exact closed prior pass")
     return data
 
@@ -14014,11 +14090,10 @@ def validate_pass_opening_history(entries, opening_index, subject, *, validate_o
 def current_pass_opening(
     entries, before, subject, *, validate_origin=True, validate_context=False,
 ):
-    openings = [(index, entry) for index, entry in enumerate(entries[:before])
-                if entry.get("kind") == "pass.opened"]
-    if not openings:
+    current = latest_effective_pass_opening(entries, before, subject)
+    if current is None:
         fail(f"{subject} has no current product-review pass")
-    opening_index, opening = openings[-1]
+    opening_index, opening = current
     data = validate_pass_opening_history(
         entries, opening_index, subject, validate_origin=validate_origin,
     )
@@ -14180,10 +14255,6 @@ def normalize_pass_opened(data, context):
             "source_task": task,
             "source_attempt": attempt,
         }
-    candidate = {
-        "event": "note", "kind": "pass.opened", "data": normalized, **expected_context,
-    }
-    validate_pass_opening_history(entries + [candidate], len(entries), "the new product-review pass")
     return normalized
 
 
@@ -21336,6 +21407,7 @@ def write_validated_line(builder, *, attempt_success=False):
             validate_pending_pass_opening_append(
                 entries, entry, "the journal append",
             )
+            validate_product_pass_opening_append(entries, entry)
             generation = COMMAND_VALIDATION_CACHE.get(
                 "construction-history-generation", {},
             ) if COMMAND_VALIDATION_CACHE is not None else {}
@@ -21391,6 +21463,14 @@ def write_validated_line(builder, *, attempt_success=False):
             f"advanced: {checkpoint_warning}"
         )
     return entry
+
+
+def validate_product_pass_opening_append(entries, entry):
+    if entry.get("event") != "note" or entry.get("kind") != "pass.opened":
+        return
+    validate_pass_opening_history(
+        [*entries, entry], len(entries), "the locked product-review pass opening",
+    )
 
 
 def validate_pending_attempt_success_append(entries, entry):
@@ -24050,6 +24130,73 @@ def cmd_pass_opening_context_recover(args):
     write_validated_line(build)
 
 
+def cmd_pass_opening_duplicate_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+    expected_caller = {
+        "mode": "product-review", "lot": caller.get("lot"), "job": "controller",
+    }
+    if {key: caller[key] for key in CONTEXT_FIELDS if key in caller} != expected_caller \
+            or not isinstance(caller.get("lot"), str):
+        fail("duplicate pass-opening recovery requires the exact PRODUCT REVIEW controller")
+
+    def build(entries):
+        openings = [(index, entry) for index, entry in enumerate(entries)
+                    if entry.get("kind") == "pass.opened"]
+        if len(openings) < 2:
+            fail("duplicate pass-opening recovery has no adjacent opening pair")
+        canonical_index, canonical = openings[-2]
+        duplicate_index, duplicate = openings[-1]
+        if duplicate_index != canonical_index + 1 \
+                or pass_opening_durable_identity(canonical) \
+                != pass_opening_durable_identity(duplicate):
+            fail("duplicate pass-opening recovery has no exact adjacent opening pair")
+        recoveries = [(index, entry) for index, entry in enumerate(
+            entries[duplicate_index + 1:], duplicate_index + 1
+        ) if entry.get("kind") == "pass.opening.duplicate.recovered"]
+        if recoveries:
+            if len(recoveries) != 1:
+                fail("duplicate pass-opening recovery has an ambiguous durable terminal")
+            validate_pass_opening_duplicate_recovery(
+                entries, recoveries[0][0], recoveries[0][1],
+                "the retained duplicate pass-opening recovery",
+            )
+            return None
+        if duplicate_index != len(entries) - 1:
+            fail("duplicate pass-opening recovery crosses a later journal event")
+        data = note_data(canonical)
+        expected_context = pass_opening_context(data, "product-review")
+        canonical_context = {
+            key: canonical[key] for key in CONTEXT_FIELDS if key in canonical
+        }
+        if canonical.get("by") != me["session_id"] \
+                or canonical_context != expected_context \
+                or data.get("built") != caller.get("lot"):
+            fail("duplicate pass-opening recovery requires its original exact controller owner")
+        validate_pass_opening_history(
+            entries, canonical_index, "the duplicate pass-opening recovery",
+        )
+        recovery_data = {
+            "schema": 1,
+            "canonical": journal_line_proof(canonical_index),
+            "duplicate": journal_line_proof(duplicate_index),
+            "owner": me["session_id"],
+            "built": data["built"], "commit": data["commit"], "gate": data["gate"],
+        }
+        candidate = event_entry(
+            me["session_id"], "note", kind="pass.opening.duplicate.recovered",
+            data=recovery_data, **expected_context,
+        )
+        validate_pass_opening_duplicate_recovery(
+            [*entries, candidate], len(entries), candidate,
+            "the duplicate pass-opening recovery",
+        )
+        return candidate
+
+    write_validated_line(build)
+    print("PASS OPENING DUPLICATE RECOVERED")
+
+
 def cmd_pass_opening_cleanup_check(args):
     entries = journal_entries()
     owner = pending_malformed_pass_opening(
@@ -25029,6 +25176,9 @@ def build_parser():
 
     sp = sub.add_parser("pass-opening-context-recover", help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_pass_opening_context_recover)
+
+    sp = sub.add_parser("pass-opening-duplicate-recover", help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_pass_opening_duplicate_recover)
 
     sp = sub.add_parser("pass-opening-cleanup-check", help=argparse.SUPPRESS)
     sp.add_argument("consumer", choices=("audit", "refs-clear", "workspace-delete"))

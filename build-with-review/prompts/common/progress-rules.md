@@ -257,7 +257,13 @@ exact bracket before acting on its result.
   afterwards — the reader has no way to tell it apart from a thing that never happened.
 - **You never refresh anything for the dashboard.** The script does it, last, on its own.
 
-**If a call fails: run the same call once more — every command here is safe to repeat.**
+**Only a terminal result can be a failed call.** A non-zero terminal exit status is a
+failure. A zero terminal exit status with missing required output is a technical failure.
+Never retry a command whose process remains active. Follow `vocabulary.md`'s shared
+command-completion contract until the same process reports its terminal status and
+complete output.
+
+**If a terminal call fails: run the same call once more — every command here is safe to repeat.**
 A status or a retirement re-run re-performs TwiCC changes that are idempotent and writes
 the line that was missing; a note that failed **with a message** wrote nothing, so its
 retry writes one line — every refusal this script prints happens before anything is
