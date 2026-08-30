@@ -19114,9 +19114,11 @@ def correction_retry_post_task_revision_preserves_the_current_assignment():
             verify_live_gate=False,
         )
     progress_module = progress_runner.progress_module
-    before = progress_module.outstanding_final_checker_set(
-        journal_lines(), len(journal_lines()), "lot-1", 1,
-        "the post-task retry revision",
+    before = progress_runner.project(
+        lambda _progress: progress_module.outstanding_final_checker_set(
+            journal_lines(), len(journal_lines()), "lot-1", 1,
+            "the post-task retry revision",
+        )
     )
     obligation_id = before["entries"][0]["source"]["obligation_id"]
     old_assignment = before["entries"][0]["assignment"]
@@ -19172,11 +19174,17 @@ def correction_retry_post_task_revision_preserves_the_current_assignment():
     finished = revise_correction_in_process(2, progress_runner)
     check("CORRECTION ROUND REVISED" in finished, finished)
     entries = journal_lines()
-    current = progress_module.outstanding_final_checker_set(
-        entries, len(entries), "lot-1", 1, "the durable post-task retry revision",
+    current = progress_runner.project(
+        lambda _progress: progress_module.outstanding_final_checker_set(
+            entries, len(entries), "lot-1", 1,
+            "the durable post-task retry revision",
+        )
     )
-    state = progress_module.current_correction_contract_state(
-        entries, len(entries), "lot-1", 1, "the durable post-task retry revision",
+    state = progress_runner.project(
+        lambda _progress: progress_module.current_correction_contract_state(
+            entries, len(entries), "lot-1", 1,
+            "the durable post-task retry revision",
+        )
     )
     revision_tree = subprocess.check_output(
         ["git", "-C", REPO, "rev-parse", "HEAD^{tree}"], text=True,
