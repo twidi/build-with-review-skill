@@ -1233,7 +1233,7 @@ def correction_gate_authority_data(
     context = {
         "lot": lot, "correction": correction, "task": task, "attempt": attempt,
     }
-    if progress_runner is None:
+    if progress_runner is None or not hasattr(progress_runner, "project"):
         identity = load_common_module("progress").active_attempt_identity(
             context, "the correction gate fixture", include_completion=True,
         )
@@ -19103,12 +19103,7 @@ def post_task_final_checker_contract_mapping_publishes_commit_and_fresh_baseline
         "tree": revision["data"]["tree"],
         "gate": gate,
     }, resolved)
-    replacement = subprocess.run(
-        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
-         "--correction", "lot-1", "1", "2", "2"],
-        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
-    )
-    check(replacement.returncode == 0, replacement.stdout + replacement.stderr)
+    start_correction_attempt_in_process(2, 2, progress_runner)
     return progress_runner
 
 
@@ -29648,6 +29643,20 @@ def construction_shell_task_manifest_consumers_ignore_fenced_headings():
         len(marker) == 2 and marker[1].split()[2] == "1",
         f"the attempt froze a non-structural task count: {marker}",
     )
+    implementer = {
+        "schema": 1, "job": "implementer", "mode": "construction",
+        "feature": "demo-feature", "lot": "lot-1", "task": 1,
+        "attempt": 1, "status": "working",
+    }
+    cfg["sessions"][TARGET] = {
+        "id": TARGET, "annotations": {"bwr": implementer},
+    }
+    set_config(cfg)
+    physical_start = run_progress("session-started", TARGET)
+    check(
+        physical_start.returncode == 0,
+        physical_start.stdout + physical_start.stderr,
+    )
 
     workspace_plan = pathlib.Path(WORKSPACE) / "plans/lot-1-plan.md"
     updated_plan = workspace_plan.read_text(encoding="utf-8").replace(
@@ -29704,6 +29713,10 @@ def construction_shell_task_manifest_consumers_ignore_fenced_headings():
         stable == candidate,
         succeeded.stdout + succeeded.stderr,
     )
+    retired = run_progress(
+        "session-retired", TARGET, "done", "--archive", "--hide",
+    )
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
 
 
 @test
@@ -30787,7 +30800,7 @@ def correction_escalation_c2_authenticates_construction_implementer_start():
     check(started.returncode == 0, started.stdout + started.stderr)
     start = journal_lines()[-1]
     account = start.get("data")
-    check(isinstance(account, dict) and account.get("schema") == 1, start)
+    check(isinstance(account, dict) and account.get("schema") == 2, start)
     check(account.get("attempt_identity", {}).get("lot") == "lot-1.1", account)
     check(account.get("attempt_identity", {}).get("task") == 1, account)
     check(account.get("attempt_identity", {}).get("attempt") == 1, account)
@@ -30827,6 +30840,7 @@ def correction_escalation_c2_authenticates_construction_implementer_start():
     ) is None, "the exact Construction start account did not replay")
 
     escalation_start = json.loads(json.dumps(start))
+    escalation_start["data"]["schema"] = 1
     escalation_baseline = {"commit": base, "plan": "0:" + "4" * 64}
     escalation_identity = escalation_start["data"]["attempt_identity"]
     escalation_identity["escalation_baseline"] = escalation_baseline
@@ -32901,7 +32915,8 @@ def correction_escalation_c39d_recut_uses_the_exact_rewind_authority():
         "data": {
             "schema": 2, "origin": "correction-round", "tasks": 2,
             "commit": prior_commit,
-            "plan_sha256": "5" * 64,
+            "plan": relative,
+            "plan_sha256": hashlib.sha256(initial_plan.encode()).hexdigest(),
             "retry_transition": {
                 "transition_id": transition_id, "output_sha256": "6" * 64,
             },
@@ -32991,6 +33006,9 @@ def correction_escalation_c39d_recut_uses_the_exact_rewind_authority():
         for task, account in committed_task_accounts.items()
     ]
     progress.plan_task_manifest = lambda _payload, _subject: ["Task 1", "Task 2"]
+    progress.correction_escalation_completeness_semantics = (
+        lambda *_args, **_kwargs: {"decisions": 1, "tasks": 2, "deps": 1}
+    )
     progress.correction_escalation_root_covers = (
         lambda _text, _subject: [source["terminal_data"]["artifact"]]
     )
@@ -38177,7 +38195,8 @@ def main():
             "correction_amendment_return.py", "correction_escalation.py",
             "plan-commit.sh",
             "work_unit.py", "correction_attempt_start.py", "attempt-started.sh",
-            "correction_attempt_success.py", "correction_attempt_failure.py",
+            "attempt_success.py", "correction_attempt_success.py",
+            "correction_attempt_failure.py",
             "correction_attempt_stop.py",
             "attempt-failed.sh", "diagnostic-open.sh", "diagnostic-close.sh",
             "correction_rewind.py", "rewind.sh",
