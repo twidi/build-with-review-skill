@@ -24,6 +24,11 @@ REOPEN_PREFIXES = (
     "report returned whole for recalibration",
 )
 CONTEXT_FIELDS = ("mode", "lot", "task", "attempt", "round", "mandate", "job")
+PRODUCT_RETIREMENT_RECOVERY_KIND = "product.reviewer.retirement.recovered"
+PRODUCT_RECEIPT_COUNT_KEYS = {"critical", "important", "minor", "decision"}
+PRODUCT_RECEIPT_KEYS = PRODUCT_RECEIPT_COUNT_KEYS | {
+    "pass_commit", "pass_gate", "report_sha256",
+}
 
 
 def fail(message):
@@ -34,6 +39,17 @@ def fail(message):
 def data(entry):
     value = entry.get("data")
     return value if isinstance(value, dict) else {}
+
+
+def context(entry):
+    return {key: entry[key] for key in CONTEXT_FIELDS if key in entry}
+
+
+def journal_proof(entry, subject):
+    proof = entry.get("_journal_proof")
+    if not isinstance(proof, str) or not proof:
+        fail(f"{subject} has no exact journal proof")
+    return proof
 
 
 def read_entries():
@@ -287,8 +303,12 @@ def same_generation(entry, mode, generation):
     return all(entry.get(key) == value for key, value in generation.items())
 
 
-def session_records(entries, opening_index, mode, mandates, generation, product_generation=None):
+def session_records(
+        entries, opening_index, mode, mandates, generation, product_generation=None,
+        *, allow_pending_recovery=False,
+):
     records = {}
+    generation_owner = entries[opening_index].get("by")
     for index, entry in enumerate(entries[opening_index + 1:], opening_index + 1):
         if entry.get("event") != "session-started" \
                 or not same_generation(entry, mode, generation):
@@ -305,6 +325,11 @@ def session_records(entries, opening_index, mode, mandates, generation, product_
                     fail(f"the {mandate} reviewer start changes its Product pass generation")
             elif data(entry):
                 fail(f"the ordinary {mandate} reviewer start adds pass-generation authority")
+            if entry.get("by") != generation_owner or context(entry) != {
+                "mode": "product-review", "lot": generation["lot"],
+                "mandate": mandate, "job": "reviewer",
+            }:
+                fail("a current Product reviewer start has no exact pass owner and context")
         if session in records:
             fail(f"reviewer session {session} has duplicate starts")
         records[session] = {
@@ -312,10 +337,23 @@ def session_records(entries, opening_index, mode, mandates, generation, product_
             "mandate": mandate,
             "start": index,
             "retirement": None,
+            "recovery": None,
             "statuses": [],
         }
 
     for index, entry in enumerate(entries[opening_index + 1:], opening_index + 1):
+        if entry.get("event") == "note" \
+                and entry.get("kind") == PRODUCT_RETIREMENT_RECOVERY_KIND:
+            session = data(entry).get("session")
+            record = records.get(session)
+            if mode != "product-review" or record is None:
+                fail("a Product reviewer retirement recovery has no exact session owner")
+            validate_product_reviewer_retirement_recovery(
+                entries, index, entry, opening_index, generation, record,
+            )
+            record["retirement"] = None
+            record["recovery"] = index
+            continue
         if entry.get("event") not in {"session-status", "session-retired"}:
             continue
         record = records.get(entry.get("session"))
@@ -324,9 +362,25 @@ def session_records(entries, opening_index, mode, mandates, generation, product_
         if not same_generation(entry, mode, generation) \
                 or entry.get("mandate") != record["mandate"]:
             fail(f"reviewer session {record['session']} changes its pool identity")
+        if mode == "product-review" and (
+            entry.get("by") != generation_owner
+            or context(entry) != {
+                "mode": "product-review", "lot": generation["lot"],
+                "mandate": record["mandate"], "job": "reviewer",
+            }
+        ):
+            fail(f"reviewer session {record['session']} changes its Product pass owner")
         if entry.get("event") == "session-status":
             if record["retirement"] is not None:
-                fail(f"reviewer session {record['session']} changes after retirement")
+                has_later_recovery = mode == "product-review" and any(
+                    candidate.get("event") == "note"
+                    and candidate.get("kind") == PRODUCT_RETIREMENT_RECOVERY_KIND
+                    and data(candidate).get("session") == record["session"]
+                    for candidate in entries[index + 1:]
+                )
+                if mode != "product-review" \
+                        or not allow_pending_recovery and not has_later_recovery:
+                    fail(f"reviewer session {record['session']} changes after retirement")
             record["statuses"].append((index, entry.get("status")))
             continue
         if record["retirement"] is not None:
@@ -375,18 +429,46 @@ def receipt_owner(records, mandate, receipt_index, *, forbid_later=True):
     return candidates[0]
 
 
-def exact_product_identity(receipt, generation):
+def exact_product_identity(receipt, authority=None, built=None, mandate=None):
     receipt_data = data(receipt)
-    opening_data = generation["opening"]
-    mandate = receipt.get("mandate")
-    if opening_data.get("schema") == 2:
-        account = generation["accounts"].get(mandate)
+    product_generation = authority if isinstance(authority, dict) \
+        and set(authority).issuperset({"opening", "accounts"}) else None
+    opening = None if product_generation is not None else authority
+    if product_generation is not None:
+        opening_data = product_generation["opening"]
+        mandate = receipt.get("mandate")
+        account = product_generation["accounts"].get(mandate)
+    else:
+        opening_data = data(opening) if opening is not None else None
+        account = product_pass_generation_account(
+            journal_proof(opening, "the Product receipt opening"), opening_data, mandate,
+        ) if opening_data is not None and opening_data.get("schema") == 2 else None
+    if account is not None:
         if any(receipt_data.get(key) != value for key, value in account.items()):
             fail("a PRODUCT REVIEW receipt changes its pass generation")
         identity = {**account, "report_sha256": receipt_data.get("report_sha256")}
         if not isinstance(identity["report_sha256"], str) or not identity["report_sha256"]:
             fail("a PRODUCT REVIEW receipt has malformed verifier identity")
         return identity
+    if opening is not None:
+        expected_context = {
+            "mode": "product-review", "lot": built,
+            "mandate": mandate, "job": "controller",
+        }
+        if receipt.get("event") != "note" or receipt.get("kind") != "report.received" \
+                or receipt.get("by") != opening.get("by") \
+                or context(receipt) != expected_context \
+                or set(receipt_data) != PRODUCT_RECEIPT_KEYS \
+                or any(not isinstance(receipt_data.get(key), int)
+                       or isinstance(receipt_data.get(key), bool) or receipt_data[key] < 0
+                       for key in PRODUCT_RECEIPT_COUNT_KEYS) \
+                or receipt_data.get("pass_commit") != opening_data.get("commit") \
+                or receipt_data.get("pass_gate") != opening_data.get("gate") \
+                or not isinstance(receipt_data.get("report_sha256"), str) \
+                or len(receipt_data["report_sha256"]) != 64 \
+                or any(character not in "0123456789abcdef"
+                       for character in receipt_data["report_sha256"]):
+            fail("a PRODUCT REVIEW receipt changes its exact pass authority")
     identity = {key: receipt_data.get(key)
                 for key in ("pass_commit", "pass_gate", "report_sha256")}
     if any(not isinstance(value, str) or not value for value in identity.values()):
@@ -394,39 +476,291 @@ def exact_product_identity(receipt, generation):
     return identity
 
 
-def product_verifier_state(entries, receipt_index, mandate, identity):
-    events = [entry for entry in entries[receipt_index + 1:]
-              if entry.get("kind") == "finding-verifier"
-              and entry.get("mandate") == mandate
-              and entry.get("event") in {"subagent-started", "subagent-ended"}]
+def validate_product_verifier_terminal(event_data, identity, receipt_data, mandate):
+    if set(event_data) == set(identity) | {"unusable"}:
+        if event_data.get("unusable") not in UNUSABLE_RESULTS:
+            fail(f"the {mandate} finding-verifier has an unknown unusable terminal")
+        return "unusable"
+    result_keys = {"confirmed", "disproved", "malformed", "claims"}
+    if set(event_data) != set(identity) | result_keys:
+        fail(f"the {mandate} finding-verifier has a malformed terminal")
+    if any(not isinstance(event_data.get(key), int)
+           or isinstance(event_data.get(key), bool) or event_data[key] < 0
+           for key in ("confirmed", "disproved", "malformed")):
+        fail(f"the {mandate} finding-verifier has malformed result counts")
+    expected_count = sum(receipt_data.get(key, -1) for key in (
+        "critical", "important", "minor", "decision",
+    ))
+    claims = event_data.get("claims")
+    if expected_count < 0 or not isinstance(claims, list) \
+            or len(claims) != expected_count:
+        fail(f"the {mandate} finding-verifier lacks one result per accepted claim")
+    totals = {"confirmed": 0, "disproved": 0, "malformed": 0}
+    kinds = {"correction": 0, "decision": 0}
+    actual_ids = []
+    for claim in claims:
+        if not isinstance(claim, dict) or set(claim) != {"id", "kind", "verdict"} \
+                or claim.get("kind") not in kinds or claim.get("verdict") not in totals:
+            fail(f"the {mandate} finding-verifier has a malformed claim")
+        actual_ids.append(claim["id"])
+        kinds[claim["kind"]] += 1
+        totals[claim["verdict"]] += 1
+    if actual_ids != [f"F{ordinal}" for ordinal in range(1, expected_count + 1)] \
+            or totals != {key: event_data[key] for key in totals} \
+            or kinds["decision"] != receipt_data.get("decision") \
+            or kinds["correction"] != expected_count - receipt_data.get("decision", -1):
+        fail(f"the {mandate} finding-verifier result contradicts its accepted report")
+    return "complete-malformed" if event_data["malformed"] else "complete"
+
+
+def product_verifier_generation(
+        entries, receipt_index, mandate, identity, receipt_data, *,
+        before=None, owner=None, built=None,
+):
+    before = len(entries) if before is None else before
+    events = [(index, entry) for index, entry in enumerate(
+        entries[receipt_index + 1:before], receipt_index + 1,
+    ) if entry.get("kind") == "finding-verifier"
+        and entry.get("mandate") == mandate
+        and entry.get("event") in {"subagent-started", "subagent-ended"}]
     expecting = "start"
     state = "none"
-    for entry in events:
+    opening = None
+    terminal = None
+    for index, entry in events:
         event = entry["event"]
         event_data = data(entry)
+        if owner is not None and (
+            entry.get("by") != owner
+            or context(entry) != {
+                "mode": "product-review", "lot": built,
+                "mandate": mandate, "job": "controller",
+            }
+        ):
+            fail(f"the {mandate} finding-verifier changes its pass controller")
         if expecting == "start":
             if event != "subagent-started" or event_data != identity:
                 fail(f"the {mandate} finding-verifier has a contradictory physical sequence")
             expecting = "end"
             state = "open"
+            opening = (index, entry)
+            terminal = None
             continue
         if event != "subagent-ended" \
                 or any(event_data.get(key) != value for key, value in identity.items()):
             fail(f"the {mandate} finding-verifier changes its physical identity")
-        if set(event_data) == set(identity) | {"unusable"} \
-                and event_data.get("unusable") in UNUSABLE_RESULTS:
+        terminal_state = validate_product_verifier_terminal(
+            event_data, identity, receipt_data, mandate,
+        )
+        if terminal_state == "unusable":
             expecting = "start"
             state = "unusable"
+            terminal = (index, entry)
             continue
-        result_keys = {"confirmed", "disproved", "malformed", "claims"}
-        if set(event_data) != set(identity) | result_keys:
-            fail(f"the {mandate} finding-verifier has a malformed terminal")
-        malformed = event_data.get("malformed")
-        if not isinstance(malformed, int) or isinstance(malformed, bool) or malformed < 0:
-            fail(f"the {mandate} finding-verifier has a malformed result count")
         expecting = "complete"
-        state = "complete-malformed" if malformed else "complete"
-    return state
+        state = terminal_state
+        terminal = (index, entry)
+    return {"state": state, "opening": opening, "terminal": terminal}
+
+
+def product_verifier_state(entries, receipt_index, mandate, identity):
+    return product_verifier_generation(
+        entries, receipt_index, mandate, identity, data(entries[receipt_index]),
+    )["state"]
+
+
+def product_reviewer_receipts(entries, opening_index, mandate, *, before=None):
+    before = len(entries) if before is None else before
+    return [(index, entry) for index, entry in enumerate(
+        entries[opening_index + 1:before], opening_index + 1,
+    ) if entry.get("kind") == "report.received" and entry.get("mandate") == mandate]
+
+
+def product_reviewer_generation(entries, session):
+    opening_index, mandates, generation, built = current_generation(entries, "product-review")
+    opening = entries[opening_index]
+    records = session_records(entries, opening_index, "product-review", mandates, generation)
+    record = records.get(session)
+    if record is None:
+        fail("the Product reviewer generation has no exact session start")
+    mandate = record["mandate"]
+    receipts = product_reviewer_receipts(entries, opening_index, mandate)
+    receipt_index = receipt = identity = verifier = None
+    if receipts:
+        receipt_index, receipt = receipts[-1]
+        owner = receipt_owner(records, mandate, receipt_index, forbid_later=False)
+        if owner["session"] != session:
+            fail("the Product reviewer generation receipt belongs to another session")
+        identity = exact_product_identity(receipt, opening, built, mandate)
+        verifier = product_verifier_generation(
+            entries, receipt_index, mandate, identity, data(receipt),
+            owner=opening.get("by"), built=built,
+        )
+    return {
+        "opening_index": opening_index,
+        "opening": opening,
+        "built": built,
+        "owner": opening.get("by"),
+        "controller_context": context(opening),
+        "record": record,
+        "receipt_index": receipt_index,
+        "receipt": receipt,
+        "identity": identity,
+        "verifier": verifier,
+    }
+
+
+def product_reviewer_settlement_suffix(
+        entries, start, before, opening, generation, record, verifier, subject,
+):
+    mandate = record["mandate"]
+    session = record["session"]
+    owner = opening.get("by")
+    reviewer_context = {
+        "mode": "product-review", "lot": generation["lot"],
+        "mandate": mandate, "job": "reviewer",
+    }
+    controller_context = {
+        "mode": "product-review", "lot": generation["lot"],
+        "mandate": mandate, "job": "controller",
+    }
+    malformed_ids = [
+        claim["id"] for claim in data(verifier["terminal"][1])["claims"]
+        if claim["verdict"] == "malformed"
+    ]
+    proofs = []
+    spend_count = 0
+    working_seen = False
+    for index, entry in enumerate(entries[start:before], start):
+        event = entry.get("event")
+        kind = entry.get("kind")
+        same_mandate = entry.get("mandate") == mandate
+        same_session = entry.get("session") == session
+        if kind == "bound.spent" and same_mandate:
+            expected_text = (
+                f"malformed finding returned: {malformed_ids[spend_count]} - lens {session}"
+                if spend_count < len(malformed_ids) else None
+            )
+            if working_seen or entry.get("event") != "note" \
+                    or entry.get("by") != owner or context(entry) != controller_context \
+                    or set(entry) - {"ts", "_journal_proof"} != {
+                        "by", "event", "kind", "text", "mode", "lot", "mandate", "job",
+                    } or entry.get("text") != expected_text:
+                fail(f"{subject} has a foreign malformed-finding settlement")
+            proofs.append(journal_proof(entry, subject))
+            spend_count += 1
+            continue
+        if event == "session-status" and same_session:
+            if working_seen or entry.get("status") != "working" \
+                    or entry.get("by") != owner or context(entry) != reviewer_context \
+                    or set(entry) - {"ts", "_journal_proof"} != {
+                        "by", "event", "session", "status", "mode", "lot", "mandate", "job",
+                    } or spend_count not in {0, len(malformed_ids)}:
+                fail(f"{subject} has a foreign post-retirement reviewer status")
+            proofs.append(journal_proof(entry, subject))
+            working_seen = True
+            continue
+        replacement = event == "session-started" and same_generation(
+            entry, "product-review", generation,
+        ) and same_mandate
+        closes_pass = kind == "pass.closed"
+        opens_amendment = kind == "amendment.opened" \
+            and data(entry).get("origin") == "product-review"
+        whole_run_cleanup = kind == "cleanup.started" \
+            and data(entry).get("scope") == "whole-run"
+        stops_run = kind in {"paused", "aborted"} \
+            and entry.get("by") == owner \
+            and context(entry) == {
+                "mode": "product-review", "lot": generation["lot"], "job": "controller",
+            }
+        if same_session or same_mandate or replacement or closes_pass \
+                or opens_amendment or whole_run_cleanup or stops_run:
+            fail(f"{subject} crosses a later event for the same reviewer generation")
+    if spend_count not in {0, len(malformed_ids)}:
+        fail(f"{subject} has an incomplete malformed-finding settlement")
+    return {"proofs": proofs, "reopened": spend_count > 0}
+
+
+def product_reviewer_recovery_account(
+        entries, before, opening_index, generation, record, subject,
+):
+    opening = entries[opening_index]
+    retirement = record.get("retirement")
+    if retirement is None or record.get("recovery") is not None:
+        fail(f"{subject} has no one mistaken retirement")
+    retirement_index, status = retirement
+    retirement_entry = entries[retirement_index]
+    mandate = record["mandate"]
+    reviewer_context = {
+        "mode": "product-review", "lot": generation["lot"],
+        "mandate": mandate, "job": "reviewer",
+    }
+    if status != "done" or retirement_entry.get("archived") is not True \
+            or retirement_entry.get("hidden") is not True \
+            or retirement_entry.get("by") != opening.get("by") \
+            or context(retirement_entry) != reviewer_context:
+        fail(f"{subject} does not select one exact done/archive/hide retirement")
+
+    receipts = product_reviewer_receipts(entries, opening_index, mandate, before=before)
+    if not receipts:
+        fail(f"{subject} has no accepted report receipt")
+    receipt_index, receipt = receipts[-1]
+    if not (record["start"] < receipt_index < retirement_index < before):
+        fail(f"{subject} has an unordered reviewer generation")
+    identity = exact_product_identity(
+        receipt, opening, generation["lot"], mandate,
+    )
+    verifier = product_verifier_generation(
+        entries, receipt_index, mandate, identity, data(receipt), before=retirement_index,
+        owner=opening.get("by"), built=generation["lot"],
+    )
+    if verifier["state"] != "complete-malformed" \
+            or verifier["opening"] is None or verifier["terminal"] is None \
+            or verifier["terminal"][0] >= retirement_index:
+        fail(f"{subject} has no exact complete-malformed verifier call")
+
+    settlement = product_reviewer_settlement_suffix(
+        entries, retirement_index + 1, before, opening, generation, record,
+        verifier, subject,
+    )
+
+    report_sha256 = identity["report_sha256"]
+
+    verifier_opening_index, verifier_opening = verifier["opening"]
+    verifier_terminal_index, verifier_terminal = verifier["terminal"]
+    return {
+        "schema": 1,
+        "pass_opening": journal_proof(opening, subject),
+        "owner": opening.get("by"),
+        "controller_context": context(opening),
+        "session_start": journal_proof(entries[record["start"]], subject),
+        "session": record["session"],
+        "mandate": mandate,
+        "receipt": journal_proof(receipt, subject),
+        "report_sha256": report_sha256,
+        "verifier_opening": journal_proof(verifier_opening, subject),
+        "verifier_terminal": journal_proof(verifier_terminal, subject),
+        "retirement": journal_proof(retirement_entry, subject),
+        "settlement": settlement["proofs"],
+    }
+
+
+def validate_product_reviewer_retirement_recovery(
+        entries, index, entry, opening_index, generation, record,
+):
+    subject = "the Product reviewer retirement recovery"
+    expected = product_reviewer_recovery_account(
+        entries, index, opening_index, generation, record, subject,
+    )
+    expected_context = {
+        "mode": "product-review", "lot": generation["lot"], "job": "controller",
+    }
+    if entry.get("event") != "note" \
+            or entry.get("kind") != PRODUCT_RETIREMENT_RECOVERY_KIND \
+            or entry.get("by") != expected["owner"] \
+            or context(entry) != expected_context \
+            or data(entry) != expected:
+        fail(f"{subject} changes its exact authority")
 
 
 def spec_state(entries, opening_index, mandates, records, generation):
@@ -494,9 +828,12 @@ def product_state(entries, opening_index, mandates, records, generation):
             continue
 
         owner = receipt_owner(records, mandate, receipt_index, forbid_later=False)
-        identity = exact_product_identity(receipt, generation)
-        verifier = product_verifier_state(entries, receipt_index, mandate, identity)
-        retirement = owner["retirement"]
+        reviewer_generation = product_reviewer_generation(entries, owner["session"])
+        if reviewer_generation["receipt_index"] != receipt_index \
+                or reviewer_generation["receipt"] is not receipt:
+            fail(f"the {mandate} reviewer projector selected another report generation")
+        verifier = reviewer_generation["verifier"]["state"]
+        retirement = reviewer_generation["record"]["retirement"]
         if retirement is not None and retirement[1] != "done" and verifier != "complete":
             states[mandate] = "active" if active else "pending"
             if active:

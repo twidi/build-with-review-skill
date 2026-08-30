@@ -47,6 +47,7 @@ FINAL_CHECKER_OBLIGATIONS_SOURCE = os.path.join(
 )
 JOURNAL_CONTEXT_SOURCE = os.path.join(HERE, "prompts", "common", "journal_context.py")
 SPEC_EDIT_SOURCE = os.path.join(HERE, "prompts", "common", "spec_edit_auth.py")
+REVIEW_POOL_SOURCE = os.path.join(HERE, "prompts", "common", "review-pool.py")
 SPEC_PROMPTS = os.path.join(HERE, "prompts", "spec")
 PRODUCT_PROMPTS = os.path.join(HERE, "prompts", "product-review")
 AMENDMENT_PROMPTS = os.path.join(HERE, "prompts", "amendment")
@@ -25267,6 +25268,298 @@ def product_receipt_counts_every_structured_finding_in_its_hashed_report():
 
 
 @test
+def product_reviewer_done_retirement_refuses_malformed_and_recovers_one_exact_generation():
+    commit, gate, _ = seed_task_gate("lot-1", "malformed-retirement-recovery")
+    controller = {
+        "schema": 1, "job": "controller", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1", "status": "working",
+    }
+    reviewer = {
+        "schema": 1, "job": "reviewer", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1", "mandate": "meaning",
+        "status": "working",
+    }
+    config = default_config()
+    config["whoami"] = {
+        "session_id": CALLER,
+        "session": {"id": CALLER, "annotations": {"bwr": controller}},
+    }
+    config["sessions"][CALLER] = {
+        "id": CALLER, "annotations": {"bwr": controller},
+    }
+    config["sessions"][TARGET] = {
+        "id": TARGET, "annotations": {"bwr": reviewer},
+    }
+    set_config(config)
+    append_note("pass.opened", {
+        "built": "lot-1", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
+        "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
+    }, by=CALLER, mode="product-review", lot="lot-1", job="controller")
+    started = run_progress("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+    report_path = "reports/product-review/lot-1/lot-1-meaning.md"
+    report_sha = write_report(report_path, product_report_text("meaning", ("MINOR",)))
+    receipt = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":1,"decision":0}',
+    )
+    check(receipt.returncode == 0, receipt.stdout + receipt.stderr)
+    identity = {"pass_commit": commit, "pass_gate": gate, "report_sha256": report_sha}
+    verifier = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps(identity),
+    )
+    check(verifier.returncode == 0, verifier.stdout + verifier.stderr)
+    malformed = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps({
+            **identity, "confirmed": 0, "disproved": 0, "malformed": 1,
+            "claims": [{"id": "F1", "kind": "correction", "verdict": "malformed"}],
+        }),
+    )
+    check(malformed.returncode == 0, malformed.stdout + malformed.stderr)
+
+    before = len(journal_lines())
+    calls_before = len(mutations())
+    premature = run_progress("session-retired", TARGET, "done", "--archive", "--hide")
+    check(premature.returncode != 0 and len(journal_lines()) == before,
+          "a malformed Product lens retired before settlement")
+    check(len(mutations()) == calls_before,
+          "the malformed retirement changed the external session before refusal")
+
+    append_raw = {
+        "ts": "t", "by": CALLER, "event": "session-retired", "session": TARGET,
+        "status": "done", "mode": "product-review", "lot": "lot-1",
+        "mandate": "meaning", "job": "reviewer", "archived": True, "hidden": True,
+    }
+    with open(os.path.join(WORKSPACE, "progress.jsonl"), "a", encoding="utf-8") as target:
+        target.write(json.dumps(append_raw, separators=(",", ":")) + "\n")
+    before = len(journal_lines())
+
+    foreign = json.loads(json.dumps(config))
+    foreign["whoami"]["session_id"] = "foreign-product-controller"
+    foreign["whoami"]["session"]["id"] = "foreign-product-controller"
+    foreign["sessions"]["foreign-product-controller"] = {
+        "id": "foreign-product-controller", "annotations": {"bwr": controller},
+    }
+    set_config(foreign)
+    refused_foreign = run_progress("product-reviewer-retirement-recover", TARGET)
+    check(refused_foreign.returncode != 0 and len(journal_lines()) == before,
+          "a foreign Product controller recovered the reviewer retirement")
+    set_config(config)
+
+    accepted_bytes = open(os.path.join(WORKSPACE, report_path), "rb").read()
+    write_report(report_path, accepted_bytes.decode("utf-8") + "changed\n")
+    refused_report = run_progress("product-reviewer-retirement-recover", TARGET)
+    check(refused_report.returncode != 0 and len(journal_lines()) == before,
+          "a changed accepted report authorized reviewer retirement recovery")
+    write_report(report_path, accepted_bytes.decode("utf-8"))
+
+    cleanup = run_progress(
+        "note", "cleanup.started",
+        "--data", '{"reason":"aborted","scope":"whole-run","choice":"clean"}',
+    )
+    check(cleanup.returncode == 0, cleanup.stdout + cleanup.stderr)
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    cleanup_prefix = open(journal_path, "rb").read()
+    report_prefix = open(os.path.join(WORKSPACE, report_path), "rb").read()
+    pass_prefix = next(entry for entry in journal_lines() if entry.get("kind") == "pass.opened")
+    refused_cleanup = run_progress("product-reviewer-retirement-recover", TARGET)
+    check(refused_cleanup.returncode != 0,
+          "a whole-run cleanup allowed Product reviewer retirement recovery")
+    check(open(journal_path, "rb").read() == cleanup_prefix,
+          "the cleanup refusal changed the journal")
+    check(open(os.path.join(WORKSPACE, report_path), "rb").read() == report_prefix,
+          "the cleanup refusal changed the accepted report")
+    check(next(entry for entry in journal_lines() if entry.get("kind") == "pass.opened")
+          == pass_prefix,
+          "the cleanup refusal changed the open pass")
+    check(not any(entry.get("kind") == "product.reviewer.retirement.recovered"
+                  for entry in journal_lines()),
+          "the cleanup refusal published a recovery authority")
+    with open(journal_path, "wb") as target:
+        target.write(b"".join(cleanup_prefix.splitlines(keepends=True)[:-1]))
+
+    exact_prefix = open(journal_path, "rb").read()
+    invalid_lines = exact_prefix.splitlines(keepends=True)
+    invalid_terminal_index = next(
+        index for index, entry in reversed(list(enumerate(journal_lines())))
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "finding-verifier"
+        and entry.get("mandate") == "meaning"
+    )
+    invalid_terminal = json.loads(invalid_lines[invalid_terminal_index])
+    invalid_terminal["data"].update({
+        "confirmed": "invalid", "disproved": -4, "claims": "invalid",
+    })
+    invalid_lines[invalid_terminal_index] = (
+        json.dumps(invalid_terminal, separators=(",", ":")).encode() + b"\n"
+    )
+    with open(journal_path, "wb") as target:
+        target.write(b"".join(invalid_lines))
+    invalid_prefix = open(journal_path, "rb").read()
+    invalid_report = open(os.path.join(WORKSPACE, report_path), "rb").read()
+    refused_invalid_terminal = run_progress(
+        "product-reviewer-retirement-recover", TARGET,
+    )
+    check(refused_invalid_terminal.returncode != 0,
+          "a synchronously changed malformed verifier terminal authorized recovery")
+    check(open(journal_path, "rb").read() == invalid_prefix,
+          "the invalid-terminal refusal changed the journal")
+    check(open(os.path.join(WORKSPACE, report_path), "rb").read() == invalid_report,
+          "the invalid-terminal refusal changed the report")
+    with open(journal_path, "wb") as target:
+        target.write(exact_prefix)
+
+    spent = run_progress(
+        "note", "bound.spent", "--mandate", "meaning",
+        "--text", f"malformed finding returned: F1 - lens {TARGET}",
+    )
+    check(spent.returncode == 0, spent.stdout + spent.stderr)
+    working = run_progress("session-status", TARGET, "working")
+    check(working.returncode == 0, working.stdout + working.stderr)
+    fresh_sha = write_report(report_path, product_report_text("meaning"))
+    settlement_prefix = open(journal_path, "rb").read()
+    settlement_lines = settlement_prefix.splitlines(keepends=True)
+
+    for old, new, message in (
+        (f"F1 - lens {TARGET}", f"F2 - lens {TARGET}",
+         "a foreign malformed claim authorized reviewer retirement recovery"),
+        (f"F1 - lens {TARGET}", "F1 - lens foreign-reviewer",
+         "a foreign malformed lens authorized reviewer retirement recovery"),
+    ):
+        changed_lines = list(settlement_lines)
+        changed_spend = json.loads(changed_lines[-2])
+        changed_spend["text"] = changed_spend["text"].replace(old, new)
+        changed_lines[-2] = json.dumps(
+            changed_spend, separators=(",", ":"),
+        ).encode() + b"\n"
+        with open(journal_path, "wb") as target:
+            target.write(b"".join(changed_lines))
+        changed_prefix = open(journal_path, "rb").read()
+        refused = run_progress("product-reviewer-retirement-recover", TARGET)
+        check(refused.returncode != 0 and open(journal_path, "rb").read() == changed_prefix,
+              message)
+
+    reordered_lines = [*settlement_lines[:-2], settlement_lines[-1], settlement_lines[-2]]
+    with open(journal_path, "wb") as target:
+        target.write(b"".join(reordered_lines))
+    reordered_prefix = open(journal_path, "rb").read()
+    refused_order = run_progress("product-reviewer-retirement-recover", TARGET)
+    check(refused_order.returncode != 0
+          and open(journal_path, "rb").read() == reordered_prefix,
+          "a reordered malformed settlement authorized reviewer retirement recovery")
+
+    for duplicate_lines, message in (
+        ([*settlement_lines[:-1], settlement_lines[-2], settlement_lines[-1]],
+         "a duplicate malformed spend authorized reviewer retirement recovery"),
+        ([*settlement_lines, settlement_lines[-1]],
+         "a duplicate working status authorized reviewer retirement recovery"),
+    ):
+        with open(journal_path, "wb") as target:
+            target.write(b"".join(duplicate_lines))
+        duplicate_prefix = open(journal_path, "rb").read()
+        refused_duplicate = run_progress("product-reviewer-retirement-recover", TARGET)
+        check(refused_duplicate.returncode != 0
+              and open(journal_path, "rb").read() == duplicate_prefix,
+              message)
+
+    with open(journal_path, "wb") as target:
+        target.write(settlement_prefix)
+        target.write(json.dumps({
+            "ts": "t", "by": CALLER, "event": "note", "kind": "report.received",
+            "mandate": "meaning", "mode": "product-review", "lot": "lot-1",
+            "job": "controller", "data": {
+                "critical": 0, "important": 0, "minor": 0, "decision": 0,
+                "pass_commit": commit, "pass_gate": gate, "report_sha256": fresh_sha,
+            },
+        }, separators=(",", ":")).encode() + b"\n")
+    report_suffix_prefix = open(journal_path, "rb").read()
+    refused_report_suffix = run_progress("product-reviewer-retirement-recover", TARGET)
+    check(refused_report_suffix.returncode != 0
+          and open(journal_path, "rb").read() == report_suffix_prefix,
+          "a fresh report suffix authorized reviewer retirement recovery")
+    with open(journal_path, "wb") as target:
+        target.write(settlement_prefix)
+
+    recovered = run_progress("product-reviewer-retirement-recover", TARGET)
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    check(len(journal_lines()) == before + 3,
+          "the malformed retirement recovery did not append one authority")
+    recovery = journal_lines()[-1]
+    check(recovery.get("kind") == "product.reviewer.retirement.recovered"
+          and recovery["data"]["verifier_opening"].split(":", 1)[0].isdigit()
+          and recovery["data"]["verifier_terminal"].split(":", 1)[0].isdigit()
+          and [proof.split(":", 1)[0].isdigit()
+               for proof in recovery["data"]["settlement"]] == [True, True],
+          "the recovery did not freeze the verifier and settlement proofs")
+    retained_count = len(journal_lines())
+    retained = run_progress("product-reviewer-retirement-recover", TARGET)
+    check(retained.returncode == 0 and len(journal_lines()) == retained_count,
+          "the exact retained recovery appended a second authority")
+
+    fresh_receipt = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(fresh_receipt.returncode == 0, fresh_receipt.stdout + fresh_receipt.stderr)
+    fresh_identity = {
+        "pass_commit": commit, "pass_gate": gate, "report_sha256": fresh_sha,
+    }
+    fresh_start = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps(fresh_identity),
+    )
+    check(fresh_start.returncode == 0, fresh_start.stdout + fresh_start.stderr)
+    fresh_end = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps({
+            **fresh_identity, "confirmed": 0, "disproved": 0, "malformed": 0,
+            "claims": [],
+        }),
+    )
+    check(fresh_end.returncode == 0, fresh_end.stdout + fresh_end.stderr)
+
+    exact_settled_prefix = open(journal_path, "rb").read()
+    foreign_lines = exact_settled_prefix.splitlines(keepends=True)
+    foreign_identity = {
+        "pass_commit": "foreign", "pass_gate": "foreign", "report_sha256": "foreign",
+    }
+    structured = journal_lines()
+    target_indexes = [
+        index for index, entry in enumerate(structured)
+        if entry.get("mandate") == "meaning" and (
+            entry.get("kind") == "report.received"
+            or entry.get("kind") == "finding-verifier"
+            and entry.get("event") in {"subagent-started", "subagent-ended"}
+        )
+    ][-3:]
+    for index in target_indexes:
+        changed = json.loads(foreign_lines[index])
+        changed["data"].update(foreign_identity)
+        foreign_lines[index] = json.dumps(changed, separators=(",", ":")).encode() + b"\n"
+    with open(journal_path, "wb") as target:
+        target.write(b"".join(foreign_lines))
+    foreign_prefix = open(journal_path, "rb").read()
+    mutations_before_foreign = len(mutations())
+    refused_foreign_receipt = run_progress(
+        "session-retired", TARGET, "done", "--archive", "--hide",
+    )
+    check(refused_foreign_receipt.returncode != 0,
+          "a synchronized foreign receipt and verifier authorized done retirement")
+    check(open(journal_path, "rb").read() == foreign_prefix,
+          "the foreign receipt refusal changed the journal")
+    check(len(mutations()) == mutations_before_foreign,
+          "the foreign receipt refusal called update-session")
+    with open(journal_path, "wb") as target:
+        target.write(exact_settled_prefix)
+
+    retired = run_progress("session-retired", TARGET, "done", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+
+
+@test
 def product_receipt_rejects_a_noncontiguous_finding_structure():
     commit, gate, _ = seed_task_gate("lot-1", "malformed-finding")
     append_note("pass.opened", {
@@ -38582,6 +38875,8 @@ def main():
         )
         shutil.copyfile(SPEC_EDIT_SOURCE,
                         os.path.join(WORKSPACE, "prompts", "common", "spec_edit_auth.py"))
+        shutil.copyfile(REVIEW_POOL_SOURCE,
+                        os.path.join(WORKSPACE, "prompts", "common", "review-pool.py"))
         for name in ("spec-commit.sh", "attempt-closer.sh", "bare-stop.sh", "stop.sh",
                      "disposable-worktree.sh", "document-copy.sh", "review-pool.py"):
             destination = os.path.join(WORKSPACE, "prompts", "common", name)

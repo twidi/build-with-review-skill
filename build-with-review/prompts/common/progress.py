@@ -123,6 +123,7 @@ NOTE_KINDS = {
     "correction.round.opened", "correction.round.revised", "correction.round.rebased",
     "correction.round.built", "correction.round.resolved", "correction.round.escalated",
     "final-checker.contract-mapped",
+    "product.reviewer.retirement.recovered",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -244,6 +245,12 @@ TWICC = shlex.split(os.environ.get("TWICC_BIN") or "twicc")
 NEUTRAL_CWD = tempfile.gettempdir()
 SESSION_VISIBILITY_ATTEMPTS = 21
 SESSION_VISIBILITY_DELAY_SECONDS = 0.25
+PRODUCT_REVIEW_POOL = os.path.join(SCRIPT_DIR, "review-pool.py")
+_PRODUCT_REVIEW_POOL_MODULE = None
+
+
+class ProductReviewerProjectorError(Exception):
+    pass
 
 # These journal transitions can select, replace, or consume one Correction
 # Round owner. They share one physical lease with the mutating shell helpers.
@@ -478,6 +485,88 @@ def raw_journal_entries():
                      f"progress.jsonl line {line_number}")
             entries.append(entry)
     return entries
+
+
+def product_review_pool_module():
+    global _PRODUCT_REVIEW_POOL_MODULE
+    if _PRODUCT_REVIEW_POOL_MODULE is not None:
+        return _PRODUCT_REVIEW_POOL_MODULE
+    spec = importlib.util.spec_from_file_location("bwr_product_review_pool", PRODUCT_REVIEW_POOL)
+    if spec is None or spec.loader is None:
+        fail("the shared Product reviewer projector is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def projector_fail(message):
+        raise ProductReviewerProjectorError(message)
+
+    module.fail = projector_fail
+    _PRODUCT_REVIEW_POOL_MODULE = module
+    return module
+
+
+def product_reviewer_projector_entries(entries):
+    try:
+        with open(JOURNAL, "rb") as source:
+            physical = source.readlines()
+    except FileNotFoundError:
+        physical = []
+    durable = min(len(physical), len(entries))
+    projected = []
+    for index, entry in enumerate(entries):
+        candidate = dict(entry)
+        if index < durable:
+            raw = physical[index]
+            if not raw.endswith(b"\n"):
+                fail("the Product reviewer projector found an incomplete journal line")
+            candidate["_journal_proof"] = (
+                f"{index}:{sha256_bytes(raw[:-1])}"
+            )
+        projected.append(candidate)
+    return projected
+
+
+def product_reviewer_generation(entries, session, subject):
+    module = product_review_pool_module()
+    try:
+        return module.product_reviewer_generation(
+            product_reviewer_projector_entries(entries), session,
+        )
+    except ProductReviewerProjectorError as exc:
+        fail(f"{subject} has no exact Product reviewer generation", exc)
+
+
+def product_reviewer_recovery_account(entries, session, subject):
+    module = product_review_pool_module()
+    projected = product_reviewer_projector_entries(entries)
+    try:
+        opening_index, mandates, generation, _built = module.current_generation(
+            projected, "product-review",
+        )
+        records = module.session_records(
+            projected, opening_index, "product-review", mandates, generation,
+            allow_pending_recovery=True,
+        )
+        record = records.get(session)
+        if record is None:
+            raise ProductReviewerProjectorError("the session has no current reviewer start")
+        account = module.product_reviewer_recovery_account(
+            projected, len(projected), opening_index, generation, record, subject,
+        )
+        receipt_index, receipt = journal_entry_from_proof(
+            entries, account["receipt"], subject,
+        )
+        settlement_entries = [
+            journal_entry_from_proof(entries, proof, subject)[1]
+            for proof in account["settlement"]
+        ]
+        if not any(entry.get("kind") == "bound.spent" for entry in settlement_entries):
+            validate_product_report_entry(
+                entries, opening_index, receipt_index, receipt, generation["lot"], subject,
+            )
+        return account
+    except ProductReviewerProjectorError as exc:
+        fail(f"{subject} has no exact malformed-retirement authority", exc)
 
 
 def journal_entries():
@@ -14561,36 +14650,14 @@ def product_verifier_account(entries, opening_index, opening, built, mandate, re
 
 
 def validate_product_verifier_terminal(data, identity, receipt_data, mandate, subject):
-    if set(data) == set(identity) | {"unusable"}:
-        if data.get("unusable") not in CONSTRUCTION_UNUSABLE_RESULTS:
-            fail(f"{subject} has an unknown unusable reason", data.get("unusable"))
-        return "unusable"
-    verdict_keys = {"confirmed", "disproved", "malformed", "claims"}
-    if set(data) != set(identity) | verdict_keys:
-        fail(f"{subject} has malformed identity or result", data)
-    if any(not isinstance(data.get(key), int) or isinstance(data.get(key), bool)
-           or data[key] < 0 for key in ("confirmed", "disproved", "malformed")):
-        fail(f"the {mandate} finding-verifier has malformed verdict counts", data)
-    claims = data.get("claims")
-    expected_count = sum(receipt_data[key] for key in REPORT_COUNT_KEYS)
-    if not isinstance(claims, list) or len(claims) != expected_count:
-        fail(f"the {mandate} finding-verifier lacks one result per accepted report claim")
-    expected_ids = [f"F{ordinal}" for ordinal in range(1, expected_count + 1)]
-    actual_ids = []
-    totals = {"confirmed": 0, "disproved": 0, "malformed": 0}
-    kinds = {"correction": 0, "decision": 0}
-    for claim in claims:
-        if not isinstance(claim, dict) or set(claim) != {"id", "kind", "verdict"} \
-                or claim.get("kind") not in kinds or claim.get("verdict") not in totals:
-            fail(f"the {mandate} finding-verifier has a malformed claim", claim)
-        actual_ids.append(claim["id"])
-        totals[claim["verdict"]] += 1
-        kinds[claim["kind"]] += 1
-    if actual_ids != expected_ids or totals != {key: data[key] for key in totals} \
-            or kinds["decision"] != receipt_data["decision"] \
-            or kinds["correction"] != expected_count - receipt_data["decision"]:
-        fail(f"the {mandate} finding-verifier result contradicts its accepted report")
-    return "complete"
+    module = product_review_pool_module()
+    try:
+        state = module.validate_product_verifier_terminal(
+            data, identity, receipt_data, mandate,
+        )
+    except ProductReviewerProjectorError as exc:
+        fail(f"{subject} has malformed identity or result", exc)
+    return "complete" if state == "complete-malformed" else state
 
 
 def product_verifier_calls(entries, receipt_index, mandate, identity, receipt_data, subject):
@@ -20946,6 +21013,8 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         fail("attempt.launch.abandoned is helper-owned; use construction-launch-abandoned")
     if kind == "amendment.attempt.settled":
         fail("amendment.attempt.settled is helper-owned; use amendment-attempt-settle.sh")
+    if kind == "product.reviewer.retirement.recovered":
+        fail("Product reviewer retirement recovery is helper-owned")
     if kind == "attempt.failed":
         data = normalize_attempt_failed(notes, data, context)
     elif kind == "rewind.done" and isinstance(data, dict) and data.get("schema") == 2:
@@ -22295,6 +22364,65 @@ def correction_attempt_terminal_prior_account(
     return identity.get("prior_attempt")
 
 
+def validate_product_reviewer_done_retirement(entries, candidate, session):
+    generation = product_reviewer_generation(
+        [*entries, candidate], session, "the Product reviewer done retirement",
+    )
+    verifier = generation.get("verifier")
+    retirement = generation["record"].get("retirement")
+    if verifier is None or verifier.get("state") != "complete" \
+            or retirement is None or retirement[0] != len(entries):
+        fail("the Product reviewer cannot retire done before its verifier settles")
+    validate_product_report_entry(
+        entries, generation["opening_index"], generation["receipt_index"],
+        generation["receipt"], generation["built"],
+        "the Product reviewer done retirement",
+    )
+
+
+def cmd_product_reviewer_retirement_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+
+    def build(entries):
+        recoveries = [entry for entry in entries
+                      if entry.get("event") == "note"
+                      and entry.get("kind") == "product.reviewer.retirement.recovered"
+                      and note_data(entry).get("session") == args.session_id]
+        if recoveries:
+            product_reviewer_generation(
+                entries, args.session_id, "the retained Product reviewer recovery",
+            )
+            if len(recoveries) != 1 or recoveries[0] is not entries[-1]:
+                fail("the retained Product reviewer recovery crosses a later event")
+            return None
+        recovery = product_reviewer_recovery_account(
+            entries, args.session_id, "the Product reviewer retirement recovery",
+        )
+        expected_context = recovery["controller_context"]
+        actual_context = {key: caller[key] for key in CONTEXT_FIELDS if key in caller}
+        if me["session_id"] != recovery["owner"] or actual_context != expected_context:
+            fail("Product reviewer retirement recovery requires the original pass controller", {
+                "expected_owner": recovery["owner"], "expected_context": expected_context,
+                "actual_owner": me["session_id"], "actual_context": actual_context,
+            })
+        candidate = event_entry(
+            me["session_id"], "note",
+            kind="product.reviewer.retirement.recovered",
+            data=recovery, **expected_context,
+        )
+        module = product_review_pool_module()
+        projected = product_reviewer_projector_entries([*entries, candidate])
+        try:
+            module.product_reviewer_generation(projected, args.session_id)
+        except ProductReviewerProjectorError as exc:
+            fail("the Product reviewer retirement recovery is not historically exact", exc)
+        return candidate
+
+    write_validated_line(build)
+    print(f"PRODUCT REVIEWER RETIREMENT RECOVERED {args.session_id}")
+
+
 def perform_standard_session_retirement(args, me, target_context):
     result = {"reach_preflight": None, "failed_step": None}
 
@@ -22318,6 +22446,11 @@ def perform_standard_session_retirement(args, me, target_context):
             hidden=True if args.hide else None,
             **target_context,
         )
+        if target_context.get("mode") == "product-review" \
+                and target_context.get("job") == "reviewer" and args.status == "done":
+            validate_product_reviewer_done_retirement(
+                entries, provisional, args.session_id,
+            )
         validate_pending_amendment_attempt_settlement_append(entries, provisional)
         validate_pending_attempt_success_append(entries, provisional)
         validate_pending_pass_opening_append(
@@ -25353,6 +25486,10 @@ def build_parser():
     sp.add_argument("consumer", choices=("audit", "refs-clear", "workspace-delete"))
     sp.add_argument("scope", choices=("whole-run", "lot"))
     sp.set_defaults(func=cmd_pass_opening_cleanup_check)
+
+    sp = sub.add_parser("product-reviewer-retirement-recover", help=argparse.SUPPRESS)
+    sp.add_argument("session_id")
+    sp.set_defaults(func=cmd_product_reviewer_retirement_recover)
 
     sp = sub.add_parser("session-status", help="change a session's bwr.status, and record it")
     sp.add_argument("session_id")

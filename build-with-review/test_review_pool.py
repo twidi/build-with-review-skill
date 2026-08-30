@@ -68,6 +68,8 @@ class ReviewPoolTest(unittest.TestCase):
             entry["round"] = round_number
         if lot is not None:
             entry["lot"] = lot
+        if mode == "product-review":
+            entry["by"] = "product-controller"
         return entry
 
     @staticmethod
@@ -92,6 +94,10 @@ class ReviewPoolTest(unittest.TestCase):
         return {
             "event": "note",
             "kind": "report.received",
+            "by": "product-controller",
+            "mode": "product-review",
+            "lot": "lot-1",
+            "job": "controller",
             "mandate": mandate,
             "data": {
                 "critical": 0,
@@ -109,6 +115,10 @@ class ReviewPoolTest(unittest.TestCase):
         return {
             "event": "subagent-started",
             "kind": "finding-verifier",
+            "by": "product-controller",
+            "mode": "product-review",
+            "lot": "lot-1",
+            "job": "controller",
             "mandate": mandate,
             "data": {
                 "pass_commit": "c" * 40,
@@ -119,20 +129,12 @@ class ReviewPoolTest(unittest.TestCase):
 
     @staticmethod
     def verifier_ended(mandate, report_sha):
-        return {
-            "event": "subagent-ended",
-            "kind": "finding-verifier",
-            "mandate": mandate,
-            "data": {
-                "pass_commit": "c" * 40,
-                "pass_gate": "g" * 64,
-                "report_sha256": report_sha,
-                "confirmed": 0,
-                "disproved": 0,
-                "malformed": 0,
-                "claims": [],
-            },
-        }
+        entry = ReviewPoolTest.verifier_started(mandate, report_sha)
+        entry["event"] = "subagent-ended"
+        entry["data"].update({
+            "confirmed": 0, "disproved": 0, "malformed": 0, "claims": [],
+        })
+        return entry
 
     @staticmethod
     def verifier_unusable(mandate, report_sha, reason):
@@ -426,6 +428,93 @@ class ReviewPoolTest(unittest.TestCase):
         self.assertIn("meaning: settle malformed verifier claims with the live lens", result.stdout)
         self.assertNotIn("meaning: settle verifier result and retire the lens", result.stdout)
         self.assertIn("active reviewers: 1", result.stdout)
+
+    def test_malformed_retirement_recovery_reopens_the_same_lens_generation(self):
+        self.open_product_pass()
+        report = self.workspace / "reports" / "product-review" / "lot-1" / "lot-1-meaning.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("accepted report\n", encoding="utf-8")
+        report_sha = hashlib.sha256(report.read_bytes()).hexdigest()
+        receipt = self.product_receipt("meaning", report_sha)
+        receipt["data"]["minor"] = 1
+        start = self.started("meaning", "product-review", "meaning", lot="lot-1")
+        start["by"] = "product-controller"
+        verifier_start = self.verifier_started("meaning", report_sha)
+        verifier_start["by"] = "product-controller"
+        verifier_start.update({
+            "mode": "product-review", "lot": "lot-1", "job": "controller",
+            "mandate": "meaning",
+        })
+        verifier_end = self.verifier_malformed("meaning", report_sha)
+        verifier_end["by"] = "product-controller"
+        verifier_end.update({
+            "mode": "product-review", "lot": "lot-1", "job": "controller",
+            "mandate": "meaning",
+        })
+        retirement = self.retired("meaning", "product-review", "meaning", lot="lot-1")
+        retirement.update({"by": "product-controller", "archived": True, "hidden": True})
+        self.append(start, receipt, verifier_start, verifier_end, retirement)
+
+        def proof(index):
+            raw = json.dumps(self.entries[index], separators=(",", ":")).encode()
+            return f"{index}:{hashlib.sha256(raw).hexdigest()}"
+
+        other_mandate = {
+            "event": "note", "kind": "bound.spent", "mandate": "user",
+            "text": "malformed finding returned: F1 - lens other",
+        }
+        same_mandate = {
+            "event": "note", "kind": "bound.spent", "mandate": "meaning",
+            "text": "malformed finding returned: F1 - lens meaning",
+            "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+            "job": "controller",
+        }
+        working = self.status(
+            "meaning", "product-review", "meaning", "working", lot="lot-1",
+        )
+        self.append(other_mandate, same_mandate, working)
+        recovery = {
+            "event": "note",
+            "kind": "product.reviewer.retirement.recovered",
+            "by": "product-controller",
+            "mode": "product-review",
+            "lot": "lot-1",
+            "job": "controller",
+            "data": {
+                "schema": 1,
+                "pass_opening": proof(1),
+                "owner": "product-controller",
+                "controller_context": {
+                    "mode": "product-review", "lot": "lot-1", "job": "controller",
+                },
+                "session_start": proof(2),
+                "session": "meaning",
+                "mandate": "meaning",
+                "receipt": proof(3),
+                "report_sha256": report_sha,
+                "verifier_opening": proof(4),
+                "verifier_terminal": proof(5),
+                "retirement": proof(6),
+                "settlement": [proof(8), proof(9)],
+            },
+        }
+        self.append(recovery)
+
+        recovered = self.run_helper("product-review")
+
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertIn("meaning: wait for the replacement report", recovered.stdout)
+        self.assertIn("active reviewers: 1", recovered.stdout)
+
+        exact_opening = recovery["data"]["verifier_opening"]
+        recovery["data"]["verifier_opening"] = "0:" + "f" * 64
+        changed = self.run_helper("product-review")
+        self.assertNotEqual(changed.returncode, 0)
+        recovery["data"]["verifier_opening"] = exact_opening
+
+        resumed = self.run_helper("product-review")
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertIn("meaning: wait for the replacement report", resumed.stdout)
 
     def test_failed_owner_becomes_replaceable_until_fresh_receipt_settles(self):
         self.open_product_pass()
