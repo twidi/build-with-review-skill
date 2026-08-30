@@ -3,6 +3,7 @@
 /*
 !/.gitignore
 !/README.md
+!/philosophie.md
 !/build-with-review/
 
 # Ignore Python bytecode generated while running the development harnesses.
