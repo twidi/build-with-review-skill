@@ -25652,7 +25652,7 @@ def product_reviewer_legacy_chain_recovery_closes_one_exact_generation():
     check(started.returncode == 0, started.stdout + started.stderr)
 
     report_path = "reports/product-review/lot-1/lot-1-meaning.md"
-    old_report = product_report_text("meaning", ("MINOR",))
+    old_report = product_report_text("meaning", ("IMPORTANT",))
     anchor_sha = write_report(report_path, old_report)
     controller_context = {
         "by": CALLER, "mode": "product-review", "lot": "lot-1",
@@ -25663,7 +25663,7 @@ def product_reviewer_legacy_chain_recovery_closes_one_exact_generation():
         append_note(
             "report.received",
             {
-                "critical": 0, "important": 0, "minor": 1, "decision": 0,
+                "critical": 0, "important": 1, "minor": 0, "decision": 0,
                 "pass_commit": commit, "pass_gate": gate,
                 "report_sha256": report_sha,
             },
@@ -25765,12 +25765,14 @@ def product_reviewer_legacy_chain_recovery_closes_one_exact_generation():
         by=CALLER, mode="product-review", lot="lot-1", job="controller",
     )
 
-    final_report = product_report_text("meaning")
+    final_report = old_report.replace(
+        "one observable fact", "one restated observable fact",
+    )
     final_sha = write_report(report_path, final_report)
     before = open(journal_path, "rb").read()
     premature_final = run_progress(
         "note", "report.received", "--mandate", "meaning",
-        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+        "--data", '{"critical":0,"important":1,"minor":0,"decision":0}',
     )
     check(premature_final.returncode != 0
           and open(journal_path, "rb").read() == before,
@@ -25811,9 +25813,41 @@ def product_reviewer_legacy_chain_recovery_closes_one_exact_generation():
     check(retained.returncode == 0 and len(journal_lines()) == recovered_count,
           "the exact legacy-chain recovery retry appended a second authority")
 
-    final_receipt = run_progress(
+    write_report(report_path, old_report)
+    before_same_sha = open(journal_path, "rb").read()
+    same_sha = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":1,"minor":0,"decision":0}',
+    )
+    check(same_sha.returncode != 0
+          and open(journal_path, "rb").read() == before_same_sha,
+          "the legacy restatement reused the anchor report SHA")
+
+    write_report(report_path, product_report_text("meaning"))
+    before_subtraction = open(journal_path, "rb").read()
+    subtraction = run_progress(
         "note", "report.received", "--mandate", "meaning",
         "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(subtraction.returncode != 0
+          and open(journal_path, "rb").read() == before_subtraction,
+          "the legacy restatement treated malformed as removal authority")
+
+    write_report(report_path, product_report_text("meaning", ("MINOR",)))
+    before_redistribution = open(journal_path, "rb").read()
+    redistributed = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":1,"decision":0}',
+    )
+    check(redistributed.returncode != 0
+          and open(journal_path, "rb").read() == before_redistribution,
+          "the legacy restatement redistributed an IMPORTANT claim to MINOR")
+
+    write_report(report_path, final_report)
+
+    final_receipt = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":1,"minor":0,"decision":0}',
     )
     check(final_receipt.returncode == 0, final_receipt.stdout + final_receipt.stderr)
     final_identity = {
@@ -25824,11 +25858,36 @@ def product_reviewer_legacy_chain_recovery_closes_one_exact_generation():
         "--data", json.dumps(final_identity),
     )
     check(final_opening.returncode == 0, final_opening.stdout + final_opening.stderr)
+    before_final_terminal = open(journal_path, "rb").read()
+    still_malformed = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps({
+            **final_identity, "confirmed": 0, "disproved": 0, "malformed": 1,
+            "claims": [
+                {"id": "F1", "kind": "correction", "verdict": "malformed"},
+            ],
+        }),
+    )
+    check(still_malformed.returncode == 0,
+          still_malformed.stdout + still_malformed.stderr)
+    before_refused_retirement = open(journal_path, "rb").read()
+    mutations_before_retirement = len(mutations())
+    refused_retirement = run_progress(
+        "session-retired", TARGET, "done", "--archive", "--hide",
+    )
+    check(refused_retirement.returncode != 0
+          and open(journal_path, "rb").read() == before_refused_retirement
+          and len(mutations()) == mutations_before_retirement,
+          "a still-malformed R5 verifier authorized done retirement")
+    with open(journal_path, "wb") as target:
+        target.write(before_final_terminal)
     final_terminal = run_progress(
         "subagent-ended", "finding-verifier", "--mandate", "meaning",
         "--data", json.dumps({
-            **final_identity, "confirmed": 0, "disproved": 0, "malformed": 0,
-            "claims": [],
+            **final_identity, "confirmed": 1, "disproved": 0, "malformed": 0,
+            "claims": [
+                {"id": "F1", "kind": "correction", "verdict": "confirmed"},
+            ],
         }),
     )
     check(final_terminal.returncode == 0, final_terminal.stdout + final_terminal.stderr)
@@ -25838,7 +25897,7 @@ def product_reviewer_legacy_chain_recovery_closes_one_exact_generation():
     closed_prefix = open(journal_path, "rb").read()
     sixth_receipt = run_progress(
         "note", "report.received", "--mandate", "meaning",
-        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+        "--data", '{"critical":0,"important":1,"minor":0,"decision":0}',
     )
     check(sixth_receipt.returncode != 0
           and open(journal_path, "rb").read() == closed_prefix,

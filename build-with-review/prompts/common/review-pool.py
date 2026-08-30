@@ -881,11 +881,20 @@ def product_reviewer_receipt_sequence(
             item["owner"]["session"],
         }) != 1:
             fail(f"the {mandate} final receipt changes its reviewer generation")
-        old_total = sum(data(restated["entry"])[key] for key in PRODUCT_RECEIPT_COUNT_KEYS)
-        new_total = sum(data(receipt)[key] for key in PRODUCT_RECEIPT_COUNT_KEYS)
-        malformed_count = data(restated_verifier["terminal"][1])["malformed"]
-        if new_total != old_total - malformed_count:
-            fail(f"the {mandate} final receipt changes more than its malformed claims")
+        restated_data = data(restated["entry"])
+        current_data = data(receipt)
+        if position > 2:
+            if any(current_data[key] != restated_data[key]
+                   for key in PRODUCT_RECEIPT_COUNT_KEYS):
+                fail(f"the {mandate} legacy restatement changes its typed finding counts")
+            if current_data["report_sha256"] == restated_data["report_sha256"]:
+                fail(f"the {mandate} legacy restatement does not publish a new report")
+        else:
+            old_total = sum(restated_data[key] for key in PRODUCT_RECEIPT_COUNT_KEYS)
+            new_total = sum(current_data[key] for key in PRODUCT_RECEIPT_COUNT_KEYS)
+            malformed_count = data(restated_verifier["terminal"][1])["malformed"]
+            if new_total != old_total - malformed_count:
+                fail(f"the {mandate} final receipt changes more than its malformed claims")
 
         allowed_recovery = set()
         recovery_index = item["owner"].get("recovery")

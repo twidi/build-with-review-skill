@@ -861,7 +861,7 @@ class ReviewPoolTest(unittest.TestCase):
                 ],
             },
         }
-        final_receipt = receipt(5, count=0)
+        final_receipt = receipt(5, count=1)
 
         def copied(entries):
             return json.loads(json.dumps(entries))
@@ -932,11 +932,46 @@ class ReviewPoolTest(unittest.TestCase):
             [*with_recovery, legacy_recovery, returned(), final_receipt],
             "a new malformed return after recovery authorized the final receipt",
         )
+        competing_suffixes = (
+            self.status("meaning", "product-review", "meaning", "working", lot="lot-1"),
+            self.verifier_started("meaning", "4" * 64),
+            self.started("replacement", "product-review", "meaning", lot="lot-1"),
+            self.retired("meaning", "product-review", "meaning", lot="lot-1"),
+            {
+                "event": "note", "kind": "pass.closed", "by": "product-controller",
+                "mode": "product-review", "lot": "lot-1", "job": "controller",
+            },
+            {
+                "event": "note", "kind": "amendment.opened", "by": "product-controller",
+                "mode": "product-review", "lot": "lot-1", "job": "controller",
+                "data": {"origin": "product-review"},
+            },
+            {
+                "event": "note", "kind": "cleanup.started", "by": "product-controller",
+                "mode": "product-review", "lot": "lot-1", "job": "controller",
+                "data": {"scope": "whole-run"},
+            },
+            {
+                "event": "note", "kind": "paused", "by": "product-controller",
+                "mode": "product-review", "lot": "lot-1", "job": "controller",
+            },
+        )
+        for competitor in competing_suffixes:
+            refused(
+                [*with_recovery, legacy_recovery, competitor, final_receipt],
+                "a competing post-recovery event authorized the final receipt",
+            )
         wrong_total = copied(final_receipt)
-        wrong_total["data"]["minor"] = 1
+        wrong_total["data"]["minor"] = 0
         refused(
             [*with_recovery, legacy_recovery, wrong_total],
-            "a final receipt with the wrong anchor delta was accepted",
+            "a legacy restatement used malformed as removal authority",
+        )
+        unchanged_sha = copied(final_receipt)
+        unchanged_sha["data"]["report_sha256"] = "4" * 64
+        refused(
+            [*with_recovery, legacy_recovery, unchanged_sha],
+            "a legacy restatement reused the anchor report SHA",
         )
 
         self.entries = copied([*with_recovery, legacy_recovery, final_receipt])
@@ -1056,7 +1091,7 @@ class ReviewPoolTest(unittest.TestCase):
                 ],
             },
         }
-        final_receipt = receipt(4, count=0)
+        final_receipt = receipt(4, count=2)
 
         self.entries = json.loads(json.dumps([
             *with_recovery, legacy_recovery, final_receipt,
