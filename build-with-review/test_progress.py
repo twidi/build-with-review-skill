@@ -16863,8 +16863,12 @@ def correction_final_checker_contract_map_has_one_public_continuation():
           and "never its marker" in resume,
           "the Correction resume table exposes no public map continuation")
 
-    correction_final_design_obligation_starts_under_contract_map_owner(
-        open_design=False, complete_mapping=False,
+    progress_runner = in_process_progress_runner(retain_projection_cache=True)
+    seed_bounded_correction_retry_with_one_final_checker_obligation(
+        progress_runner,
+        token="correction-final-checker-public-continuation",
+        return_state=True,
+        complete_mapping=False,
     )
     script = os.path.join(
         WORKSPACE, "prompts", "construction", "final-checker-contract-map.sh",
@@ -16913,6 +16917,23 @@ def correction_final_checker_contract_map_has_one_public_continuation():
         finally:
             marker.chmod(marker_mode)
 
+    def check_expected_map_refusal(result, snapshot, message):
+        stdout, exception_type, exception_message = result
+        expected_exception = exception_type == "ValueError" \
+            or exception_type == "SystemExit" and exception_message == "1"
+        diagnostic = re.fullmatch(
+            r"\*\*progress ERROR\*\* · [^\n]+\n\n"
+            r"\*\*NOTHING WAS JOURNALED\.\*\* If this command was also performing the act,\n"
+            r"the act did not happen either\.\n",
+            stdout,
+        )
+        check(expected_exception
+              and (stdout == "" or diagnostic is not None)
+              and "FINAL CHECKER CONTRACT MAP DOCUMENT UPDATE REQUIRED" not in stdout
+              and "FINAL CHECKER CONTRACT MAPPED" not in stdout
+              and durable_snapshot() == snapshot,
+              message)
+
     before = durable_snapshot()
     selected = subprocess.run(
         command, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
@@ -16941,10 +16962,8 @@ def correction_final_checker_contract_map_has_one_public_continuation():
     check("operation" not in continuation and durable_snapshot() == before,
           "the public map selector exposed private authority or mutated before its edit")
 
-    repeated = subprocess.run(
-        command, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
-    )
-    check(repeated.returncode == 0 and repeated.stdout == selected.stdout
+    map_args, repeated = run_final_checker_map_in_process(progress_runner)
+    check(repeated == selected.stdout
           and durable_snapshot() == before,
           "output loss changed the public map continuation or its durable owner")
 
@@ -16972,13 +16991,11 @@ def correction_final_checker_contract_map_has_one_public_continuation():
     ))
     write_marker(changed_marker)
     changed_before = durable_snapshot()
-    changed_generation = subprocess.run(
-        command, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+    check_expected_map_refusal(
+        refuse_final_checker_map_in_process(progress_runner, map_args),
+        changed_before,
+        "the public selector trusted a synchronized changed pre-map generation",
     )
-    check(changed_generation.returncode != 0
-          and "DOCUMENT UPDATE REQUIRED" not in changed_generation.stdout
-          and durable_snapshot() == changed_before,
-          "the public selector trusted a synchronized changed pre-map generation")
     journal.write_bytes(original_journal)
     write_marker(original_marker)
     check(durable_snapshot() == before,
@@ -17007,12 +17024,11 @@ def correction_final_checker_contract_map_has_one_public_continuation():
         mutate(changed)
         write_marker(changed)
         changed_before = durable_snapshot()
-        refused = subprocess.run(
-            command, cwd=REPO, capture_output=True, text=True, env=ENV, timeout=120,
+        check_expected_map_refusal(
+            refuse_final_checker_map_in_process(progress_runner, map_args),
+            changed_before,
+            f"the public selector trusted a changed {label} marker",
         )
-        check(refused.returncode != 0 and "DOCUMENT UPDATE REQUIRED" not in refused.stdout
-              and durable_snapshot() == changed_before,
-              f"the public selector trusted a changed {label} marker")
     write_marker(original_marker)
     check(durable_snapshot() == before,
           "the marker mutation checks did not restore the exact retained owner")
@@ -17147,6 +17163,7 @@ def correction_final_checker_mapping_waits_before_any_physical_mutation():
 def seed_bounded_correction_retry_with_one_final_checker_obligation(
         progress_runner=None, *, token="correction-retry-pause",
         spec_relative=None, source_mandates=("unlooked",), return_state=False,
+        complete_mapping=True,
 ):
     """Create one mapped retry obligation without per-event Python processes."""
     progress_runner = progress_runner or in_process_progress_runner(
@@ -17192,6 +17209,14 @@ def seed_bounded_correction_retry_with_one_final_checker_obligation(
     marker = pathlib.Path(WORKSPACE) / "final-checker-contract-map-in-progress"
     account = json.loads(marker.read_text(encoding="utf-8"))
     obligation_id = account["source"]["obligation_id"]
+    if not complete_mapping:
+        check(return_state,
+              "the retained bounded map owner requires its complete state")
+        return {
+            "state": state,
+            "obligation_id": obligation_id,
+            "map_account": account,
+        }
     artifact = pathlib.Path(account["document"]["workspace_path"])
     artifact.write_text(
         artifact.read_text(encoding="utf-8").replace(
@@ -17532,6 +17557,22 @@ def run_final_checker_map_in_process(progress_runner, args=None):
     with contextlib.redirect_stdout(output):
         progress_runner.project(lambda _progress: helper.run(args))
     return args, output.getvalue()
+
+
+def refuse_final_checker_map_in_process(progress_runner, args):
+    """Capture one expected retained-map refusal without losing its stdout."""
+    helper = load_construction_module("final_checker_contract_map")
+    helper.progress = progress_runner.progress_module
+    helper.failure.progress = progress_runner.progress_module
+    helper.failure.resolve_correction.__globals__["progress"] = \
+        progress_runner.progress_module
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            progress_runner.project(lambda _progress: helper.run(args))
+    except (SystemExit, ValueError) as exc:
+        return output.getvalue(), type(exc).__name__, str(exc)
+    raise AssertionError("the retained final-checker map mutation did not refuse")
 
 
 def rewind_correction_in_process(
