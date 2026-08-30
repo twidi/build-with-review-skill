@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
+import re
 import sys
 
 from correction_authority import product_pass_generation_account
@@ -25,6 +26,7 @@ REOPEN_PREFIXES = (
 )
 CONTEXT_FIELDS = ("mode", "lot", "task", "attempt", "round", "mandate", "job")
 PRODUCT_RETIREMENT_RECOVERY_KIND = "product.reviewer.retirement.recovered"
+PRODUCT_LEGACY_CHAIN_RECOVERY_KIND = "product.reviewer.legacy-chain.recovered"
 PRODUCT_RECEIPT_COUNT_KEYS = {"critical", "important", "minor", "decision"}
 PRODUCT_RECEIPT_KEYS = PRODUCT_RECEIPT_COUNT_KEYS | {
     "pass_commit", "pass_gate", "report_sha256",
@@ -338,6 +340,7 @@ def session_records(
             "start": index,
             "retirement": None,
             "recovery": None,
+            "legacy_recovery": None,
             "statuses": [],
         }
 
@@ -353,6 +356,18 @@ def session_records(
             )
             record["retirement"] = None
             record["recovery"] = index
+            continue
+        if entry.get("event") == "note" \
+                and entry.get("kind") == PRODUCT_LEGACY_CHAIN_RECOVERY_KIND:
+            session = data(entry).get("session")
+            record = records.get(session)
+            if mode != "product-review" or record is None \
+                    or record["legacy_recovery"] is not None:
+                fail("a Product reviewer legacy-chain recovery has no exact session owner")
+            validate_product_reviewer_legacy_chain_recovery(
+                entries, index, entry, opening_index, generation, records, record,
+            )
+            record["legacy_recovery"] = index
             continue
         if entry.get("event") not in {"session-status", "session-retired"}:
             continue
@@ -586,6 +601,13 @@ def journal_proof_index(proof, subject):
     return index
 
 
+def exact_journal_proof_index(entries, proof, subject):
+    index = journal_proof_index(proof, subject)
+    if index >= len(entries) or journal_proof(entries[index], subject) != proof:
+        fail(f"{subject} changes its exact journal entry")
+    return index
+
+
 def exact_malformed_return(entry, opening, built, mandate, session, claim_id):
     return entry.get("event") == "note" \
         and entry.get("kind") == "bound.spent" \
@@ -600,6 +622,77 @@ def exact_malformed_return(entry, opening, built, mandate, session, claim_id):
         and entry.get("text") == (
             f"malformed finding returned: {claim_id} - lens {session}"
         )
+
+
+def exact_legacy_malformed_return(entry, opening, built, mandate, session):
+    if entry.get("event") != "note" \
+            or entry.get("kind") != "bound.spent" \
+            or entry.get("by") != opening.get("by") \
+            or context(entry) != {
+                "mode": "product-review", "lot": built,
+                "mandate": mandate, "job": "controller",
+            } \
+            or set(entry) - {"ts", "_journal_proof"} != {
+                "by", "event", "kind", "text", "mode", "lot", "mandate", "job",
+            }:
+        return False
+    match = re.fullmatch(
+        rf"malformed finding returned: ([^\r\n]+) - lens {re.escape(session)}\n",
+        str(entry.get("text")),
+    )
+    if match is None:
+        return False
+    description = match.group(1)
+    return bool(description.strip()) \
+        and not re.fullmatch(r"F[1-9][0-9]*", description)
+
+
+def product_reviewer_legacy_chain_authority(entries, mandate, record):
+    recovery_index = record.get("legacy_recovery")
+    if recovery_index is None:
+        return None
+    account = data(entries[recovery_index])
+    subject = f"the {mandate} legacy receipt-chain recovery"
+    retained_recovery = exact_journal_proof_index(
+        entries, account.get("retirement_recovery"), subject,
+    )
+    anchor_receipt = exact_journal_proof_index(
+        entries, account.get("anchor_receipt"), subject,
+    )
+    transitions = {}
+    for transition in account.get("transitions", []):
+        if not isinstance(transition, dict):
+            fail(f"{subject} has a malformed transition")
+        from_receipt = exact_journal_proof_index(
+            entries, transition.get("from_receipt"), subject,
+        )
+        verifier_opening = exact_journal_proof_index(
+            entries, transition.get("verifier_opening"), subject,
+        )
+        verifier_terminal = exact_journal_proof_index(
+            entries, transition.get("verifier_terminal"), subject,
+        )
+        returns = [
+            exact_journal_proof_index(entries, proof, subject)
+            for proof in transition.get("returns", [])
+        ]
+        to_receipt = exact_journal_proof_index(
+            entries, transition.get("to_receipt"), subject,
+        )
+        key = (from_receipt, to_receipt)
+        if key in transitions:
+            fail(f"{subject} duplicates a transition")
+        transitions[key] = {
+            "opening": verifier_opening,
+            "terminal": verifier_terminal,
+            "returns": returns,
+        }
+    return {
+        "event": recovery_index,
+        "retirement_recovery": retained_recovery,
+        "anchor": anchor_receipt,
+        "transitions": transitions,
+    }
 
 
 def product_reviewer_recovery_anchor(
@@ -666,6 +759,9 @@ def product_reviewer_receipt_sequence(
         recovery_anchor = product_reviewer_recovery_anchor(
             entries, opening_index, mandate, item["owner"],
         )
+        legacy_authority = product_reviewer_legacy_chain_authority(
+            entries, mandate, item["owner"],
+        )
         previous_verifier = previous["verifier"]
         if previous_verifier["state"] != "complete-malformed" \
                 or previous_verifier["terminal"] is None:
@@ -703,6 +799,17 @@ def product_reviewer_receipt_sequence(
         if transition_returns and complete_returns \
                 and len(session_returns) == len(transition_returns):
             continue
+        legacy_transition = None if legacy_authority is None else \
+            legacy_authority["transitions"].get((previous["index"], receipt_index))
+        if legacy_transition is not None:
+            if receipt_index > legacy_authority["anchor"] \
+                    or legacy_transition["opening"] != previous_verifier["opening"][0] \
+                    or legacy_transition["terminal"] != previous_verifier["terminal"][0] \
+                    or legacy_transition["returns"] != [
+                        index for index, entry in transition_returns
+                    ]:
+                fail(f"the {mandate} legacy report transition changes its recovery account")
+            continue
         if recovery_anchor is not None and receipt_index <= recovery_anchor["receipt"]:
             if not transition_returns or not complete_returns:
                 fail(f"the {mandate} legacy report transition has no complete return set")
@@ -718,12 +825,12 @@ def product_reviewer_receipt_sequence(
         if position > 2:
             later_receipts = [
                 candidate for candidate in receipts
-                if recovery_anchor is not None
-                and recovery_anchor["recovery"] < candidate[0] <= receipt_index
+                if legacy_authority is not None
+                and legacy_authority["event"] < candidate[0] <= receipt_index
             ]
-            if recovery_anchor is None \
-                    or previous["index"] != recovery_anchor["receipt"] \
-                    or receipt_index <= recovery_anchor["recovery"] \
+            if legacy_authority is None \
+                    or previous["index"] != legacy_authority["anchor"] \
+                    or receipt_index <= legacy_authority["event"] \
                     or [candidate[0] for candidate in later_receipts] != [receipt_index]:
                 fail(f"the {mandate} final receipt has no exact legacy recovery anchor")
         returned = sequence[position - 2]
@@ -749,13 +856,22 @@ def product_reviewer_receipt_sequence(
             and isinstance(entry.get("text"), str)
             and entry["text"].startswith("malformed finding returned:")
         ]
-        if len(returned_spends) != len(malformed_returned) or not all(
+        exact_prior_returns = len(returned_spends) == len(malformed_returned) and all(
                 exact_malformed_return(
                     spend[1], opening, built, mandate,
                     returned["owner"]["session"], claim["id"],
                 ) and returned_verifier["terminal"][0] < spend[0] < restated["index"]
                 for spend, claim in zip(returned_spends, malformed_returned)
-        ) or len([
+        )
+        legacy_prior_return = None if legacy_authority is None else \
+            legacy_authority["transitions"].get((returned["index"], restated["index"]))
+        exact_legacy_prior_returns = legacy_prior_return is not None \
+            and legacy_prior_return["opening"] == returned_verifier["opening"][0] \
+            and legacy_prior_return["terminal"] == returned_verifier["terminal"][0] \
+            and legacy_prior_return["returns"] == [
+                index for index, entry in returned_spends
+            ]
+        if (not exact_prior_returns and not exact_legacy_prior_returns) or len([
                     candidate for candidate in receipts
                     if returned_verifier["terminal"][0] < candidate[0] <= restated["index"]
                 ]) != 1:
@@ -785,6 +901,9 @@ def product_reviewer_receipt_sequence(
                     proof, f"the {mandate} final receipt's settlement recovery",
                 ) for proof in recovery_data.get("settlement", [])
             )
+        legacy_recovery_index = item["owner"].get("legacy_recovery")
+        if legacy_recovery_index is not None:
+            allowed_recovery.add(legacy_recovery_index)
         suffix_start = restated_verifier["terminal"][0] + 1
         for index, entry in enumerate(entries[suffix_start:receipt_index], suffix_start):
             if index in allowed_recovery:
@@ -1031,6 +1150,132 @@ def validate_product_reviewer_retirement_recovery(
     }
     if entry.get("event") != "note" \
             or entry.get("kind") != PRODUCT_RETIREMENT_RECOVERY_KIND \
+            or entry.get("by") != expected["owner"] \
+            or context(entry) != expected_context \
+            or data(entry) != expected:
+        fail(f"{subject} changes its exact authority")
+
+
+def product_reviewer_legacy_chain_account(
+        entries, before, opening_index, generation, records, record, subject,
+):
+    opening = entries[opening_index]
+    mandate = record["mandate"]
+    session = record["session"]
+    if record.get("recovery") is None or record.get("legacy_recovery") is not None:
+        fail(f"{subject} has no one retained retirement recovery")
+    anchor = product_reviewer_recovery_anchor(
+        entries, opening_index, mandate, record,
+    )
+    retained_recovery = entries[anchor["recovery"]]
+    if retained_recovery.get("kind") != PRODUCT_RETIREMENT_RECOVERY_KIND \
+            or data(retained_recovery).get("session") != session:
+        fail(f"{subject} changes its retained retirement recovery")
+    receipts = product_reviewer_receipts(
+        entries, opening_index, mandate, before=anchor["recovery"],
+    )
+    if len(receipts) < 3 or receipts[-1][0] != anchor["receipt"]:
+        fail(f"{subject} has no repeated legacy receipt chain")
+
+    transitions = []
+    for (from_index, from_receipt), (to_index, to_receipt) in zip(
+            receipts, receipts[1:],
+    ):
+        from_owner = receipt_owner(records, mandate, from_index, forbid_later=False)
+        to_owner = receipt_owner(records, mandate, to_index, forbid_later=False)
+        if from_owner["session"] != session or to_owner["session"] != session:
+            fail(f"{subject} changes its reviewer generation")
+        identity = exact_product_identity(
+            from_receipt, opening, generation["lot"], mandate,
+        )
+        exact_product_identity(to_receipt, opening, generation["lot"], mandate)
+        verifier = product_verifier_generation(
+            entries, from_index, mandate, identity, data(from_receipt),
+            before=to_index, owner=opening.get("by"), built=generation["lot"],
+        )
+        if verifier["state"] != "complete-malformed" \
+                or verifier["opening"] is None or verifier["terminal"] is None:
+            fail(f"{subject} has an incomplete legacy verifier generation")
+        return_entries = [
+            (index, entry) for index, entry in enumerate(
+                entries[verifier["terminal"][0] + 1:to_index],
+                verifier["terminal"][0] + 1,
+            )
+            if entry.get("kind") == "bound.spent"
+            and entry.get("mandate") == mandate
+            and isinstance(entry.get("text"), str)
+            and entry["text"].startswith("malformed finding returned:")
+        ]
+        malformed_claims = [
+            claim for claim in data(verifier["terminal"][1])["claims"]
+            if claim["verdict"] == "malformed"
+        ]
+        if len(return_entries) != len(malformed_claims) or not all(
+            exact_legacy_malformed_return(
+                entry, opening, generation["lot"], mandate, session,
+            ) for index, entry in return_entries
+        ) or any(
+            exact_malformed_return(
+                entry, opening, generation["lot"], mandate, session, claim["id"],
+            ) for (index, entry), claim in zip(return_entries, malformed_claims)
+        ):
+            fail(f"{subject} has no complete descriptive legacy return set")
+        transitions.append({
+            "from_receipt": journal_proof(from_receipt, subject),
+            "verifier_opening": journal_proof(verifier["opening"][1], subject),
+            "verifier_terminal": journal_proof(verifier["terminal"][1], subject),
+            "returns": [journal_proof(entry, subject) for index, entry in return_entries],
+            "to_receipt": journal_proof(to_receipt, subject),
+        })
+
+    for entry in entries[anchor["recovery"] + 1:before]:
+        event = entry.get("event")
+        kind = entry.get("kind")
+        same_mandate = entry.get("mandate") == mandate
+        replacement = event == "session-started" \
+            and same_generation(entry, "product-review", generation) \
+            and same_mandate
+        retirement = event == "session-retired" and entry.get("session") == session
+        pass_terminal = kind == "pass.closed"
+        amendment = kind == "amendment.opened" \
+            and data(entry).get("origin") == "product-review"
+        whole_run_cleanup = kind == "cleanup.started" \
+            and data(entry).get("scope") == "whole-run"
+        stop = kind in {"paused", "aborted"} \
+            and entry.get("by") == opening.get("by") \
+            and context(entry) == {
+                "mode": "product-review", "lot": generation["lot"], "job": "controller",
+            }
+        if same_mandate or replacement or retirement or pass_terminal \
+                or amendment or whole_run_cleanup or stop:
+            fail(f"{subject} crosses an event after its retained recovery")
+
+    return {
+        "schema": 1,
+        "pass_opening": journal_proof(opening, subject),
+        "owner": opening.get("by"),
+        "controller_context": context(opening),
+        "reviewer_start": journal_proof(entries[record["start"]], subject),
+        "session": session,
+        "mandate": mandate,
+        "retirement_recovery": journal_proof(retained_recovery, subject),
+        "anchor_receipt": journal_proof(entries[anchor["receipt"]], subject),
+        "transitions": transitions,
+    }
+
+
+def validate_product_reviewer_legacy_chain_recovery(
+        entries, index, entry, opening_index, generation, records, record,
+):
+    subject = "the Product reviewer legacy receipt-chain recovery"
+    expected = product_reviewer_legacy_chain_account(
+        entries, index, opening_index, generation, records, record, subject,
+    )
+    expected_context = {
+        "mode": "product-review", "lot": generation["lot"], "job": "controller",
+    }
+    if entry.get("event") != "note" \
+            or entry.get("kind") != PRODUCT_LEGACY_CHAIN_RECOVERY_KIND \
             or entry.get("by") != expected["owner"] \
             or context(entry) != expected_context \
             or data(entry) != expected:

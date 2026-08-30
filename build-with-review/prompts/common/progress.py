@@ -124,6 +124,7 @@ NOTE_KINDS = {
     "correction.round.built", "correction.round.resolved", "correction.round.escalated",
     "final-checker.contract-mapped",
     "product.reviewer.retirement.recovered",
+    "product.reviewer.legacy-chain.recovered",
 }
 SUBAGENT_KINDS = {
     "gate-runner", "completeness", "design-checker", "code-checker",
@@ -567,6 +568,26 @@ def product_reviewer_recovery_account(entries, session, subject):
         return account
     except ProductReviewerProjectorError as exc:
         fail(f"{subject} has no exact malformed-retirement authority", exc)
+
+
+def product_reviewer_legacy_chain_account(entries, session, subject):
+    module = product_review_pool_module()
+    projected = product_reviewer_projector_entries(entries)
+    try:
+        opening_index, mandates, generation, _built = module.current_generation(
+            projected, "product-review",
+        )
+        records = module.session_records(
+            projected, opening_index, "product-review", mandates, generation,
+        )
+        record = records.get(session)
+        if record is None:
+            raise ProductReviewerProjectorError("the session has no current reviewer start")
+        return module.product_reviewer_legacy_chain_account(
+            projected, len(projected), opening_index, generation, records, record, subject,
+        )
+    except ProductReviewerProjectorError as exc:
+        fail(f"{subject} has no exact legacy receipt-chain authority", exc)
 
 
 def product_reviewer_receipt_sequence(entries, opening_index, built, mandate, subject):
@@ -21061,6 +21082,8 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
         fail("amendment.attempt.settled is helper-owned; use amendment-attempt-settle.sh")
     if kind == "product.reviewer.retirement.recovered":
         fail("Product reviewer retirement recovery is helper-owned")
+    if kind == "product.reviewer.legacy-chain.recovered":
+        fail("Product reviewer legacy receipt-chain recovery is helper-owned")
     if kind == "attempt.failed":
         data = normalize_attempt_failed(notes, data, context)
     elif kind == "rewind.done" and isinstance(data, dict) and data.get("schema") == 2:
@@ -22473,6 +22496,57 @@ def cmd_product_reviewer_retirement_recover(args):
 
     write_validated_line(build)
     print(f"PRODUCT REVIEWER RETIREMENT RECOVERED {args.session_id}")
+
+
+def cmd_product_reviewer_legacy_chain_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+
+    def build(entries):
+        recoveries = [entry for entry in entries
+                      if entry.get("event") == "note"
+                      and entry.get("kind") == "product.reviewer.legacy-chain.recovered"
+                      and note_data(entry).get("session") == args.session_id]
+        if recoveries:
+            generation = product_reviewer_generation(
+                entries, args.session_id, "the retained Product legacy-chain recovery",
+            )
+            expected_context = generation["controller_context"]
+            actual_context = {key: caller[key] for key in CONTEXT_FIELDS if key in caller}
+            if len(recoveries) != 1 or me["session_id"] != generation["owner"] \
+                    or actual_context != expected_context:
+                fail("the retained Product legacy-chain recovery changes its controller")
+            return None
+        recovery = product_reviewer_legacy_chain_account(
+            entries, args.session_id, "the Product reviewer legacy-chain recovery",
+        )
+        expected_context = recovery["controller_context"]
+        actual_context = {key: caller[key] for key in CONTEXT_FIELDS if key in caller}
+        if me["session_id"] != recovery["owner"] or actual_context != expected_context:
+            fail("Product legacy-chain recovery requires the original pass controller", {
+                "expected_owner": recovery["owner"], "expected_context": expected_context,
+                "actual_owner": me["session_id"], "actual_context": actual_context,
+            })
+        candidate = event_entry(
+            me["session_id"], "note",
+            kind="product.reviewer.legacy-chain.recovered",
+            data=recovery, **expected_context,
+        )
+        module = product_review_pool_module()
+        projected = product_reviewer_projector_entries([*entries, candidate])
+        try:
+            opening_index, mandates, generation, _built = module.current_generation(
+                projected, "product-review",
+            )
+            module.session_records(
+                projected, opening_index, "product-review", mandates, generation,
+            )
+        except ProductReviewerProjectorError as exc:
+            fail("the Product legacy-chain recovery is not historically exact", exc)
+        return candidate
+
+    write_validated_line(build)
+    print(f"PRODUCT REVIEWER LEGACY CHAIN RECOVERED {args.session_id}")
 
 
 def perform_standard_session_retirement(args, me, target_context):
@@ -25558,6 +25632,10 @@ def build_parser():
     sp = sub.add_parser("product-reviewer-retirement-recover", help=argparse.SUPPRESS)
     sp.add_argument("session_id")
     sp.set_defaults(func=cmd_product_reviewer_retirement_recover)
+
+    sp = sub.add_parser("product-reviewer-legacy-chain-recover", help=argparse.SUPPRESS)
+    sp.add_argument("session_id")
+    sp.set_defaults(func=cmd_product_reviewer_legacy_chain_recover)
 
     sp = sub.add_parser("session-status", help="change a session's bwr.status, and record it")
     sp.add_argument("session_id")

@@ -25620,6 +25620,232 @@ def product_reviewer_done_retirement_refuses_malformed_and_recovers_one_exact_ge
 
 
 @test
+def product_reviewer_legacy_chain_recovery_closes_one_exact_generation():
+    commit, gate, _ = seed_task_gate("lot-1", "legacy-chain-recovery")
+    controller = {
+        "schema": 1, "job": "controller", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1", "status": "working",
+    }
+    reviewer = {
+        "schema": 1, "job": "reviewer", "mode": "product-review",
+        "feature": "demo-feature", "lot": "lot-1", "mandate": "meaning",
+        "status": "working",
+    }
+    config = default_config()
+    config["whoami"] = {
+        "session_id": CALLER,
+        "session": {"id": CALLER, "annotations": {"bwr": controller}},
+    }
+    config["sessions"][CALLER] = {
+        "id": CALLER, "annotations": {"bwr": controller},
+    }
+    config["sessions"][TARGET] = {
+        "id": TARGET, "annotations": {"bwr": reviewer},
+    }
+    set_config(config)
+    append_note("pass.opened", {
+        "built": "lot-1", "commit": commit, "gate": gate,
+        "source_scope": "task", "source_owner": "lot-1/task-1/attempt-1",
+        "source_lot": "lot-1", "source_task": 1, "source_attempt": 1,
+    }, by=CALLER, mode="product-review", lot="lot-1", job="controller")
+    started = run_progress("session-started", TARGET)
+    check(started.returncode == 0, started.stdout + started.stderr)
+
+    report_path = "reports/product-review/lot-1/lot-1-meaning.md"
+    old_report = product_report_text("meaning", ("MINOR",))
+    anchor_sha = write_report(report_path, old_report)
+    controller_context = {
+        "by": CALLER, "mode": "product-review", "lot": "lot-1",
+        "job": "controller",
+    }
+
+    def raw_receipt(report_sha):
+        append_note(
+            "report.received",
+            {
+                "critical": 0, "important": 0, "minor": 1, "decision": 0,
+                "pass_commit": commit, "pass_gate": gate,
+                "report_sha256": report_sha,
+            },
+            mandate="meaning", **controller_context,
+        )
+
+    def raw_malformed_verifier(report_sha):
+        identity = {
+            "pass_commit": commit, "pass_gate": gate,
+            "report_sha256": report_sha,
+        }
+        append_subagent(
+            "subagent-started", "finding-verifier", mandate="meaning",
+            data=identity, **controller_context,
+        )
+        append_subagent(
+            "subagent-ended", "finding-verifier", mandate="meaning",
+            data={
+                **identity, "confirmed": 0, "disproved": 0, "malformed": 1,
+                "claims": [
+                    {"id": "F1", "kind": "correction", "verdict": "malformed"},
+                ],
+            },
+            **controller_context,
+        )
+
+    for generation in range(1, 5):
+        report_sha = anchor_sha if generation == 4 else str(generation) * 64
+        raw_receipt(report_sha)
+        raw_malformed_verifier(report_sha)
+        if generation < 4:
+            append_note(
+                "bound.spent",
+                text=(
+                    "malformed finding returned: legacy descriptive finding "
+                    f"{generation} - lens {TARGET}\n"
+                ),
+                mandate="meaning", **controller_context,
+            )
+
+    append_raw = {
+        "ts": "t", "by": CALLER, "event": "session-retired", "session": TARGET,
+        "status": "done", "mode": "product-review", "lot": "lot-1",
+        "mandate": "meaning", "job": "reviewer", "archived": True, "hidden": True,
+    }
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    with open(journal_path, "a", encoding="utf-8") as target:
+        target.write(json.dumps(append_raw, separators=(",", ":")) + "\n")
+
+    before_retained_recovery = open(journal_path, "rb").read()
+    no_anchor = run_progress("product-reviewer-legacy-chain-recover", TARGET)
+    check(no_anchor.returncode != 0
+          and open(journal_path, "rb").read() == before_retained_recovery,
+          "the legacy-chain recovery entered without its retained retirement recovery")
+
+    historical = journal_lines()
+    opening_index = next(
+        index for index, entry in enumerate(historical)
+        if entry.get("kind") == "pass.opened"
+    )
+    start_index = next(
+        index for index, entry in enumerate(historical)
+        if entry.get("event") == "session-started" and entry.get("session") == TARGET
+    )
+    receipt_index = max(
+        index for index, entry in enumerate(historical)
+        if entry.get("kind") == "report.received" and entry.get("mandate") == "meaning"
+    )
+    verifier_indexes = [
+        index for index, entry in enumerate(historical)
+        if index > receipt_index and entry.get("kind") == "finding-verifier"
+        and entry.get("mandate") == "meaning"
+    ]
+    retirement_index = len(historical) - 1
+
+    def raw_proof(index):
+        lines = open(journal_path, "rb").read().splitlines()
+        return f"{index}:{hashlib.sha256(lines[index]).hexdigest()}"
+
+    append_note(
+        "product.reviewer.retirement.recovered",
+        {
+            "schema": 1,
+            "pass_opening": raw_proof(opening_index),
+            "owner": CALLER,
+            "controller_context": {
+                "mode": "product-review", "lot": "lot-1", "job": "controller",
+            },
+            "session_start": raw_proof(start_index),
+            "session": TARGET,
+            "mandate": "meaning",
+            "receipt": raw_proof(receipt_index),
+            "report_sha256": anchor_sha,
+            "verifier_opening": raw_proof(verifier_indexes[0]),
+            "verifier_terminal": raw_proof(verifier_indexes[1]),
+            "retirement": raw_proof(retirement_index),
+            "settlement": [],
+        },
+        by=CALLER, mode="product-review", lot="lot-1", job="controller",
+    )
+
+    final_report = product_report_text("meaning")
+    final_sha = write_report(report_path, final_report)
+    before = open(journal_path, "rb").read()
+    premature_final = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(premature_final.returncode != 0
+          and open(journal_path, "rb").read() == before,
+          "the legacy final receipt entered without its one-shot recovery")
+
+    generic = run_progress(
+        "note", "product.reviewer.legacy-chain.recovered", "--data", "{}",
+    )
+    check(generic.returncode != 0 and open(journal_path, "rb").read() == before,
+          "the generic note route published a legacy-chain recovery")
+
+    foreign = json.loads(json.dumps(config))
+    foreign["whoami"]["session_id"] = "foreign-product-controller"
+    foreign["whoami"]["session"]["id"] = "foreign-product-controller"
+    foreign["sessions"]["foreign-product-controller"] = {
+        "id": "foreign-product-controller", "annotations": {"bwr": controller},
+    }
+    set_config(foreign)
+    refused_foreign = run_progress("product-reviewer-legacy-chain-recover", TARGET)
+    check(refused_foreign.returncode != 0
+          and open(journal_path, "rb").read() == before,
+          "a foreign Product controller published a legacy-chain recovery")
+    set_config(config)
+
+    recovered = run_progress("product-reviewer-legacy-chain-recover", TARGET)
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    check(
+        recovered.stdout.strip()
+        == f"PRODUCT REVIEWER LEGACY CHAIN RECOVERED {TARGET}",
+        "the public legacy-chain recovery did not print its exact terminal",
+    )
+    recovery = journal_lines()[-1]
+    check(recovery.get("kind") == "product.reviewer.legacy-chain.recovered"
+          and len(recovery["data"]["transitions"]) == 3,
+          "the recovery did not freeze the complete ordered legacy chain")
+    recovered_count = len(journal_lines())
+    retained = run_progress("product-reviewer-legacy-chain-recover", TARGET)
+    check(retained.returncode == 0 and len(journal_lines()) == recovered_count,
+          "the exact legacy-chain recovery retry appended a second authority")
+
+    final_receipt = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(final_receipt.returncode == 0, final_receipt.stdout + final_receipt.stderr)
+    final_identity = {
+        "pass_commit": commit, "pass_gate": gate, "report_sha256": final_sha,
+    }
+    final_opening = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps(final_identity),
+    )
+    check(final_opening.returncode == 0, final_opening.stdout + final_opening.stderr)
+    final_terminal = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps({
+            **final_identity, "confirmed": 0, "disproved": 0, "malformed": 0,
+            "claims": [],
+        }),
+    )
+    check(final_terminal.returncode == 0, final_terminal.stdout + final_terminal.stderr)
+    retired = run_progress("session-retired", TARGET, "done", "--archive", "--hide")
+    check(retired.returncode == 0, retired.stdout + retired.stderr)
+
+    closed_prefix = open(journal_path, "rb").read()
+    sixth_receipt = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(sixth_receipt.returncode != 0
+          and open(journal_path, "rb").read() == closed_prefix,
+          "a receipt followed the one-shot legacy closure")
+
+
+@test
 def product_receipt_rejects_a_noncontiguous_finding_structure():
     commit, gate, _ = seed_task_gate("lot-1", "malformed-finding")
     append_note("pass.opened", {
