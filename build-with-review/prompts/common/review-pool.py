@@ -667,10 +667,21 @@ def product_reviewer_receipt_sequence(
                 )
                 for returned, claim in zip(transition_returns, malformed_claims)
             )
-        if transition_returns:
-            if not complete_returns or len(session_returns) != len(transition_returns):
-                fail(f"the {mandate} report replacement has no complete malformed return set")
+        if transition_returns and complete_returns \
+                and len(session_returns) == len(transition_returns):
             continue
+        recovery_settlement = set()
+        recovery_index = item["owner"].get("recovery")
+        if recovery_index is not None:
+            recovery_settlement.update(
+                journal_proof_index(
+                    proof, f"the {mandate} final receipt's settlement recovery",
+                ) for proof in data(entries[recovery_index]).get("settlement", [])
+            )
+        recovered_final_returns = position >= 2 and complete_returns \
+            and all(index in recovery_settlement for index, entry in transition_returns)
+        if transition_returns and not recovered_final_returns:
+            fail(f"the {mandate} report replacement has no complete malformed return set")
         if position < 2:
             fail(f"the {mandate} report replacement has no exact malformed return")
         returned = sequence[position - 2]

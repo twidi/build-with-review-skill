@@ -536,12 +536,17 @@ class ReviewPoolTest(unittest.TestCase):
         second_end = self.verifier_malformed("meaning", "2" * 64)
         retirement = self.retired("meaning", "product-review", "meaning", lot="lot-1")
         retirement.update({"archived": True, "hidden": True})
+        recovered_return = dict(malformed_return)
+        recovered_working = self.status(
+            "meaning", "product-review", "meaning", "working", lot="lot-1",
+        )
         final_receipt = self.product_receipt("meaning", "3" * 64)
         final_start = self.verifier_started("meaning", "3" * 64)
         final_end = self.verifier_ended("meaning", "3" * 64)
         retired_base = [
             *self.entries, start, first_receipt, first_start, first_end,
             malformed_return, second_receipt, second_start, second_end, retirement,
+            recovered_return, recovered_working,
         ]
 
         def proof(entries, index):
@@ -565,7 +570,7 @@ class ReviewPoolTest(unittest.TestCase):
                 "verifier_opening": proof(retired_base, 8),
                 "verifier_terminal": proof(retired_base, 9),
                 "retirement": proof(retired_base, 10),
-                "settlement": [],
+                "settlement": [proof(retired_base, 11), proof(retired_base, 12)],
             },
         }
         base = [*retired_base, recovery]
@@ -600,6 +605,10 @@ class ReviewPoolTest(unittest.TestCase):
         self.assertEqual(
             exact_return_with_nudge.returncode, 0,
             exact_return_with_nudge.stdout + exact_return_with_nudge.stderr,
+        )
+        refused(
+            [*retired_base[:10], recovered_return, final_receipt],
+            "a second-generation return without its exact recovery authorized R3",
         )
 
         spend_index = next(
