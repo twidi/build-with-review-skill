@@ -1,6 +1,9 @@
 ---
 name: build-with-review
 description: Use when a feature has to go from an idea to committed code — writing a spec, planning it, building it task by task, reviewing the result, or amending a spec after a review. Use when the user invokes "build with review", or when correctness matters enough that the work should be validated by running it rather than by reading it.
+metadata:
+  author: twidi
+  version: "1.0.0"
 ---
 
 # Build With Review
