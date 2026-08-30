@@ -28986,14 +28986,18 @@ def absorbed_amendment_item_historical_projector_authenticates_the_exact_commit(
 
 @test
 def correction_amendment_structural_return_publishes_one_escalation():
+    progress_runner = in_process_progress_runner(retain_projection_cache=True)
     state = seed_committed_correction_amendment(
         "correction-amendment-escalated", task_count=1, pending_obligation=True,
         source_mandates=("unlooked", "coverage"),
+        progress_runner=progress_runner,
     )
-    progress = load_common_module("progress")
-    previous_state = progress.current_correction_contract_state(
-        journal_lines(), len(journal_lines()), "lot-1", 1,
-        "the post-AMENDMENT escalation fixture",
+    progress = progress_runner.progress_module
+    previous_state = progress_runner.project(
+        lambda _progress: progress.current_correction_contract_state(
+            journal_lines(), len(journal_lines()), "lot-1", 1,
+            "the post-AMENDMENT escalation fixture",
+        )
     )
     artifact_path = write_escalating_correction_artifact(state)
     parser = load_construction_module("correction_round")
@@ -29001,27 +29005,25 @@ def correction_amendment_structural_return_publishes_one_escalation():
     helper = os.path.join(
         WORKSPACE, "prompts", "construction", "correction-round-escalate.sh",
     )
-    first = subprocess.run(
-        [helper, "lot-1", "1", "1"], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=120,
+    retained_runner = lambda: run_correction_amendment_return_in_process(
+        "sublot", 1, progress_runner,
     )
-    check(first.returncode == 0 and "BASELINE REQUIRED" in first.stdout,
-          first.stdout + first.stderr)
+    first = retained_runner()
+    check("BASELINE REQUIRED" in first, first)
     marker_path = pathlib.Path(WORKSPACE) / "correction-amendment-return-in-progress"
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     gate = seed_correction_baseline_gate(
         marker["baseline_owner"], marker["commit"], marker["commit"],
+        progress_runner=progress_runner,
     )
-    second = subprocess.run(
-        [helper, "lot-1", "1", "1"], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=120,
-    )
-    check(second.returncode == 0 and "RETURN ACCOUNT REQUIRED" in second.stdout,
-          second.stdout + second.stderr)
+    second = retained_runner()
+    check("RETURN ACCOUNT REQUIRED" in second, second)
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    current_set = progress.outstanding_final_checker_set(
-        journal_lines(), len(journal_lines()), "lot-1", 1,
-        "the post-AMENDMENT escalation fixture",
+    current_set = progress_runner.project(
+        lambda _progress: progress.outstanding_final_checker_set(
+            journal_lines(), len(journal_lines()), "lot-1", 1,
+            "the post-AMENDMENT escalation fixture",
+        )
     )
     obligations = load_common_module("final_checker_obligations")
     blocker = journal_proof(state["amendment_commit_index"])
@@ -29104,12 +29106,8 @@ def correction_amendment_structural_return_publishes_one_escalation():
         return_account, sort_keys=True, separators=(",", ":"),
     ).encode() + b"\n"
     return_path.write_bytes(return_payload)
-    third = subprocess.run(
-        [helper, "lot-1", "1", "1"], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=120,
-    )
-    check(third.returncode == 0 and "ESCALATION ARTIFACT REQUIRED" in third.stdout,
-          third.stdout + third.stderr)
+    third = retained_runner()
+    check("ESCALATION ARTIFACT REQUIRED" in third, third)
     terminal_marker = json.loads(marker_path.read_text(encoding="utf-8"))
     check(terminal_marker["phase"] == "escalation-required", terminal_marker)
     escalation_path = pathlib.Path(WORKSPACE) / "corrections/lot-1/round-1-escalation.md"
@@ -29163,24 +29161,22 @@ def correction_amendment_structural_return_publishes_one_escalation():
             ),
             encoding="utf-8",
         )
-        refused_escalation = subprocess.run(
-            [helper, "lot-1", "1", "1"], cwd=REPO, capture_output=True, text=True,
-            env=ENV, timeout=120,
-        )
+        try:
+            retained_runner()
+        except (SystemExit, ValueError):
+            refused = True
+        else:
+            refused = False
         check(
-            refused_escalation.returncode != 0
+            refused
             and len(journal_lines()) == journal_before
             and marker_path.read_bytes() == marker_bytes
             and {path.name for path in escalation_objects.iterdir()} == object_names,
             f"the {label} multi-source escalation changed durable authority",
         )
     escalation_path.write_text(escalation_text, encoding="utf-8")
-    terminal = subprocess.run(
-        [helper, "lot-1", "1", "1"], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=120,
-    )
-    check(terminal.returncode == 0 and "CORRECTION ROUND ESCALATED" in terminal.stdout,
-          terminal.stdout + terminal.stderr)
+    terminal = retained_runner()
+    check("CORRECTION ROUND ESCALATED" in terminal, terminal)
     entries = journal_lines()
     index = len(entries) - 1
     check(entries[index]["kind"] == "correction.round.escalated", entries[index])
@@ -29198,6 +29194,7 @@ def correction_amendment_structural_return_publishes_one_escalation():
     recover_correction_amendment_return_terminal(
         helper, ["lot-1", "1", "1"], marker_path, terminal_marker,
         entries[index], "CORRECTION ROUND ESCALATED",
+        retained_runner=retained_runner,
     )
     escalation_proof = journal_proof(index)
     escalation_data = entries[index]["data"]
@@ -29242,7 +29239,7 @@ def correction_amendment_structural_return_publishes_one_escalation():
         } for item in escalation_data["items"]],
         "retry_transition": allocation_transition,
     }
-    allocated = run_progress(
+    allocated = progress_runner(
         "note", "sublot.allocated", "--text", "lot-1.1",
         "--data", json.dumps(allocation_data),
     )
@@ -29259,12 +29256,12 @@ def correction_amendment_structural_return_publishes_one_escalation():
         "the durable post-AMENDMENT escalation allocation",
     )
     check(projected == expected_set, projected)
-    duplicate = run_progress(
+    duplicate = progress_runner(
         "note", "sublot.allocated", "--text", "lot-1.1",
         "--data", json.dumps(allocation_data),
     )
     check(duplicate.returncode != 0, "the escalation accepted a second allocation")
-    opened = run_progress("note", "sublot.opened", "--text", "lot-1.1")
+    opened = progress_runner("note", "sublot.opened", "--text", "lot-1.1")
     check(opened.returncode == 0, opened.stdout + opened.stderr)
     write_report(
         "plans/lot-1.1-plan.md",
