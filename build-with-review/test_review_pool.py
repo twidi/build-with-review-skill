@@ -771,6 +771,129 @@ class ReviewPoolTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             validate_return(self.entries, returned("F1"))
 
+    def test_recovered_legacy_malformed_chain_closes_with_one_final_receipt(self):
+        self.open_product_pass()
+        start = self.started("meaning", "product-review", "meaning", lot="lot-1")
+
+        def receipt(number, count=1):
+            entry = self.product_receipt("meaning", str(number) * 64)
+            entry["data"]["minor"] = count
+            return entry
+
+        def returned():
+            return {
+                "event": "note", "kind": "bound.spent",
+                "text": "malformed finding returned: F1 - lens meaning",
+                "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+                "mandate": "meaning", "job": "controller",
+            }
+
+        chain = [*self.entries, start]
+        receipt_indexes = []
+        terminal_indexes = []
+        for number in range(1, 5):
+            receipt_indexes.append(len(chain))
+            chain.extend([
+                receipt(number),
+                self.verifier_started("meaning", str(number) * 64),
+                self.verifier_malformed("meaning", str(number) * 64),
+            ])
+            terminal_indexes.append(len(chain) - 1)
+            if number < 4:
+                chain.append(returned())
+
+        retirement = self.retired("meaning", "product-review", "meaning", lot="lot-1")
+        retirement.update({"archived": True, "hidden": True})
+        chain.append(retirement)
+
+        def proof(entries, index):
+            raw = json.dumps(entries[index], separators=(",", ":")).encode()
+            return f"{index}:{hashlib.sha256(raw).hexdigest()}"
+
+        recovery = {
+            "event": "note", "kind": "product.reviewer.retirement.recovered",
+            "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+            "job": "controller", "data": {
+                "schema": 1,
+                "pass_opening": proof(chain, 1),
+                "owner": "product-controller",
+                "controller_context": {
+                    "mode": "product-review", "lot": "lot-1", "job": "controller",
+                },
+                "session_start": proof(chain, 2),
+                "session": "meaning", "mandate": "meaning",
+                "receipt": proof(chain, receipt_indexes[-1]),
+                "report_sha256": "4" * 64,
+                "verifier_opening": proof(chain, terminal_indexes[-1] - 1),
+                "verifier_terminal": proof(chain, terminal_indexes[-1]),
+                "retirement": proof(chain, len(chain) - 1),
+                "settlement": [],
+            },
+        }
+        final_receipt = receipt(5, count=0)
+
+        def copied(entries):
+            return json.loads(json.dumps(entries))
+
+        def refused(entries, message):
+            self.entries = copied(entries)
+            result = self.run_helper("product-review")
+            self.assertNotEqual(result.returncode, 0, message)
+
+        refused(
+            [*chain[:-1], final_receipt],
+            "a repeated malformed chain without recovery authorized its final receipt",
+        )
+
+        return_indexes = [
+            index for index, entry in enumerate(chain)
+            if entry.get("kind") == "bound.spent"
+        ]
+        for return_index in return_indexes:
+            missing = copied(chain)
+            missing[return_index]["text"] = "nudged the lens meaning"
+            refused(
+                [*missing, recovery, final_receipt],
+                "a legacy transition with a missing return authorized its final receipt",
+            )
+
+        for anchor_index in receipt_indexes[:-1]:
+            changed_anchor = copied(recovery)
+            changed_anchor["data"]["receipt"] = proof(chain, anchor_index)
+            refused(
+                [*chain, changed_anchor, final_receipt],
+                "a recovery anchored to an earlier receipt authorized the final receipt",
+            )
+
+        for field in ("verifier_opening", "verifier_terminal", "retirement"):
+            changed_proof = copied(recovery)
+            changed_proof["data"][field] = "0:" + "f" * 64
+            refused(
+                [*chain, changed_proof, final_receipt],
+                f"a changed recovery {field} authorized the final receipt",
+            )
+
+        refused(
+            [*chain, recovery, returned(), final_receipt],
+            "a new malformed return after recovery authorized the final receipt",
+        )
+        wrong_total = copied(final_receipt)
+        wrong_total["data"]["minor"] = 1
+        refused(
+            [*chain, recovery, wrong_total],
+            "a final receipt with the wrong anchor delta was accepted",
+        )
+
+        self.entries = copied([*chain, recovery, final_receipt])
+        recovered = self.run_helper("product-review")
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertIn("meaning: launch finding verifier", recovered.stdout)
+
+        refused(
+            [*chain, recovery, final_receipt, receipt(6, count=0)],
+            "a receipt followed the recovered final closure",
+        )
+
     def test_failed_owner_becomes_replaceable_until_fresh_receipt_settles(self):
         self.open_product_pass()
         stale_sha = "6" * 64

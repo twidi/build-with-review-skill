@@ -602,6 +602,36 @@ def exact_malformed_return(entry, opening, built, mandate, session, claim_id):
         )
 
 
+def product_reviewer_recovery_anchor(
+        entries, opening_index, mandate, record,
+):
+    recovery_index = record.get("recovery")
+    if recovery_index is None:
+        return None
+    recovery = entries[recovery_index]
+    recovery_data = data(recovery)
+    subject = f"the {mandate} reviewer recovery anchor"
+    anchor_index = journal_proof_index(recovery_data.get("receipt"), subject)
+    if anchor_index >= recovery_index or anchor_index >= len(entries) \
+            or journal_proof(entries[anchor_index], subject) != recovery_data["receipt"] \
+            or recovery_data.get("session") != record["session"] \
+            or recovery_data.get("mandate") != mandate:
+        fail(f"{subject} changes its exact receipt")
+    prior_receipts = product_reviewer_receipts(
+        entries, opening_index, mandate, before=recovery_index,
+    )
+    if not prior_receipts or prior_receipts[-1][0] != anchor_index:
+        fail(f"{subject} does not select the last pre-recovery receipt")
+    return {
+        "recovery": recovery_index,
+        "receipt": anchor_index,
+        "settlement": {
+            journal_proof_index(proof, subject)
+            for proof in recovery_data.get("settlement", [])
+        },
+    }
+
+
 def product_reviewer_receipt_sequence(
         entries, opening_index, opening, built, mandate, records, *, before=None,
 ):
@@ -633,6 +663,9 @@ def product_reviewer_receipt_sequence(
         previous = sequence[position - 1]
         if item["owner"]["session"] != previous["owner"]["session"]:
             continue
+        recovery_anchor = product_reviewer_recovery_anchor(
+            entries, opening_index, mandate, item["owner"],
+        )
         previous_verifier = previous["verifier"]
         if previous_verifier["state"] != "complete-malformed" \
                 or previous_verifier["terminal"] is None:
@@ -670,20 +703,29 @@ def product_reviewer_receipt_sequence(
         if transition_returns and complete_returns \
                 and len(session_returns) == len(transition_returns):
             continue
-        recovery_settlement = set()
-        recovery_index = item["owner"].get("recovery")
-        if recovery_index is not None:
-            recovery_settlement.update(
-                journal_proof_index(
-                    proof, f"the {mandate} final receipt's settlement recovery",
-                ) for proof in data(entries[recovery_index]).get("settlement", [])
-            )
+        if recovery_anchor is not None and receipt_index <= recovery_anchor["receipt"]:
+            if not transition_returns or not complete_returns:
+                fail(f"the {mandate} legacy report transition has no complete return set")
+            continue
         recovered_final_returns = position >= 2 and complete_returns \
-            and all(index in recovery_settlement for index, entry in transition_returns)
+            and recovery_anchor is not None \
+            and all(index in recovery_anchor["settlement"]
+                    for index, entry in transition_returns)
         if transition_returns and not recovered_final_returns:
             fail(f"the {mandate} report replacement has no complete malformed return set")
         if position < 2:
             fail(f"the {mandate} report replacement has no exact malformed return")
+        if position > 2:
+            later_receipts = [
+                candidate for candidate in receipts
+                if recovery_anchor is not None
+                and recovery_anchor["recovery"] < candidate[0] <= receipt_index
+            ]
+            if recovery_anchor is None \
+                    or previous["index"] != recovery_anchor["receipt"] \
+                    or receipt_index <= recovery_anchor["recovery"] \
+                    or [candidate[0] for candidate in later_receipts] != [receipt_index]:
+                fail(f"the {mandate} final receipt has no exact legacy recovery anchor")
         returned = sequence[position - 2]
         returned_verifier = returned["verifier"]
         restated = previous
