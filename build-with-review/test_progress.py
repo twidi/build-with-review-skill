@@ -28362,15 +28362,19 @@ def correction_amendment_rebase_consumes_exact_immutable_return():
 def retained_authority_rewind_escalates_without_moving_accepted_refs(
         *, construction_only=False, return_plan_seed=False,
 ):
+    progress_runner = in_process_progress_runner(retain_projection_cache=True)
     state = seed_committed_correction_amendment(
         "retained-authority-escalation", accepted_task=True,
         accepted_task_spec_change=True,
         construction_only=construction_only,
+        progress_runner=progress_runner,
     )
-    progress = load_common_module("progress")
-    previous_state = progress.current_correction_contract_state(
-        journal_lines(), len(journal_lines()), "lot-1", 1,
-        "the retained-authority escalation fixture",
+    progress = progress_runner.progress_module
+    previous_state = progress_runner.project(
+        lambda _progress: progress.current_correction_contract_state(
+            journal_lines(), len(journal_lines()), "lot-1", 1,
+            "the retained-authority escalation fixture",
+        )
     )
     artifact_path, success_index, success_data = write_rebased_after_task_one_artifact(state)
     parser = load_construction_module("correction_round")
@@ -28460,9 +28464,6 @@ def retained_authority_rewind_escalates_without_moving_accepted_refs(
     rebase_proof = journal_proof(rebase_index)
     check(journal_lines()[rebase_index]["kind"] == "correction.round.rebased",
           journal_lines()[rebase_index])
-    progress_runner = in_process_progress_runner(retain_projection_cache=True)
-    progress = progress_runner.progress_module
-
     controller = {
         "schema": 1, "job": "controller", "mode": "construction",
         "feature": "demo-feature", "lot": "lot-1", "correction": 1,
