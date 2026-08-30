@@ -569,6 +569,46 @@ def product_reviewer_recovery_account(entries, session, subject):
         fail(f"{subject} has no exact malformed-retirement authority", exc)
 
 
+def product_reviewer_receipt_sequence(entries, opening_index, built, mandate, subject):
+    module = product_review_pool_module()
+    projected = product_reviewer_projector_entries(entries)
+    opening = projected[opening_index]
+    try:
+        records = module.session_records(
+            projected, opening_index, "product-review", module.PRODUCT_MANDATES,
+            {"lot": built},
+        )
+        return module.product_reviewer_receipt_sequence(
+            projected, opening_index, opening, built, mandate, records,
+        )
+    except ProductReviewerProjectorError as exc:
+        fail(f"{subject} has no exact Product receipt sequence", exc)
+
+
+def validate_product_malformed_return(entries, data, text, mandate, context, owner):
+    if data is not None:
+        fail("a malformed Product finding return takes no structured data")
+    module = product_review_pool_module()
+    projected = product_reviewer_projector_entries(entries)
+    try:
+        opening_index, mandates, generation, built = module.current_generation(
+            projected, "product-review",
+        )
+        records = module.session_records(
+            projected, opening_index, "product-review", mandates, generation,
+        )
+        candidate = {
+            "event": "note", "kind": "bound.spent", "text": text,
+            "mandate": mandate, "by": owner, **context,
+        }
+        module.validate_product_malformed_return(
+            projected, opening_index, projected[opening_index], built,
+            mandate, records, candidate,
+        )
+    except ProductReviewerProjectorError as exc:
+        fail("the malformed Product finding return has no exact authority", exc)
+
+
 def journal_entries():
     raw_entries = raw_journal_entries()
     opening_projected = project_subagent_opening_recoveries(raw_entries)
@@ -14568,7 +14608,7 @@ def validate_product_report_entry(entries, opening_index, index, entry, built, s
     return data
 
 
-def normalize_product_report(entries, data, mandate):
+def normalize_product_report(entries, data, mandate, context, owner):
     if not isinstance(data, dict) or set(data) != REPORT_COUNT_KEYS or any(
         not isinstance(data.get(key), int) or isinstance(data.get(key), bool) or data[key] < 0
         for key in REPORT_COUNT_KEYS
@@ -14579,16 +14619,6 @@ def normalize_product_report(entries, data, mandate):
     )
     if pass_closes(entries, opening_index, len(entries)):
         fail("a product-review receipt cannot enter a closed pass")
-    previous = [(index, entry) for index, entry in enumerate(
-        entries[opening_index + 1:], opening_index + 1
-    ) if entry.get("kind") == "report.received" and entry.get("mandate") == mandate]
-    if previous:
-        reopened = any(
-            entry.get("kind") == "bound.spent" and entry.get("mandate") == mandate
-            for entry in entries[previous[-1][0] + 1:]
-        )
-        if not reopened:
-            fail(f"the {mandate} report already has a current accepted receipt")
     opening_data = note_data(opening)
     report = product_report_relative(built, mandate, opening_data)
     path = real_workspace_file(report, f"the current {mandate} lens report")
@@ -14605,12 +14635,21 @@ def normalize_product_report(entries, data, mandate):
         normalized = {**data, **generation, "report_sha256": report_sha}
     candidate = {
         "event": "note", "kind": "report.received", "mandate": mandate,
-        "data": normalized,
+        "data": normalized, "by": owner, **context,
     }
     validate_product_report_entry(
         entries + [candidate], opening_index, len(entries), candidate, built,
         f"the new {mandate} product-review receipt",
     )
+    prior_receipts = [
+        entry for entry in entries[opening_index + 1:]
+        if entry.get("kind") == "report.received" and entry.get("mandate") == mandate
+    ]
+    if prior_receipts:
+        product_reviewer_receipt_sequence(
+            [*entries, candidate], opening_index, built, mandate,
+            f"the new {mandate} product-review receipt",
+        )
     return normalized
 
 
@@ -14620,6 +14659,13 @@ def current_product_receipt(entries, opening_index, before, built, mandate, subj
     ) if entry.get("kind") == "report.received" and entry.get("mandate") == mandate]
     if not receipts:
         fail(f"{subject} has no accepted {mandate} report")
+    if len(receipts) > 1:
+        sequence = product_reviewer_receipt_sequence(
+            entries[:before], opening_index, built, mandate, subject,
+        )
+        if not sequence["receipts"] \
+                or sequence["receipts"][-1]["index"] != receipts[-1][0]:
+            fail(f"{subject} selected another {mandate} report generation")
     index, receipt = receipts[-1]
     data = validate_product_report_entry(entries, opening_index, index, receipt, built, subject)
     return index, receipt, data
@@ -21006,7 +21052,7 @@ def validate_conflict_partial(notes, kind, data, text):
 
 
 def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None, context=None,
-                       notes=None):
+                       notes=None, owner=None):
     notes = journal_entries() if notes is None else notes
     context = context or {}
     if kind == "attempt.launch.abandoned":
@@ -21044,7 +21090,7 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
             fail("a round-carrying SPEC receipt has an unknown mandate", mandate)
         data = normalize_spec_report(notes, data, round_number, mandate)
     elif kind == "report.received" and mandate in PRODUCT_REVIEW_MANDATES:
-        data = normalize_product_report(notes, data, mandate)
+        data = normalize_product_report(notes, data, mandate, context, owner)
     elif kind == "fixer.returned" and round_number is not None:
         data = normalize_fixer_return(notes, data, round_number)
     elif kind == "amendment.opened":
@@ -21060,6 +21106,12 @@ def validate_note_data(kind, data, text=None, *, round_number=None, mandate=None
     elif kind == "bound.spent" and isinstance(text, str) \
             and text.startswith("consolidation round"):
         data = normalize_consolidation_spend(notes, data, text, round_number)
+    elif kind == "bound.spent" and isinstance(text, str) \
+            and text.startswith("malformed finding returned:") \
+            and mandate in PRODUCT_REVIEW_MANDATES:
+        validate_product_malformed_return(
+            notes, data, text, mandate, context, owner,
+        )
     elif kind == "bound.spent" and isinstance(text, str) and re.fullmatch(
         r"(?:(?:design|code) checker round (?:[1-9]|10) of 10)",
         text,
@@ -24099,11 +24151,27 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
         journal_entries(), data, context.get("round"),
     ):
         return
+    if args.kind == "report.received" \
+            and context.get("mandate") in PRODUCT_REVIEW_MANDATES:
+        def build(entries):
+            locked_data = validate_note_data(
+                args.kind, data, text, mandate=context["mandate"],
+                context=context, notes=entries, owner=me["session_id"],
+            )
+            return event_entry(
+                me["session_id"], "note", kind=args.kind,
+                text=text if text is not None else None, data=locked_data,
+                **context,
+            )
+
+        write_validated_line(build)
+        return
     if args.kind == "cleanup.started":
         def build(entries):
             locked_data = validate_note_data(
                 args.kind, data, text, round_number=context.get("round"),
                 mandate=context.get("mandate"), context=context, notes=entries,
+                owner=me["session_id"],
             )
             owner = pending_malformed_pass_opening(
                 entries, len(entries), "the whole-run cleanup append",
@@ -24126,7 +24194,7 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
             locked_data = validate_note_data(
                 args.kind, data, text, round_number=locked_context.get("round"),
                 mandate=locked_context.get("mandate"), context=locked_context,
-                notes=entries,
+                notes=entries, owner=me["session_id"],
             )
             if isinstance(locked_data, dict) \
                     and locked_data.get("check") in {*CONSTRUCTION_CHECKERS, "diagnostic"}:
@@ -24144,7 +24212,7 @@ def append_note(args, lease=None, lease_operation=None, owner_marker=None):
         return
     data = validate_note_data(
         args.kind, data, text, round_number=context.get("round"),
-        mandate=context.get("mandate"), context=context,
+        mandate=context.get("mandate"), context=context, owner=me["session_id"],
     )
     if args.kind in {"paused", "aborted", "resumed"} \
             and isinstance(data, dict) and data.get("schema") == 2 \

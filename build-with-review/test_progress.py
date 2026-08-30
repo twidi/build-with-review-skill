@@ -25419,7 +25419,12 @@ def product_reviewer_done_retirement_refuses_malformed_and_recovers_one_exact_ge
     check(spent.returncode == 0, spent.stdout + spent.stderr)
     working = run_progress("session-status", TARGET, "working")
     check(working.returncode == 0, working.stdout + working.stderr)
-    fresh_sha = write_report(report_path, product_report_text("meaning"))
+    fresh_sha = write_report(
+        report_path,
+        product_report_text("meaning", ("MINOR",)).replace(
+            "one observable fact", "one restated observable fact",
+        ),
+    )
     settlement_prefix = open(journal_path, "rb").read()
     settlement_lines = settlement_prefix.splitlines(keepends=True)
 
@@ -25501,7 +25506,7 @@ def product_reviewer_done_retirement_refuses_malformed_and_recovers_one_exact_ge
 
     fresh_receipt = run_progress(
         "note", "report.received", "--mandate", "meaning",
-        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+        "--data", '{"critical":0,"important":0,"minor":1,"decision":0}',
     )
     check(fresh_receipt.returncode == 0, fresh_receipt.stdout + fresh_receipt.stderr)
     fresh_identity = {
@@ -25515,12 +25520,67 @@ def product_reviewer_done_retirement_refuses_malformed_and_recovers_one_exact_ge
     fresh_end = run_progress(
         "subagent-ended", "finding-verifier", "--mandate", "meaning",
         "--data", json.dumps({
-            **fresh_identity, "confirmed": 0, "disproved": 0, "malformed": 0,
-            "claims": [],
+            **fresh_identity, "confirmed": 0, "disproved": 0, "malformed": 1,
+            "claims": [{"id": "F1", "kind": "correction", "verdict": "malformed"}],
         }),
     )
     check(fresh_end.returncode == 0, fresh_end.stdout + fresh_end.stderr)
 
+    before_second_spend = open(journal_path, "rb").read()
+    second_spend = run_progress(
+        "note", "bound.spent", "--mandate", "meaning",
+        "--text", f"malformed finding returned: F1 - lens {TARGET}",
+    )
+    check(second_spend.returncode != 0
+          and open(journal_path, "rb").read() == before_second_spend,
+          "a Product reviewer generation spent a second malformed return")
+
+    oversized_report = product_report_text("meaning", ("MINOR", "MINOR"))
+    write_report(report_path, oversized_report)
+    before_delta = open(journal_path, "rb").read()
+    changed_delta = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":2,"decision":0}',
+    )
+    check(changed_delta.returncode != 0
+          and open(journal_path, "rb").read() == before_delta
+          and open(os.path.join(WORKSPACE, report_path), encoding="utf-8").read()
+          == oversized_report,
+          "a final Product receipt changed more than its malformed claims")
+
+    closure_sha = write_report(report_path, product_report_text("meaning"))
+    closure_receipt = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(closure_receipt.returncode == 0, closure_receipt.stdout + closure_receipt.stderr)
+    closure_identity = {
+        "pass_commit": commit, "pass_gate": gate, "report_sha256": closure_sha,
+    }
+    closure_start = run_progress(
+        "subagent-started", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps(closure_identity),
+    )
+    check(closure_start.returncode == 0, closure_start.stdout + closure_start.stderr)
+    closure_end = run_progress(
+        "subagent-ended", "finding-verifier", "--mandate", "meaning",
+        "--data", json.dumps({
+            **closure_identity, "confirmed": 0, "disproved": 0, "malformed": 0,
+            "claims": [],
+        }),
+    )
+    check(closure_end.returncode == 0, closure_end.stdout + closure_end.stderr)
+
+    closed_prefix = open(journal_path, "rb").read()
+    closed_report = open(os.path.join(WORKSPACE, report_path), "rb").read()
+    fourth_receipt = run_progress(
+        "note", "report.received", "--mandate", "meaning",
+        "--data", '{"critical":0,"important":0,"minor":0,"decision":0}',
+    )
+    check(fourth_receipt.returncode != 0
+          and open(journal_path, "rb").read() == closed_prefix
+          and open(os.path.join(WORKSPACE, report_path), "rb").read() == closed_report,
+          "a fourth Product receipt crossed the final malformed closure")
     exact_settled_prefix = open(journal_path, "rb").read()
     foreign_lines = exact_settled_prefix.splitlines(keepends=True)
     foreign_identity = {

@@ -576,6 +576,229 @@ def product_reviewer_receipts(entries, opening_index, mandate, *, before=None):
     ) if entry.get("kind") == "report.received" and entry.get("mandate") == mandate]
 
 
+def journal_proof_index(proof, subject):
+    try:
+        index = int(proof.split(":", 1)[0])
+    except (AttributeError, TypeError, ValueError):
+        fail(f"{subject} has a malformed journal proof")
+    if index < 0:
+        fail(f"{subject} has a malformed journal proof")
+    return index
+
+
+def exact_malformed_return(entry, opening, built, mandate, session, claim_id):
+    return entry.get("event") == "note" \
+        and entry.get("kind") == "bound.spent" \
+        and entry.get("by") == opening.get("by") \
+        and context(entry) == {
+            "mode": "product-review", "lot": built,
+            "mandate": mandate, "job": "controller",
+        } \
+        and set(entry) - {"ts", "_journal_proof"} == {
+            "by", "event", "kind", "text", "mode", "lot", "mandate", "job",
+        } \
+        and entry.get("text") == (
+            f"malformed finding returned: {claim_id} - lens {session}"
+        )
+
+
+def product_reviewer_receipt_sequence(
+        entries, opening_index, opening, built, mandate, records, *, before=None,
+):
+    before = len(entries) if before is None else before
+    receipts = product_reviewer_receipts(
+        entries, opening_index, mandate, before=before,
+    )
+    sequence = []
+    final_closure = None
+    for position, (receipt_index, receipt) in enumerate(receipts):
+        owner = receipt_owner(records, mandate, receipt_index, forbid_later=False)
+        identity = exact_product_identity(receipt, opening, built, mandate)
+        next_receipt_index = (
+            receipts[position + 1][0] if position + 1 < len(receipts) else before
+        )
+        verifier = product_verifier_generation(
+            entries, receipt_index, mandate, identity, data(receipt),
+            before=next_receipt_index, owner=opening.get("by"), built=built,
+        )
+        item = {
+            "index": receipt_index, "entry": receipt, "owner": owner,
+            "identity": identity, "verifier": verifier,
+        }
+        sequence.append(item)
+        if position == 0:
+            continue
+        if final_closure is not None:
+            fail(f"the {mandate} report continues after its final malformed closure")
+        previous = sequence[position - 1]
+        if item["owner"]["session"] != previous["owner"]["session"]:
+            continue
+        previous_verifier = previous["verifier"]
+        if previous_verifier["state"] != "complete-malformed" \
+                or previous_verifier["terminal"] is None:
+            fail(f"the {mandate} report replacement has no exact malformed verifier")
+        malformed_claims = [
+            claim for claim in data(previous_verifier["terminal"][1])["claims"]
+            if claim["verdict"] == "malformed"
+        ]
+        transition_returns = [
+            (index, entry) for index, entry in enumerate(
+                entries[previous_verifier["terminal"][0] + 1:receipt_index],
+                previous_verifier["terminal"][0] + 1,
+            )
+            if entry.get("kind") == "bound.spent"
+            and entry.get("mandate") == mandate
+            and isinstance(entry.get("text"), str)
+            and entry["text"].startswith("malformed finding returned:")
+        ]
+        session_returns = [
+            entry for entry in entries[opening_index + 1:receipt_index]
+            if entry.get("kind") == "bound.spent"
+            and entry.get("mandate") == mandate
+            and isinstance(entry.get("text"), str)
+            and entry["text"].startswith("malformed finding returned:")
+            and entry["text"].endswith(f" - lens {item['owner']['session']}")
+        ]
+        complete_returns = len(transition_returns) == len(malformed_claims) \
+            and all(
+                exact_malformed_return(
+                    returned[1], opening, built, mandate,
+                    previous["owner"]["session"], claim["id"],
+                )
+                for returned, claim in zip(transition_returns, malformed_claims)
+            )
+        if transition_returns:
+            if not complete_returns or len(session_returns) != len(transition_returns):
+                fail(f"the {mandate} report replacement has no complete malformed return set")
+            continue
+        if position < 2:
+            fail(f"the {mandate} report replacement has no exact malformed return")
+        returned = sequence[position - 2]
+        returned_verifier = returned["verifier"]
+        restated = previous
+        restated_verifier = restated["verifier"]
+        if returned_verifier["state"] != "complete-malformed" \
+                or returned_verifier["terminal"] is None \
+                or restated_verifier["state"] != "complete-malformed" \
+                or restated_verifier["terminal"] is None:
+            fail(f"the {mandate} final receipt has no two exact malformed generations")
+        malformed_returned = [
+            claim for claim in data(returned_verifier["terminal"][1])["claims"]
+            if claim["verdict"] == "malformed"
+        ]
+        returned_spends = [
+            (index, entry) for index, entry in enumerate(
+                entries[returned_verifier["terminal"][0] + 1:restated["index"]],
+                returned_verifier["terminal"][0] + 1,
+            )
+            if entry.get("kind") == "bound.spent"
+            and entry.get("mandate") == mandate
+            and isinstance(entry.get("text"), str)
+            and entry["text"].startswith("malformed finding returned:")
+        ]
+        if len(returned_spends) != len(malformed_returned) or not all(
+                exact_malformed_return(
+                    spend[1], opening, built, mandate,
+                    returned["owner"]["session"], claim["id"],
+                ) and returned_verifier["terminal"][0] < spend[0] < restated["index"]
+                for spend, claim in zip(returned_spends, malformed_returned)
+        ) or len([
+                    candidate for candidate in receipts
+                    if returned_verifier["terminal"][0] < candidate[0] <= restated["index"]
+                ]) != 1:
+            fail(f"the {mandate} final receipt has no exact prior malformed return")
+        if len({
+            returned["owner"]["session"], restated["owner"]["session"],
+            item["owner"]["session"],
+        }) != 1:
+            fail(f"the {mandate} final receipt changes its reviewer generation")
+        old_total = sum(data(restated["entry"])[key] for key in PRODUCT_RECEIPT_COUNT_KEYS)
+        new_total = sum(data(receipt)[key] for key in PRODUCT_RECEIPT_COUNT_KEYS)
+        malformed_count = data(restated_verifier["terminal"][1])["malformed"]
+        if new_total != old_total - malformed_count:
+            fail(f"the {mandate} final receipt changes more than its malformed claims")
+
+        allowed_recovery = set()
+        recovery_index = item["owner"].get("recovery")
+        if recovery_index is not None:
+            recovery_data = data(entries[recovery_index])
+            allowed_recovery.add(recovery_index)
+            allowed_recovery.add(journal_proof_index(
+                recovery_data.get("retirement"),
+                f"the {mandate} final receipt's retirement recovery",
+            ))
+            allowed_recovery.update(
+                journal_proof_index(
+                    proof, f"the {mandate} final receipt's settlement recovery",
+                ) for proof in recovery_data.get("settlement", [])
+            )
+        suffix_start = restated_verifier["terminal"][0] + 1
+        for index, entry in enumerate(entries[suffix_start:receipt_index], suffix_start):
+            if index in allowed_recovery:
+                continue
+            event = entry.get("event")
+            kind = entry.get("kind")
+            same_mandate = entry.get("mandate") == mandate
+            same_session = entry.get("session") == item["owner"]["session"]
+            replacement = event == "session-started" \
+                and same_generation(entry, "product-review", {"lot": built}) \
+                and same_mandate
+            pass_terminal = kind == "pass.closed"
+            amendment = kind == "amendment.opened" \
+                and data(entry).get("origin") == "product-review"
+            whole_run_cleanup = kind == "cleanup.started" \
+                and data(entry).get("scope") == "whole-run"
+            stop = kind in {"paused", "aborted"} \
+                and entry.get("by") == opening.get("by") \
+                and context(entry) == {
+                    "mode": "product-review", "lot": built, "job": "controller",
+                }
+            if same_mandate or same_session or replacement or pass_terminal \
+                    or amendment or whole_run_cleanup or stop:
+                fail(f"the {mandate} final receipt crosses a competing pass event")
+        final_closure = receipt_index
+    return {"receipts": sequence, "final_closure": final_closure}
+
+
+def validate_product_malformed_return(
+        entries, opening_index, opening, built, mandate, records, candidate,
+):
+    sequence = product_reviewer_receipt_sequence(
+        entries, opening_index, opening, built, mandate, records,
+    )
+    if not sequence["receipts"] or sequence["final_closure"] is not None:
+        fail(f"the {mandate} malformed return has no current report generation")
+    latest = sequence["receipts"][-1]
+    verifier = latest["verifier"]
+    if verifier["state"] != "complete-malformed" or verifier["terminal"] is None:
+        fail(f"the {mandate} malformed return has no exact malformed verifier")
+    malformed = [
+        claim for claim in data(verifier["terminal"][1])["claims"]
+        if claim["verdict"] == "malformed"
+    ]
+    session = latest["owner"]["session"]
+    prior = [
+        (index, entry) for index, entry in enumerate(
+            entries[opening_index + 1:], opening_index + 1,
+        )
+        if entry.get("kind") == "bound.spent" and entry.get("mandate") == mandate
+        and isinstance(entry.get("text"), str)
+        and entry["text"].startswith("malformed finding returned:")
+        and entry["text"].endswith(f" - lens {session}")
+    ]
+    terminal_index = verifier["terminal"][0]
+    if any(index <= terminal_index for index, entry in prior):
+        fail(f"the {mandate} reviewer generation already spent its malformed return")
+    if len(prior) >= len(malformed) or any(
+        not exact_malformed_return(
+            entry, opening, built, mandate, session, malformed[position]["id"],
+        ) for position, (_, entry) in enumerate(prior)
+    ) or not exact_malformed_return(
+        candidate, opening, built, mandate, session, malformed[len(prior)]["id"],
+    ):
+        fail(f"the {mandate} malformed return changes its exact claim or lens")
+
+
 def product_reviewer_generation(entries, session):
     opening_index, mandates, generation, built = current_generation(entries, "product-review")
     opening = entries[opening_index]
@@ -584,18 +807,16 @@ def product_reviewer_generation(entries, session):
     if record is None:
         fail("the Product reviewer generation has no exact session start")
     mandate = record["mandate"]
-    receipts = product_reviewer_receipts(entries, opening_index, mandate)
     receipt_index = receipt = identity = verifier = None
-    if receipts:
-        receipt_index, receipt = receipts[-1]
-        owner = receipt_owner(records, mandate, receipt_index, forbid_later=False)
-        if owner["session"] != session:
+    sequence = product_reviewer_receipt_sequence(
+        entries, opening_index, opening, built, mandate, records,
+    )
+    if sequence["receipts"]:
+        latest = sequence["receipts"][-1]
+        receipt_index, receipt = latest["index"], latest["entry"]
+        if latest["owner"]["session"] != session:
             fail("the Product reviewer generation receipt belongs to another session")
-        identity = exact_product_identity(receipt, opening, built, mandate)
-        verifier = product_verifier_generation(
-            entries, receipt_index, mandate, identity, data(receipt),
-            owner=opening.get("by"), built=built,
-        )
+        identity, verifier = latest["identity"], latest["verifier"]
     return {
         "opening_index": opening_index,
         "opening": opening,

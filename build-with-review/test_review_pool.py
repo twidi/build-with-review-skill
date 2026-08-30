@@ -2,6 +2,7 @@
 """Focused behavior tests for the read-only review pool helper."""
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -515,6 +516,251 @@ class ReviewPoolTest(unittest.TestCase):
         resumed = self.run_helper("product-review")
         self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
         self.assertIn("meaning: wait for the replacement report", resumed.stdout)
+
+    def test_still_malformed_restatement_closes_with_one_final_receipt(self):
+        self.open_product_pass()
+        start = self.started("meaning", "product-review", "meaning", lot="lot-1")
+        first_receipt = self.product_receipt("meaning", "1" * 64)
+        first_receipt["data"]["minor"] = 1
+        first_start = self.verifier_started("meaning", "1" * 64)
+        first_end = self.verifier_malformed("meaning", "1" * 64)
+        malformed_return = {
+            "event": "note", "kind": "bound.spent",
+            "text": "malformed finding returned: F1 - lens meaning",
+            "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+            "mandate": "meaning", "job": "controller",
+        }
+        second_receipt = self.product_receipt("meaning", "2" * 64)
+        second_receipt["data"]["minor"] = 1
+        second_start = self.verifier_started("meaning", "2" * 64)
+        second_end = self.verifier_malformed("meaning", "2" * 64)
+        retirement = self.retired("meaning", "product-review", "meaning", lot="lot-1")
+        retirement.update({"archived": True, "hidden": True})
+        final_receipt = self.product_receipt("meaning", "3" * 64)
+        final_start = self.verifier_started("meaning", "3" * 64)
+        final_end = self.verifier_ended("meaning", "3" * 64)
+        retired_base = [
+            *self.entries, start, first_receipt, first_start, first_end,
+            malformed_return, second_receipt, second_start, second_end, retirement,
+        ]
+
+        def proof(entries, index):
+            raw = json.dumps(entries[index], separators=(",", ":")).encode()
+            return f"{index}:{hashlib.sha256(raw).hexdigest()}"
+
+        recovery = {
+            "event": "note", "kind": "product.reviewer.retirement.recovered",
+            "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+            "job": "controller", "data": {
+                "schema": 1,
+                "pass_opening": proof(retired_base, 1),
+                "owner": "product-controller",
+                "controller_context": {
+                    "mode": "product-review", "lot": "lot-1", "job": "controller",
+                },
+                "session_start": proof(retired_base, 2),
+                "session": "meaning", "mandate": "meaning",
+                "receipt": proof(retired_base, 7),
+                "report_sha256": "2" * 64,
+                "verifier_opening": proof(retired_base, 8),
+                "verifier_terminal": proof(retired_base, 9),
+                "retirement": proof(retired_base, 10),
+                "settlement": [],
+            },
+        }
+        base = [*retired_base, recovery]
+        final = [final_receipt, final_start, final_end]
+
+        def copy_entries(entries):
+            return json.loads(json.dumps(entries))
+
+        def refused(entries, message):
+            self.entries = copy_entries(entries)
+            result = self.run_helper("product-review")
+            self.assertNotEqual(result.returncode, 0, message)
+
+        nudge = {
+            "event": "note", "kind": "bound.spent",
+            "text": "nudged the lens meaning",
+            "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+            "mandate": "meaning", "job": "controller",
+        }
+        first_generation = [
+            *copy_entries(self.entries), start, first_receipt, first_start, first_end,
+        ]
+        refused(
+            [*first_generation, nudge, second_receipt],
+            "an ordinary nudge authorized the R1 to R2 replacement receipt",
+        )
+        self.entries = copy_entries([
+            *first_generation, nudge, malformed_return,
+            second_receipt, second_start, second_end,
+        ])
+        exact_return_with_nudge = self.run_helper("product-review")
+        self.assertEqual(
+            exact_return_with_nudge.returncode, 0,
+            exact_return_with_nudge.stdout + exact_return_with_nudge.stderr,
+        )
+
+        spend_index = next(
+            index for index, entry in enumerate(base)
+            if entry.get("kind") == "bound.spent" and entry.get("mandate") == "meaning"
+        )
+        receipt_indexes = [
+            index for index, entry in enumerate(base)
+            if entry.get("kind") == "report.received" and entry.get("mandate") == "meaning"
+        ]
+        second_terminal_index = max(
+            index for index, entry in enumerate(base)
+            if entry.get("event") == "subagent-ended"
+            and entry.get("kind") == "finding-verifier"
+        )
+        missing_spend = [entry for entry in base if entry is not malformed_return]
+        refused([*missing_spend, *final], "a missing malformed return authorized final receipt")
+        foreign_spend = copy_entries(base)
+        foreign_spend[spend_index]["text"] = "malformed finding returned: F1 - lens foreign"
+        refused([*foreign_spend, *final], "a foreign malformed return authorized final receipt")
+        changed_spend = copy_entries(base)
+        changed_spend[spend_index]["text"] = "malformed finding returned: F2 - lens meaning"
+        refused([*changed_spend, *final], "a changed malformed claim authorized final receipt")
+        duplicate_spend = copy_entries(base)
+        duplicate_spend.insert(receipt_indexes[1], copy_entries([malformed_return])[0])
+        refused([*duplicate_spend, *final], "a second malformed return authorized final receipt")
+
+        changed_first_receipt = copy_entries(base)
+        changed_first_receipt[receipt_indexes[0]]["data"]["report_sha256"] = "4" * 64
+        refused([*changed_first_receipt, *final], "a changed R1 receipt authorized final receipt")
+        changed_second_verifier = copy_entries(base)
+        changed_second_verifier[second_terminal_index]["data"]["report_sha256"] = "5" * 64
+        refused([*changed_second_verifier, *final], "a changed R2 verifier authorized final receipt")
+        changed_total = copy_entries(final)
+        changed_total[0]["data"]["minor"] = 1
+        refused([*base, *changed_total], "a changed final count delta authorized final receipt")
+
+        intervening = (
+            self.product_receipt("meaning", "4" * 64),
+            self.verifier_started("meaning", "2" * 64),
+            self.started("meaning-next", "product-review", "meaning", lot="lot-1"),
+            self.retired("meaning", "product-review", "meaning", lot="lot-1"),
+            {"event": "note", "kind": "pass.closed", "data": {"confirmed": 0}},
+            {"event": "note", "kind": "amendment.opened",
+             "data": {"origin": "product-review"}},
+            {"event": "note", "kind": "paused", "by": "product-controller",
+             "mode": "product-review", "lot": "lot-1", "job": "controller"},
+            {"event": "note", "kind": "cleanup.started",
+             "data": {"scope": "whole-run"}},
+        )
+        for event in intervening:
+            refused(
+                [*base, event, *final],
+                f"an intervening {event.get('kind') or event.get('event')} authorized final receipt",
+            )
+
+        self.entries = [*copy_entries(base), *copy_entries(final)]
+        closed = self.run_helper("product-review")
+        self.assertEqual(closed.returncode, 0, closed.stdout + closed.stderr)
+        self.assertIn("meaning: settle verifier result and retire the lens", closed.stdout)
+
+        self.entries.append(self.product_receipt("meaning", "6" * 64))
+        fourth = self.run_helper("product-review")
+        self.assertNotEqual(fourth.returncode, 0)
+        self.assertIn("continues after its final malformed closure", fourth.stdout + fourth.stderr)
+
+    def test_multiple_malformed_claims_require_the_complete_ordered_return_set(self):
+        self.open_product_pass()
+        start = self.started("meaning", "product-review", "meaning", lot="lot-1")
+        first_receipt = self.product_receipt("meaning", "1" * 64)
+        first_receipt["data"]["minor"] = 2
+        first_terminal = self.verifier_malformed("meaning", "1" * 64)
+        first_terminal["data"].update({
+            "malformed": 2,
+            "claims": [
+                {"id": "F1", "kind": "correction", "verdict": "malformed"},
+                {"id": "F2", "kind": "correction", "verdict": "malformed"},
+            ],
+        })
+        base = [
+            *self.entries, start, first_receipt,
+            self.verifier_started("meaning", "1" * 64), first_terminal,
+        ]
+        second_receipt = self.product_receipt("meaning", "2" * 64)
+        second_receipt["data"]["minor"] = 2
+
+        def returned(claim, session="meaning"):
+            return {
+                "event": "note", "kind": "bound.spent",
+                "text": f"malformed finding returned: {claim} - lens {session}",
+                "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+                "mandate": "meaning", "job": "controller",
+            }
+
+        nudge = {
+            "event": "note", "kind": "bound.spent", "text": "nudged the lens meaning",
+            "by": "product-controller", "mode": "product-review", "lot": "lot-1",
+            "mandate": "meaning", "job": "controller",
+        }
+
+        def validate_return(entries, candidate):
+            self.entries = json.loads(json.dumps(entries))
+            self.write()
+            spec = importlib.util.spec_from_file_location(
+                "review_pool_multi_malformed", self.script,
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            projected = module.read_entries()
+            opening_index, mandates, generation, built = module.current_generation(
+                projected, "product-review",
+            )
+            records = module.session_records(
+                projected, opening_index, "product-review", mandates, generation,
+            )
+            module.validate_product_malformed_return(
+                projected, opening_index, projected[opening_index], built,
+                "meaning", records, candidate,
+            )
+
+        validate_return(base, returned("F1"))
+        validate_return([*base, returned("F1"), nudge], returned("F2"))
+        with self.assertRaises(SystemExit):
+            validate_return(base, returned("F2"))
+        with self.assertRaises(SystemExit):
+            validate_return([*base, returned("F1")], returned("F1"))
+
+        def result(*suffix):
+            self.entries = json.loads(json.dumps([*base, *suffix, second_receipt]))
+            return self.run_helper("product-review")
+
+        for suffix, message in (
+            ((returned("F1"),), "a missing F2 return authorized R2"),
+            ((returned("F2"), returned("F1")), "reordered returns authorized R2"),
+            ((returned("F1"), returned("F1")), "a duplicate F1 return authorized R2"),
+            ((returned("F1"), returned("F2", "foreign")),
+             "a foreign reviewer return authorized R2"),
+            ((returned("F1"), returned("F3")), "a foreign claim return authorized R2"),
+        ):
+            refused = result(*suffix)
+            self.assertNotEqual(refused.returncode, 0, message)
+
+        accepted = result(returned("F1"), nudge, returned("F2"))
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertIn("meaning: launch finding verifier", accepted.stdout)
+
+        second_terminal = self.verifier_malformed("meaning", "2" * 64)
+        second_terminal["data"].update({
+            "malformed": 2,
+            "claims": [
+                {"id": "F1", "kind": "correction", "verdict": "malformed"},
+                {"id": "F2", "kind": "correction", "verdict": "malformed"},
+            ],
+        })
+        self.entries = json.loads(json.dumps([
+            *base, returned("F1"), nudge, returned("F2"), second_receipt,
+            self.verifier_started("meaning", "2" * 64),
+            second_terminal,
+        ]))
+        with self.assertRaises(SystemExit):
+            validate_return(self.entries, returned("F1"))
 
     def test_failed_owner_becomes_replaceable_until_fresh_receipt_settles(self):
         self.open_product_pass()
