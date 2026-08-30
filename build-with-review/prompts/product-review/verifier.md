@@ -17,6 +17,10 @@ You are given: the workspace path, the path to the report, the path to the spec,
 1. **`<workspace>/prompts/common/vocabulary.md`** — the words used here
 2. **the report**, in full, before verifying anything
 
+The accepted report is read-only. Never create, edit, replace, rename or delete it.
+Return the verdict only in your final message. Never write the verifier result to the
+accepted report or to another file.
+
 ---
 
 ## Open the exact verification copy once

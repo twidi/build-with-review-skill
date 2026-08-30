@@ -357,6 +357,10 @@ def product_verifier_corrects_local_path_transcription_without_physical_relaunch
           "the verifier does not isolate uv project resolution inside the detached copy")
     check("diagnose the cause" in normalized_launch and "relaunch blindly" in normalized_launch,
           "the controller repeats technical failures without a diagnosis")
+    check("accepted report is read-only" in normalized_prompt,
+          "the verifier can overwrite the accepted lens report")
+    check("return the verdict only in your final message" in normalized_prompt,
+          "the verifier can publish its verdict through the accepted report file")
 
 
 @test
