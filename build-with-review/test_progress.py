@@ -333,6 +333,16 @@ def in_process_progress_runner(*, retain_projection_cache=False):
     def retain_resolved_work_unit(resolved):
         progress.CORRECTION_RESOLVED_WORK_UNITS.set((resolved,))
 
+    def retain_validated_correction_state(
+            entries, before, built, correction, replay_before, state,
+    ):
+        if projection_cache is None:
+            raise ValueError("the runner does not retain projection state")
+        key = progress.correction_projection_cache_key(
+            "contract-state", entries, before, built, correction, replay_before,
+        )
+        projection_cache[key] = json.loads(json.dumps(state))
+
     def project(callback):
         cache_token = progress.CORRECTION_CONTRACT_STATE_CACHE.set(
             projection_cache if projection_cache is not None else {},
@@ -344,6 +354,7 @@ def in_process_progress_runner(*, retain_projection_cache=False):
 
     run.retain_validated_correction_rewind = retain_validated_correction_rewind
     run.retain_resolved_work_unit = retain_resolved_work_unit
+    run.retain_validated_correction_state = retain_validated_correction_state
     run.project = project
     run.progress_module = progress
     return run
@@ -16375,12 +16386,15 @@ def prepare_replacement_correction_task_with_clean_design(
         state, token, attempt, *, task=1, progress_runner=run_progress,
         direct_publish=False,
 ):
-    started = subprocess.run(
-        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
-         "--correction", "lot-1", "1", str(task), str(attempt)],
-        cwd=REPO, capture_output=True, text=True, env=ENV, timeout=900,
-    )
-    check(started.returncode == 0, started.stdout + started.stderr)
+    if hasattr(progress_runner, "project"):
+        start_correction_attempt_in_process(task, attempt, progress_runner)
+    else:
+        started = subprocess.run(
+            [os.path.join(WORKSPACE, "prompts", "construction", "attempt-started.sh"),
+             "--correction", "lot-1", "1", str(task), str(attempt)],
+            cwd=REPO, capture_output=True, text=True, env=ENV, timeout=900,
+        )
+        check(started.returncode == 0, started.stdout + started.stderr)
     start_correction_implementer_session(
         token, attempt, task=task, progress_runner=progress_runner,
     )
@@ -17361,6 +17375,15 @@ def start_correction_attempt_in_process(task, attempt, progress_runner):
     helper = load_construction_module("correction_attempt_start")
     helper.resolve_correction.__globals__["progress"] = \
         progress_runner.progress_module
+    resolver = helper.resolve_correction
+    resolved = {}
+
+    def capture_resolved(*args, **kwargs):
+        account = resolver(*args, **kwargs)
+        resolved["account"] = account
+        return account
+
+    helper.resolve_correction = capture_resolved
     args = SimpleNamespace(
         built="lot-1", round=1, task=task, attempt=attempt, retry="-",
     )
@@ -17372,6 +17395,9 @@ def start_correction_attempt_in_process(task, attempt, progress_runner):
                 helper.start_owned(args)
 
     progress_runner.project(start)
+    progress_runner.retain_resolved_work_unit(
+        json.loads(json.dumps(resolved["account"])),
+    )
 
 
 def fail_correction_attempt_in_process(
@@ -17388,6 +17414,27 @@ def fail_correction_attempt_in_process(
     )
     with contextlib.redirect_stdout(io.StringIO()):
         progress_runner.project(lambda _progress: helper.close(args))
+
+
+def succeed_correction_attempt_in_process(
+        task, commit, gate, progress_runner,
+):
+    """Run the official attempt-success helper with the shared projection cache."""
+    helper = load_construction_module("correction_attempt_success")
+    helper.progress = progress_runner.progress_module
+    helper.resolve_correction.__globals__["progress"] = \
+        progress_runner.progress_module
+    args = SimpleNamespace(
+        built="lot-1", round=1, task=task, commit=commit, gate=gate,
+    )
+
+    def succeed(_progress):
+        operation = helper.operation_identity(args)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with helper.CorrectionAuthorityLease.acquire(WORKSPACE, operation) as lease:
+                helper.close_owned(args, lease, operation)
+
+    progress_runner.project(succeed)
 
 
 def stop_correction_attempt_in_process(kind, task, attempt, progress_runner):
@@ -17530,13 +17577,15 @@ def run_correction_escalation_in_process(blocker, progress_runner):
     return output.getvalue()
 
 
-def run_correction_amendment_return_in_process(route, amendment, progress_runner):
+def run_correction_amendment_return_in_process(
+        route, amendment, progress_runner, *, earliest_task=None,
+):
     """Run one real Correction AMENDMENT return with one exact-prefix cache."""
     helper = load_construction_module("correction_round_return")
     helper.progress = progress_runner.progress_module
     args = SimpleNamespace(
         route=route, built="lot-1", round=1, amendment=amendment,
-        earliest_task=None,
+        earliest_task=earliest_task,
     )
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
@@ -20746,7 +20795,9 @@ def complete_current_correction_task_one(
         "owner": f"lot-1/correction-1/task-{task}/attempt-{attempt}/code-round-1",
         "lot": "lot-1", "correction": 1, "task": task, "attempt": attempt,
         "head": head, "base": base, "tree": tree, "gate": gate_blob, "code": "-",
-        **correction_gate_authority_data("lot-1", 1, task, attempt),
+        **correction_gate_authority_data(
+            "lot-1", 1, task, attempt, progress_runner=progress_runner,
+        ),
     }
     append_subagent("subagent-started", "gate-runner", data=review_data)
     report_relative, report_sha = write_gate_report(review_gate, gate_blob, tree)
@@ -20783,6 +20834,7 @@ def complete_current_correction_task_one(
     if direct_gate:
         final_gate = seed_correction_task_final_gate(
             token, task, attempt, head, base, tree,
+            progress_runner=progress_runner,
         )
     else:
         owner = f"lot-1/correction-1/task-{task}/attempt-{attempt}"
@@ -20830,13 +20882,18 @@ def complete_current_correction_task_one(
         "git", "-C", REPO, "commit", "-qm", f"{token} task {task}",
     ], check=True)
     commit = subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip()
-    success = subprocess.run(
-        [os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh"),
-         "--correction", "lot-1", "1", str(task), commit, final_gate],
-        cwd=REPO, capture_output=True, text=True, env=ENV,
-        timeout=900 if attempt > 1 else 120,
-    )
-    check(success.returncode == 0, success.stdout + success.stderr)
+    if hasattr(progress_runner, "project"):
+        succeed_correction_attempt_in_process(
+            task, commit, final_gate, progress_runner,
+        )
+    else:
+        success = subprocess.run(
+            [os.path.join(WORKSPACE, "prompts", "construction", "attempt-succeeded.sh"),
+             "--correction", "lot-1", "1", str(task), commit, final_gate],
+            cwd=REPO, capture_output=True, text=True, env=ENV,
+            timeout=900 if attempt > 1 else 120,
+        )
+        check(success.returncode == 0, success.stdout + success.stderr)
     if retire:
         retire_correction_implementer_session(
             token, attempt, progress_runner=progress_runner,
@@ -22052,6 +22109,13 @@ def correction_implementer_status_shares_retirement_and_built_boundary():
             progress.event_entry(by, event, **fields)
         )
 
+        def write_validated_line(build):
+            candidate = build(entries)
+            if candidate is not None:
+                entries.append(candidate)
+
+        progress.write_validated_line = write_validated_line
+
     # Status wins. It retains the shared lease through its append. Retirement
     # waits, then consumes the same active physical owner.
     entries = [dict(start), dict(success)]
@@ -22835,6 +22899,10 @@ def correction_resolution_opens_one_generation_bound_product_pass():
         if entry.get("kind") == "correction.round.resolved"
     )
     terminal_data = terminal["data"]
+    set_caller_bwr(
+        mode="product-review", lot="lot-1", job="controller",
+        correction=None, task=None, attempt=None, round=None, mandate=None,
+    )
     opened = progress_runner(
         "note", "pass.opened", "--data", json.dumps({
             "built": terminal_data["built"],
@@ -24082,7 +24150,10 @@ def sublot_built_generation_consumes_its_exact_positive_parent_close():
     check(closed.returncode == 0, closed.stdout + closed.stderr)
     append_note("sublot.opened", None, text="lot-1.1")
 
-    commit, gate, _ = seed_task_gate("lot-1.1", "exact-sublot-origin")
+    commit, gate, _ = seed_task_gate(
+        "lot-1.1", "exact-sublot-origin",
+        plan_spec_lines=("Covers: lot-1-confirmed.md",),
+    )
     opened = run_progress(
         "note", "pass.opened",
         "--data", json.dumps({"built": "lot-1.1", "commit": commit, "gate": gate}),
@@ -24650,6 +24721,10 @@ def amendment_successor_preserves_the_latest_in_pass_controller_generation():
     gate = seed_baseline_gate(
         f"amendment/1/{amendment_commit}", amendment_commit,
         journal_lines()[opening_index]["data"]["commit"],
+    )
+    set_caller_bwr(
+        mode="product-review", lot="lot-1", job="controller",
+        correction=None, task=None, attempt=None, round=None, mandate=None,
     )
     successor = run_progress(
         "note", "pass.opened",
@@ -25748,6 +25823,8 @@ def seed_committed_correction_amendment(
               "the accepted-task AMENDMENT fixture requires two ordinary tasks")
         state, task_one = complete_current_correction_task_one(
             token, task_count=task_count, spec_relative=spec_relative,
+            progress_runner=progress_runner,
+            direct_gate=hasattr(progress_runner, "project"),
             retained_spec_change=accepted_task_spec_change,
         )
     elif pending_obligation:
@@ -26330,37 +26407,68 @@ def write_escalating_correction_artifact(state):
     return path
 
 
-def prepare_correction_amendment_return(state, artifact_path, helper_name, arguments, subject):
-    progress = load_common_module("progress")
-    previous_state = progress.current_correction_contract_state(
-        journal_lines(), len(journal_lines()), "lot-1", 1, subject,
-    )
+def prepare_correction_amendment_return(
+        state, artifact_path, helper_name, arguments, subject, *, progress_runner=None,
+):
+    progress = progress_runner.progress_module \
+        if progress_runner is not None else load_common_module("progress")
+
+    def project(callback):
+        if progress_runner is None:
+            return callback(progress)
+        return progress_runner.project(callback)
+
+    entries = journal_lines()
+    previous_state = project(lambda _progress: progress.current_correction_contract_state(
+        entries, len(entries), "lot-1", 1, subject,
+    ))
     parser = load_construction_module("correction_round")
     artifact = parser.parse_artifact(
         artifact_path, expected_built="lot-1", expected_round=1,
     )
     helper = os.path.join(WORKSPACE, "prompts", "construction", helper_name)
-    first = subprocess.run(
-        [helper, *arguments], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=120,
-    )
-    check(first.returncode == 0 and "BASELINE REQUIRED" in first.stdout,
-          first.stdout + first.stderr)
+    route = {
+        "correction-round-rebase.sh": "rebase",
+        "correction-round-resolve.sh": "resolved",
+        "correction-round-escalate.sh": "sublot",
+    }[helper_name]
+    amendment = int(arguments[2])
+    earliest_task = int(arguments[3]) if route == "rebase" else None
+    if progress_runner is None:
+        first = subprocess.run(
+            [helper, *arguments], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        first_output = first.stdout
+        check(first.returncode == 0, first.stdout + first.stderr)
+    else:
+        first_output = run_correction_amendment_return_in_process(
+            route, amendment, progress_runner, earliest_task=earliest_task,
+        )
+    check("BASELINE REQUIRED" in first_output, first_output)
     marker_path = pathlib.Path(WORKSPACE) / "correction-amendment-return-in-progress"
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     gate = seed_correction_baseline_gate(
         marker["baseline_owner"], marker["commit"], marker["commit"],
+        progress_runner=progress_runner,
     )
-    second = subprocess.run(
-        [helper, *arguments], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=120,
-    )
-    check(second.returncode == 0 and "RETURN ACCOUNT REQUIRED" in second.stdout,
-          second.stdout + second.stderr)
+    if progress_runner is None:
+        second = subprocess.run(
+            [helper, *arguments], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=120,
+        )
+        second_output = second.stdout
+        check(second.returncode == 0, second.stdout + second.stderr)
+    else:
+        second_output = run_correction_amendment_return_in_process(
+            route, amendment, progress_runner, earliest_task=earliest_task,
+        )
+    check("RETURN ACCOUNT REQUIRED" in second_output, second_output)
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    current_set = progress.outstanding_final_checker_set(
-        journal_lines(), len(journal_lines()), "lot-1", 1, subject,
-    )
+    entries = journal_lines()
+    current_set = project(lambda _progress: progress.outstanding_final_checker_set(
+        entries, len(entries), "lot-1", 1, subject,
+    ))
     return {
         "progress": progress,
         "previous_state": previous_state,
@@ -26426,16 +26534,22 @@ def write_correction_amendment_return_account(account):
     return path
 
 
-def complete_post_amendment_rewind(state):
+def complete_post_amendment_rewind(state, *, progress_runner=None):
     amendment_proof = journal_proof(state["amendment_commit_index"])
     helper = os.path.join(WORKSPACE, "prompts", "construction", "rewind.sh")
     arguments = ["--correction", "lot-1", "1", "1", "2", amendment_proof]
-    rewind = subprocess.run(
-        [helper, *arguments], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=300,
-    )
-    check(rewind.returncode == 0 and "BASELINE REQUIRED" in rewind.stdout,
-          rewind.stdout + rewind.stderr)
+    if progress_runner is None:
+        rewind = subprocess.run(
+            [helper, *arguments], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=300,
+        )
+        rewind_output = rewind.stdout
+        check(rewind.returncode == 0, rewind.stdout + rewind.stderr)
+    else:
+        rewind_output = rewind_correction_in_process(
+            1, 2, amendment_proof, progress_runner,
+        )
+    check("BASELINE REQUIRED" in rewind_output, rewind_output)
     selected = subprocess.run(
         [os.path.join(
             WORKSPACE, "prompts", "construction", "correction-round-baseline.sh",
@@ -26446,13 +26560,20 @@ def complete_post_amendment_rewind(state):
     baseline = json.loads(selected.stdout)
     seed_correction_baseline_gate(
         baseline["owner"], baseline["base_commit"], baseline["base_commit"],
+        progress_runner=progress_runner,
     )
-    rewind = subprocess.run(
-        [helper, *arguments], cwd=REPO, capture_output=True, text=True,
-        env=ENV, timeout=300,
-    )
-    check(rewind.returncode == 0 and "CORRECTION REWOUND" in rewind.stdout,
-          rewind.stdout + rewind.stderr)
+    if progress_runner is None:
+        rewind = subprocess.run(
+            [helper, *arguments], cwd=REPO, capture_output=True, text=True,
+            env=ENV, timeout=300,
+        )
+        rewind_output = rewind.stdout
+        check(rewind.returncode == 0, rewind.stdout + rewind.stderr)
+    else:
+        rewind_output = rewind_correction_in_process(
+            1, 2, amendment_proof, progress_runner,
+        )
+    check("CORRECTION REWOUND" in rewind_output, rewind_output)
     entries = journal_lines()
     terminal_index = len(entries) - 1
     terminal = entries[terminal_index]
@@ -26664,11 +26785,14 @@ def correction_success_does_not_project_a_future_rewind():
 
 @test
 def post_amendment_tree_transition_rebases_from_its_exact_rewind_result():
-    progress_runner = in_process_progress_runner()
+    progress_runner = in_process_progress_runner(retain_projection_cache=True)
     state = seed_committed_correction_amendment(
         "post-amendment-rewind-rebase", accepted_task=True,
+        progress_runner=progress_runner,
     )
-    rewind_index, rewind_entry = complete_post_amendment_rewind(state)
+    rewind_index, rewind_entry = complete_post_amendment_rewind(
+        state, progress_runner=progress_runner,
+    )
     rewind_proof = journal_proof(rewind_index)
     artifact_path, success_index, success_data = write_rewound_rebased_correction_artifact(
         state, rewind_proof,
@@ -26676,6 +26800,7 @@ def post_amendment_tree_transition_rebases_from_its_exact_rewind_result():
     prepared = prepare_correction_amendment_return(
         state, artifact_path, "correction-round-rebase.sh",
         ["lot-1", "1", "1", "1"], "the rewound post-AMENDMENT rebase",
+        progress_runner=progress_runner,
     )
     retry_transition, output = prepared["progress"].materialize_final_checker_transition(
         prepared["current_set"], additions=[], dispositions=[],
@@ -26719,8 +26844,29 @@ def post_amendment_tree_transition_rebases_from_its_exact_rewind_result():
               ["git", "-C", REPO, "rev-parse", f"{terminal['data']['commit']}^"],
               text=True,
           ).strip() == rewind_entry["data"]["result_commit"], terminal)
-    prepared["progress"].validate_correction_round_rebased_entry(
-        entries, terminal_index, terminal,
+    def validate_and_capture_rebase(progress):
+        projected = {}
+        projector = progress.validate_correction_rebase_transition
+
+        def capture(*args, **kwargs):
+            state = projector(*args, **kwargs)
+            if args[1] == terminal_index and args[2] is terminal \
+                    and args[4] == "a durable correction.round.rebased":
+                projected["state"] = state
+            return state
+
+        progress.validate_correction_rebase_transition = capture
+        try:
+            progress.validate_correction_round_rebased_entry(
+                entries, terminal_index, terminal,
+            )
+        finally:
+            progress.validate_correction_rebase_transition = projector
+        return projected["state"]
+
+    rebased_state = progress_runner.project(validate_and_capture_rebase)
+    progress_runner.retain_validated_correction_state(
+        entries, len(entries), "lot-1", 1, len(entries), rebased_state,
     )
     prepare_replacement_correction_task_with_clean_design(
         state, "post-amendment-rewind-replacement", 2,
@@ -26745,17 +26891,21 @@ def post_amendment_tree_transition_rebases_from_its_exact_rewind_result():
         and prior["retirements"][-1]["hidden"] is True,
         prior,
     )
-    prepared["progress"].validate_construction_session_start(
-        start_entries[start_index], "the post-AMENDMENT rebase restart",
-        entries=start_entries, index=start_index, require_account=True,
+    progress_runner.project(
+        lambda progress: progress.validate_construction_session_start(
+            start_entries[start_index], "the post-AMENDMENT rebase restart",
+            entries=start_entries, index=start_index, require_account=True,
+        )
     )
     _state, replacement = complete_current_correction_task_one(
         "post-amendment-rewind-replacement", state=state, attempt=2,
         progress_runner=progress_runner, direct_gate=True,
     )
     entries = journal_lines()
-    prepared["progress"].validate_correction_round_rebased_entry(
-        entries, terminal_index, terminal,
+    progress_runner.project(
+        lambda progress: progress.validate_correction_round_rebased_entry(
+            entries, terminal_index, terminal,
+        )
     )
     stable_ref = "refs/bwr/test-run/lot-1/correction-1/task-1"
     changed = subprocess.run(
@@ -26765,8 +26915,10 @@ def post_amendment_tree_transition_rebases_from_its_exact_rewind_result():
     )
     check(changed.returncode == 0, changed.stdout + changed.stderr)
     try:
-        prepared["progress"].validate_correction_round_rebased_entry(
-            entries, terminal_index, terminal,
+        progress_runner.project(
+            lambda progress: progress.validate_correction_round_rebased_entry(
+                entries, terminal_index, terminal,
+            )
         )
     except SystemExit:
         pass
