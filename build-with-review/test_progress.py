@@ -3769,6 +3769,239 @@ def code_checker_exact_duplicate_terminal_has_one_append_only_recovery():
 
 
 @test
+def gate_runner_exact_duplicate_terminal_recovers_without_touching_the_current_gate():
+    seed_active_attempt()
+    append_checker_verdict("design", lot="lot-1", task=3, attempt=2)
+    set_caller_bwr(
+        job="implementer", lot="lot-1", task=3, attempt=2,
+        round=None, mandate=None,
+    )
+    write_project(".superpowers/bwr/gate.md", "true\n")
+    candidate = write_project("gate-duplicate-candidate.txt", "first\n")
+    subprocess.run(["git", "-C", REPO, "add", candidate], check=True)
+    base = subprocess.check_output([
+        "git", "-C", REPO, "rev-parse", "refs/bwr/test-run/lot-1/attempt-base",
+    ], text=True).strip()
+    owner = "lot-1/task-3/attempt-2/code-round-1"
+    gate_check = os.path.join(WORKSPACE, "prompts", "construction", "gate-check.sh")
+    gate_execution = os.path.join(
+        WORKSPACE, "prompts", "construction", "gate_execution.py",
+    )
+
+    def gate_call(*arguments, timeout=120, input_text=None):
+        return subprocess.run(
+            ["bash", gate_check, *arguments], cwd=REPO, capture_output=True,
+            text=True, env=ENV, timeout=timeout, input=input_text,
+        )
+
+    observations = json.dumps({
+        "schema": 1,
+        "commands": [{"count": 1, "example": "true exited zero"}],
+        "cleanliness": {"completed": True, "unchanged": True, "paths": []},
+        "surface": {"completed": True, "status": "unchanged", "candidates": []},
+    })
+
+    def open_gate():
+        opened = gate_call(
+            "open", "review", owner, "lot-1", "3", "2", base,
+        )
+        match = re.search(r"^OP ([0-9a-f]{64})$", opened.stdout, re.MULTILINE)
+        return opened, None if match is None else match.group(1)
+
+    opened, old_op = open_gate()
+    check(opened.returncode == 0 and old_op is not None, opened.stdout + opened.stderr)
+    executed = subprocess.run(
+        [sys.executable, gate_execution, "run", old_op], cwd=REPO,
+        capture_output=True, text=True, env=ENV, timeout=120,
+    )
+    check(executed.returncode == 0, executed.stdout + executed.stderr)
+    published = gate_call("publish-report", old_op, input_text=observations)
+    check(published.returncode == 0, published.stdout + published.stderr)
+    closed = gate_call("close", old_op)
+    check(closed.returncode == 0, closed.stdout + closed.stderr)
+
+    journal_path = os.path.join(WORKSPACE, "progress.jsonl")
+    terminal = next(
+        entry for entry in reversed(journal_lines())
+        if entry.get("event") == "subagent-ended"
+        and entry.get("kind") == "gate-runner"
+        and (entry.get("data") or {}).get("op") == old_op
+    )
+    duplicate = json.loads(json.dumps(terminal))
+    duplicate["ts"] = "legacy-gate-terminal-output-loss-duplicate"
+    with open(journal_path, "a", encoding="utf-8") as target:
+        target.write(json.dumps(duplicate, separators=(",", ":")) + "\n")
+    with open(journal_path, "rb") as source:
+        duplicate_prefix = source.read()
+
+    write_project("gate-duplicate-candidate.txt", "second\n")
+    subprocess.run(["git", "-C", REPO, "add", "gate-duplicate-candidate.txt"], check=True)
+    refused_open, _ = open_gate()
+    check(refused_open.returncode != 0,
+          "the duplicate terminal did not block the next exact gate opening")
+    marker = os.path.join(WORKSPACE, "gate-check-in-progress")
+    marker_stat = os.stat(marker, follow_symlinks=False)
+    marker_bytes = open(marker, "rb").read()
+    new_op = next(
+        line.split(" ", 1)[1] for line in marker_bytes.decode("utf-8").splitlines()
+        if line.startswith("op ")
+    )
+    head = subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip()
+    tree = subprocess.check_output(["git", "-C", REPO, "write-tree"], text=True).strip()
+    index = subprocess.check_output(["git", "-C", REPO, "ls-files", "-s"])
+    status = subprocess.check_output(["git", "-C", REPO, "status", "--porcelain=v1"])
+    report_path = os.path.join(WORKSPACE, terminal["data"]["report"])
+    report_bytes = open(report_path, "rb").read()
+
+    set_caller_bwr(job="controller", task=None, attempt=None)
+    foreign = run_progress("gate-terminal-duplicate-recover", old_op)
+    check(foreign.returncode != 0 and open(journal_path, "rb").read() == duplicate_prefix,
+          "a foreign controller recovered a gate terminal")
+    set_caller_bwr(
+        job="implementer", lot="lot-1", task=3, attempt=2,
+        round=None, mandate=None,
+    )
+
+    changed = journal_lines()
+    changed[-1]["data"]["report_sha256"] = "f" * 64
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in changed:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    changed_prefix = open(journal_path, "rb").read()
+    changed_pair = run_progress("gate-terminal-duplicate-recover", old_op)
+    check(changed_pair.returncode != 0 and open(journal_path, "rb").read() == changed_prefix,
+          "a changed gate terminal pair received recovery authority")
+    with open(journal_path, "wb") as target:
+        target.write(duplicate_prefix)
+
+    with open(report_path, "ab") as target:
+        target.write(b"changed")
+    report_changed_prefix = open(journal_path, "rb").read()
+    changed_report = run_progress("gate-terminal-duplicate-recover", old_op)
+    check(changed_report.returncode != 0
+          and open(journal_path, "rb").read() == report_changed_prefix,
+          "a changed physical gate report received recovery authority")
+    with open(report_path, "wb") as target:
+        target.write(report_bytes)
+
+    recovered = run_progress("gate-terminal-duplicate-recover", old_op)
+    check(recovered.returncode == 0, recovered.stdout + recovered.stderr)
+    recovered_bytes = open(journal_path, "rb").read()
+    check(recovered_bytes.startswith(duplicate_prefix),
+          "gate recovery rewrote its raw journal prefix")
+    recovered_lines = journal_lines()
+    recoveries = [entry for entry in recovered_lines
+                  if entry.get("kind") == "subagent.terminal.recovered"
+                  and (entry.get("data") or {}).get("op") == old_op]
+    check(len(recoveries) == 1, recoveries)
+    check(recovered_lines[-3] == terminal and recovered_lines[-2] == duplicate,
+          "gate recovery changed a raw terminal")
+    check(open(marker, "rb").read() == marker_bytes
+          and os.stat(marker, follow_symlinks=False).st_ino == marker_stat.st_ino,
+          "gate recovery changed the current gate marker")
+    check(open(report_path, "rb").read() == report_bytes,
+          "gate recovery changed the audited historical report")
+    check(subprocess.check_output(["git", "-C", REPO, "rev-parse", "HEAD"], text=True).strip() == head
+          and subprocess.check_output(["git", "-C", REPO, "write-tree"], text=True).strip() == tree
+          and subprocess.check_output(["git", "-C", REPO, "ls-files", "-s"]) == index
+          and subprocess.check_output(["git", "-C", REPO, "status", "--porcelain=v1"]) == status,
+          "gate recovery changed the candidate or repository surfaces")
+
+    after_recovery = recovered_bytes
+    retried = run_progress("gate-terminal-duplicate-recover", old_op)
+    check(retried.returncode == 0 and open(journal_path, "rb").read() == after_recovery,
+          "the exact gate recovery retry appended another authority")
+    resumed, resumed_op = open_gate()
+    check(resumed.returncode == 0 and resumed_op == new_op,
+          resumed.stdout + resumed.stderr)
+    listed = run_progress("subagents-open")
+    rows = json.loads(listed.stdout) if listed.returncode == 0 else []
+    check(listed.returncode == 0 and len(rows) == 1
+          and rows[0]["identity"]["op"] == new_op,
+          listed.stdout + listed.stderr)
+
+    exact = journal_lines()
+    changed_history = json.loads(json.dumps(exact))
+    recovery = next(entry for entry in changed_history
+                    if entry.get("kind") == "subagent.terminal.recovered"
+                    and (entry.get("data") or {}).get("op") == old_op)
+    recovery["data"]["identity_sha256"] = "f" * 64
+    with open(journal_path, "w", encoding="utf-8") as target:
+        for entry in changed_history:
+            target.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    refused_history = run_progress("construction-verdict-check", "history")
+    check(refused_history.returncode != 0,
+          "a changed gate-terminal recovery passed historical replay")
+    with open(journal_path, "wb") as target:
+        target.write(after_recovery)
+    resumed, resumed_op = open_gate()
+    check(resumed.returncode == 0 and resumed_op == new_op,
+          resumed.stdout + resumed.stderr)
+
+    marker_data = {}
+    for line in marker_bytes.decode("utf-8").splitlines():
+        key, value = line.split(" ", 1)
+        marker_data[key] = value
+    marker_data["task"] = int(marker_data["task"])
+    marker_data["attempt"] = int(marker_data["attempt"])
+    execution = marker_data.get("execution", "-")
+    if execution != "-":
+        validated_execution = subprocess.run(
+            [sys.executable, gate_execution, "validate-token", execution,
+             marker_data["gate"], marker_data["tree"]],
+            cwd=REPO, capture_output=True, text=True, env=ENV,
+        )
+        check(validated_execution.returncode == 0,
+              validated_execution.stdout + validated_execution.stderr)
+        execution = validated_execution.stdout.strip()
+        marker_data["execution"] = execution
+    audit = subprocess.run(
+        [sys.executable, os.path.join(WORKSPACE, "prompts", "construction", "gate_report.py"),
+         new_op, marker_data["gate"], marker_data["tree"], execution],
+        cwd=REPO, capture_output=True, text=True, env=ENV,
+    )
+    if audit.returncode != 0:
+        executed = subprocess.run(
+            [sys.executable, gate_execution, "run", new_op], cwd=REPO,
+            capture_output=True, text=True, env=ENV, timeout=120,
+        )
+        check(executed.returncode == 0, executed.stdout + executed.stderr)
+        published = gate_call("publish-report", new_op, input_text=observations)
+        check(published.returncode == 0, published.stdout + published.stderr)
+        audit = subprocess.run(
+            [sys.executable, os.path.join(WORKSPACE, "prompts", "construction", "gate_report.py"),
+             new_op, marker_data["gate"], marker_data["tree"], execution],
+            cwd=REPO, capture_output=True, text=True, env=ENV,
+        )
+    check(audit.returncode == 0, audit.stdout + audit.stderr)
+    terminal_data = {**marker_data, **json.loads(audit.stdout)}
+    command = [
+        sys.executable, SCRIPT, "subagent-ended", "gate-runner",
+        "--data", json.dumps(terminal_data, separators=(",", ":")),
+    ]
+    journal_lock_path = os.path.join(WORKSPACE, "progress.jsonl.lock")
+    with open(journal_lock_path, "a+b") as journal_lock:
+        fcntl.flock(journal_lock, fcntl.LOCK_EX)
+        processes = [subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=ENV,
+        ) for _ in range(2)]
+        time.sleep(0.05)
+        check(all(process.poll() is None for process in processes),
+              "concurrent gate terminals did not reach the journal owner")
+        fcntl.flock(journal_lock, fcntl.LOCK_UN)
+    results = [process.communicate(timeout=120) + (process.returncode,)
+               for process in processes]
+    check(sorted(result[2] for result in results) == [0, 1], results)
+    terminals = [entry for entry in journal_lines()
+                 if entry.get("event") == "subagent-ended"
+                 and entry.get("kind") == "gate-runner"
+                 and (entry.get("data") or {}).get("op") == new_op]
+    check(len(terminals) == 1,
+          "concurrent exact gate terminals appended more than one terminal")
+
+
+@test
 def subagent_recovery_discovery_closes_lost_before_regeneration():
     started = run_progress(
         "subagent-started", "gate-runner", "--data", '{"scope":"discovery"}'

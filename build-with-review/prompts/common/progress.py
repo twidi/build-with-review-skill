@@ -10966,8 +10966,140 @@ def validate_amendment_commit_entry(entries, index, entry, *, require_current=Fa
     return proof
 
 
-def validate_gate_subagent(event, data):
+GATE_SUBAGENT_BASE_KEYS = {
+    "op", "scope", "owner", "lot", "task", "attempt", "head", "base",
+    "tree", "gate", "code",
+}
+GATE_SUBAGENT_RESULT_KEYS = {
+    "green", "surface", "report", "report_sha256", "commands",
+}
+GATE_SUBAGENT_CORRECTION_AUTHORITY_KEYS = {
+    "contract_authority_sha256", "execution_authority_sha256",
+    "final_checker_set_sha256",
+}
+GATE_SUBAGENT_CORRECTION_ATTEMPT_AUTHORITY_KEYS = \
+    GATE_SUBAGENT_CORRECTION_AUTHORITY_KEYS | {"attempt_marker_sha256"}
+GATE_SUBAGENT_CORRECTION_SCOPES = {
+    "correction-task", "correction-review", "correction-baseline",
+}
+
+
+def validate_gate_subagent_shape(event, data, subject):
+    correction_scope = isinstance(data, dict) \
+        and data.get("scope") in GATE_SUBAGENT_CORRECTION_SCOPES
+    correction_baseline = correction_scope \
+        and data.get("scope") == "correction-baseline"
+    identity_keys = GATE_SUBAGENT_BASE_KEYS \
+        | ({"correction"} | (
+            GATE_SUBAGENT_CORRECTION_AUTHORITY_KEYS if correction_baseline
+            else GATE_SUBAGENT_CORRECTION_ATTEMPT_AUTHORITY_KEYS
+        ) if correction_scope else set()) \
+        | ({"execution"} if isinstance(data, dict) and "execution" in data else set())
+    expected_shapes = (identity_keys,) if event == "subagent-started" else (
+        identity_keys | GATE_SUBAGENT_RESULT_KEYS,
+        identity_keys | {"unusable"},
+    )
+    if not isinstance(data, dict) or set(data) not in expected_shapes:
+        fail(f"{subject} has an incomplete logical-check identity", data)
+    if not isinstance(data.get("op"), str) or not re.fullmatch(r"[0-9a-f]{64}", data["op"]):
+        fail(f"{subject} has an invalid operation identity")
+    if data.get("scope") not in {
+        "task", "review", "baseline", *GATE_SUBAGENT_CORRECTION_SCOPES,
+    }:
+        fail(f"{subject} has an invalid scope")
+    if "execution" in data and not re.fullmatch(r"[0-9a-f]{64}", str(data["execution"])):
+        fail(f"{subject} has an invalid execution identity")
+    if not isinstance(data.get("task"), int) or isinstance(data.get("task"), bool) \
+            or not isinstance(data.get("attempt"), int) or isinstance(data.get("attempt"), bool):
+        fail(f"{subject} has an invalid task identity")
+    if correction_scope:
+        correction = data.get("correction")
+        if not construction_positive_integer(correction) or any(
+            not re.fullmatch(r"[0-9a-f]{64}", str(data.get(key)))
+            for key in (
+                GATE_SUBAGENT_CORRECTION_AUTHORITY_KEYS if correction_baseline
+                else GATE_SUBAGENT_CORRECTION_ATTEMPT_AUTHORITY_KEYS
+            )
+        ):
+            fail(f"{subject} has malformed Correction authority")
+        if correction_baseline:
+            if data.get("task") != 0 or data.get("attempt") != 0 \
+                    or not re.fullmatch(
+                        rf"correction/{re.escape(data['lot'])}/c{correction}/.+",
+                        data.get("owner", ""),
+                    ):
+                fail(f"{subject} has a malformed correction baseline owner")
+        else:
+            owner_prefix = (
+                f"{data['lot']}/correction-{correction}/task-{data['task']}/"
+                f"attempt-{data['attempt']}"
+            )
+            expected_owner = owner_prefix if data["scope"] == "correction-task" \
+                else f"{owner_prefix}/code-round-"
+            if data["scope"] == "correction-task" and data.get("owner") != expected_owner \
+                    or data["scope"] == "correction-review" and not re.fullmatch(
+                        re.escape(expected_owner) + r"[1-9][0-9]*", data.get("owner", ""),
+                    ):
+                fail(f"{subject} has a malformed correction owner")
+    elif "correction" in data:
+        fail(f"{subject} ordinary gate-runner carries a correction identity")
+    if event == "subagent-ended" and "unusable" in data:
+        if data["unusable"] not in CONSTRUCTION_UNUSABLE_RESULTS:
+            fail(f"{subject} has an invalid unusable result")
+    elif event == "subagent-ended":
+        if not isinstance(data.get("green"), bool) \
+                or data.get("surface") not in {"unchanged", "different"} \
+                or not isinstance(data.get("report"), str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", data.get("report_sha256", "")) \
+                or not isinstance(data.get("commands"), int) \
+                or isinstance(data.get("commands"), bool) or data["commands"] < 1:
+            fail(f"{subject} has an invalid result")
+    return identity_keys
+
+
+def validate_gate_terminal_history(opening, terminal, subject):
+    opening_data = note_data(opening)
+    terminal_data = note_data(terminal)
+    opening_keys = validate_gate_subagent_shape(
+        "subagent-started", opening_data, f"{subject}'s opening",
+    )
+    terminal_keys = validate_gate_subagent_shape(
+        "subagent-ended", terminal_data, f"{subject}'s terminal",
+    )
+    if opening.get("event") != "subagent-started" \
+            or terminal.get("event") != "subagent-ended" \
+            or opening.get("kind") != "gate-runner" \
+            or terminal.get("kind") != "gate-runner" \
+            or opening.get("by") != terminal.get("by") \
+            or subagent_event_context(opening) != subagent_event_context(terminal) \
+            or opening_keys != terminal_keys \
+            or any(opening_data[key] != terminal_data[key] for key in opening_keys):
+        fail(f"{subject} changes its exact gate identity")
+    if "unusable" in terminal_data:
+        fail(f"{subject} has no complete canonical physical result")
+    audit = subprocess.run(
+        [sys.executable, GATE_REPORT, terminal_data["op"], terminal_data["gate"],
+         terminal_data["tree"], terminal_data.get("execution", "-")],
+        capture_output=True, text=True,
+    )
+    if audit.returncode != 0:
+        fail(f"{subject} has no complete canonical physical result", audit.stderr or audit.stdout)
+    try:
+        outcome = json.loads(audit.stdout)
+    except ValueError:
+        fail(f"{subject}'s physical result audit returned malformed JSON", audit.stdout)
+    if set(outcome) != GATE_SUBAGENT_RESULT_KEYS \
+            or any(terminal_data[key] != outcome[key] for key in GATE_SUBAGENT_RESULT_KEYS):
+        fail(f"{subject} does not derive from its canonical physical result", {
+            "terminal": {key: terminal_data[key] for key in sorted(GATE_SUBAGENT_RESULT_KEYS)},
+            "audit": outcome,
+        })
+
+
+def validate_gate_subagent(event, data, *, entries=None):
     """A gate receipt consumes the exact live logical check marker."""
+    if entries is None:
+        entries = journal_entries()
     if isinstance(data, dict) and data.get("scope") == "discovery":
         expected = {"scope"} if event == "subagent-started" else None
         terminal_shape = set(data) in ({"scope", "green", "surface"}, {"scope", "unusable"})
@@ -10982,7 +11114,6 @@ def validate_gate_subagent(event, data):
                 or data.get("surface") not in {"unchanged", "different"}
         ):
             fail("subagent-ended discovery gate-runner has an invalid result", data)
-        entries = journal_entries()
         starts = [entry for entry in entries if entry.get("event") == "subagent-started"
                   and entry.get("kind") == "gate-runner"
                   and note_data(entry).get("scope") == "discovery"]
@@ -10994,56 +11125,14 @@ def validate_gate_subagent(event, data):
             fail("the discovery gate-runner cannot open another physical call")
         return
 
-    base_keys = {
-        "op", "scope", "owner", "lot", "task", "attempt", "head", "base",
-        "tree", "gate", "code",
-    }
-    correction_authority_keys = {
-        "contract_authority_sha256", "execution_authority_sha256",
-        "final_checker_set_sha256",
-    }
-    correction_attempt_authority_keys = correction_authority_keys | {"attempt_marker_sha256"}
-    result_keys = {"green", "surface", "report", "report_sha256", "commands"}
-    correction_scope = isinstance(data, dict) \
-        and data.get("scope") in {
-            "correction-task", "correction-review", "correction-baseline",
-        }
-    correction_baseline = correction_scope and data.get("scope") == "correction-baseline"
-    identity_keys = base_keys \
-        | ({"correction"} | (
-            correction_authority_keys if correction_baseline
-            else correction_attempt_authority_keys
-        ) if correction_scope else set()) \
-        | ({"execution"} if isinstance(data, dict) and "execution" in data else set())
-    expected_shapes = (identity_keys,) if event == "subagent-started" else (
-        identity_keys | result_keys, identity_keys | {"unusable"},
+    identity_keys = validate_gate_subagent_shape(
+        event, data, f"{event} gate-runner",
     )
-    if not isinstance(data, dict) or set(data) not in expected_shapes:
-        fail(f"{event} gate-runner has an incomplete logical-check identity", data)
-    if not isinstance(data.get("op"), str) or not re.fullmatch(r"[0-9a-f]{64}", data["op"]):
-        fail(f"{event} gate-runner has an invalid operation identity")
-    if data.get("scope") not in {
-        "task", "review", "baseline", "correction-task", "correction-review",
-        "correction-baseline",
-    }:
-        fail(f"{event} gate-runner has an invalid scope")
-    if "execution" in data and not re.fullmatch(r"[0-9a-f]{64}", str(data["execution"])):
-        fail(f"{event} gate-runner has an invalid execution identity")
-    if not isinstance(data.get("task"), int) or isinstance(data.get("task"), bool) \
-            or not isinstance(data.get("attempt"), int) or isinstance(data.get("attempt"), bool):
-        fail(f"{event} gate-runner has an invalid task identity")
+    correction_scope = data.get("scope") in GATE_SUBAGENT_CORRECTION_SCOPES
+    correction_baseline = data.get("scope") == "correction-baseline"
     if correction_scope:
-        correction = data.get("correction")
-        if not construction_positive_integer(correction):
-            fail(f"{event} gate-runner has no correction-round identity")
+        correction = data["correction"]
         if correction_baseline:
-            if data.get("task") != 0 or data.get("attempt") != 0 \
-                    or not re.fullmatch(
-                        rf"correction/{re.escape(data['lot'])}/c{correction}/.+",
-                        data.get("owner", ""),
-                    ):
-                fail(f"{event} gate-runner has a malformed correction baseline owner")
-            entries = journal_entries()
             state = current_correction_contract_state(
                 entries, len(entries), data["lot"], correction,
                 f"{event} correction baseline gate-runner",
@@ -11092,19 +11181,6 @@ def validate_gate_subagent(event, data):
             }
         if any(data.get(key) != value for key, value in expected_authority.items()):
             fail(f"{event} gate-runner changes its Correction authority", expected_authority)
-    elif isinstance(data, dict) and "correction" in data:
-        fail(f"{event} ordinary gate-runner carries a correction identity")
-    if event == "subagent-ended" and "unusable" in data:
-        if data["unusable"] not in CONSTRUCTION_UNUSABLE_RESULTS:
-            fail("subagent-ended gate-runner has an invalid unusable result")
-    elif event == "subagent-ended":
-        if not isinstance(data.get("green"), bool) \
-                or data.get("surface") not in {"unchanged", "different"} \
-                or not isinstance(data.get("report"), str) \
-                or not re.fullmatch(r"[0-9a-f]{64}", data.get("report_sha256", "")) \
-                or not isinstance(data.get("commands"), int) \
-                or isinstance(data.get("commands"), bool) or data["commands"] < 1:
-            fail("subagent-ended gate-runner has an invalid result")
 
     if os.path.islink(GATE_MARKER) or not os.path.isfile(GATE_MARKER):
         fail("a gate-runner event has no real live gate-check marker")
@@ -11118,11 +11194,7 @@ def validate_gate_subagent(event, data):
         if not separator or not value or key in marker:
             fail("the live gate-check marker is malformed", line)
         marker[key] = value
-    marker_keys = base_keys \
-        | ({"correction"} | (
-            correction_authority_keys if correction_baseline
-            else correction_attempt_authority_keys
-        ) if correction_scope else set())
+    marker_keys = identity_keys - {"execution"}
     if set(marker) not in (marker_keys, marker_keys | {"execution"}):
         fail("the live gate-check marker has an incomplete identity", marker)
     normalized = dict(marker)
@@ -11143,14 +11215,17 @@ def validate_gate_subagent(event, data):
         if execution.returncode != 0:
             fail("the live gate-check marker has an invalid frozen execution", execution.stderr)
         normalized["execution"] = execution.stdout.strip()
-    identity_keys = marker_keys | ({"execution"} if "execution" in marker else set())
-    if set(data) != (identity_keys if event == "subagent-started" else identity_keys | result_keys):
-        if event != "subagent-ended" or set(data) != identity_keys | {"unusable"}:
+    frozen_identity_keys = marker_keys | ({"execution"} if "execution" in marker else set())
+    if set(data) != (
+        frozen_identity_keys if event == "subagent-started"
+        else frozen_identity_keys | GATE_SUBAGENT_RESULT_KEYS
+    ):
+        if event != "subagent-ended" or set(data) != frozen_identity_keys | {"unusable"}:
             fail("the gate-runner event and marker disagree about execution identity", data)
-    if any(data[key] != normalized[key] for key in identity_keys):
+    if any(data[key] != normalized[key] for key in frozen_identity_keys):
         fail("the gate-runner event does not match the live logical check", {
-            "event": {key: data[key] for key in sorted(identity_keys)},
-            "marker": {key: normalized[key] for key in sorted(identity_keys)},
+            "event": {key: data[key] for key in sorted(frozen_identity_keys)},
+            "marker": {key: normalized[key] for key in sorted(frozen_identity_keys)},
         })
 
     if event != "subagent-ended" or "unusable" not in data:
@@ -11169,25 +11244,21 @@ def validate_gate_subagent(event, data):
                  idle.stderr or idle.stdout)
 
     if event == "subagent-ended" and "unusable" not in data:
-        audit = subprocess.run(
-            [sys.executable, GATE_REPORT, data["op"], data["gate"], data["tree"],
-             data.get("execution", "-")],
-            capture_output=True,
-            text=True,
+        openings = [entry for _, entry in open_subagent_brackets(entries)
+                    if entry.get("kind") == "gate-runner"
+                    and subagent_terminal_matches(entry, {
+                        "event": "subagent-ended", "kind": "gate-runner",
+                        "by": entry.get("by"), **subagent_event_context(entry), "data": data,
+                    })]
+        if len(openings) != 1:
+            fail("the gate-runner terminal has no one exact historical opening")
+        terminal = {
+            "event": "subagent-ended", "kind": "gate-runner",
+            "by": openings[0].get("by"), **subagent_event_context(openings[0]), "data": data,
+        }
+        validate_gate_terminal_history(
+            openings[0], terminal, "the gate-runner terminal",
         )
-        if audit.returncode != 0:
-            fail("the gate-runner has no complete canonical physical result", audit.stderr or audit.stdout)
-        try:
-            outcome = json.loads(audit.stdout)
-        except ValueError:
-            fail("the physical gate result audit returned malformed JSON", audit.stdout)
-        if set(outcome) != result_keys or any(data[key] != outcome[key] for key in result_keys):
-            fail("the gate-runner terminal does not derive from its canonical physical result", {
-                "terminal": {key: data[key] for key in sorted(result_keys)},
-                "audit": outcome,
-            })
-
-    entries = journal_entries()
     matching_starts = [
         entry for entry in entries
         if entry.get("event") == "subagent-started" and entry.get("kind") == "gate-runner"
@@ -22840,7 +22911,6 @@ def cmd_subagent_ended(args, *, correction_lease=None, correction_operation=None
         correction_gate_subagent_lease(
             "subagent-ended", data, correction_lease, correction_operation,
         )
-        validate_gate_subagent("subagent-ended", data)
     elif args.kind == "finding-verifier" and isinstance(data, dict) \
             and data.get("owner") == "spec-loop":
         validate_spec_loop_verifier("subagent-ended", data)
@@ -22859,7 +22929,18 @@ def cmd_subagent_ended(args, *, correction_lease=None, correction_operation=None
                         if key in data})
         if check == "diagnostic":
             context.pop("round", None)
-    if deferred_completeness:
+    if args.kind == "gate-runner":
+        def build(entries):
+            validate_gate_subagent("subagent-ended", data, entries=entries)
+            validate_subagent_transition(
+                entries, "subagent-ended", me["session_id"], args.kind, context, data,
+            )
+            return event_entry(
+                me["session_id"], "subagent-ended", kind=args.kind, data=data, **context,
+            )
+
+        write_validated_line(build)
+    elif deferred_completeness:
         requested_data = data
 
         def build(entries):
@@ -23083,7 +23164,7 @@ def subagent_terminal_recovery_account(
     canonical = entries[canonical_index]
     duplicate = entries[duplicate_index]
     canonical_context = subagent_event_context(canonical)
-    if canonical.get("kind") not in CONSTRUCTION_CHECKERS.values() \
+    if canonical.get("kind") not in {*CONSTRUCTION_CHECKERS.values(), "gate-runner"} \
             or not isinstance(canonical.get("ts"), str) or not canonical["ts"] \
             or not isinstance(canonical.get("by"), str) or not canonical["by"] \
             or set(canonical) != {
@@ -23100,12 +23181,15 @@ def subagent_terminal_recovery_account(
     opening_index, opening = openings[0]
     if opening_index >= canonical_index:
         fail(f"{subject} has its terminal before its opening")
-    logical = dict(note_data(opening))
-    call = logical.pop("call", None)
-    if not construction_positive_integer(call) \
-            or note_data(canonical).get("call") != call:
-        fail(f"{subject} has no exact physical call identity")
-    construction_result_shape(note_data(canonical), logical, call, subject)
+    if canonical.get("kind") == "gate-runner":
+        validate_gate_terminal_history(opening, canonical, subject)
+    else:
+        logical = dict(note_data(opening))
+        call = logical.pop("call", None)
+        if not construction_positive_integer(call) \
+                or note_data(canonical).get("call") != call:
+            fail(f"{subject} has no exact physical call identity")
+        construction_result_shape(note_data(canonical), logical, call, subject)
     matching_terminals = [
         index for index, entry in enumerate(entries[:before])
         if entry.get("event") == "subagent-ended"
@@ -23113,21 +23197,25 @@ def subagent_terminal_recovery_account(
     ]
     if matching_terminals != [canonical_index, duplicate_index]:
         fail(f"{subject} does not select one exact duplicate-terminal pair")
-    return {
+    account = {
         "schema": 1,
         "opening": journal_line_proof(opening_index),
         "canonical_terminal": journal_line_proof(canonical_index),
         "duplicate_terminal": journal_line_proof(duplicate_index),
         "identity_sha256": subagent_terminal_identity_sha256(canonical),
     }
+    if canonical.get("kind") == "gate-runner":
+        account["op"] = note_data(canonical)["op"]
+    return account
 
 
 def validate_subagent_terminal_recovery_entry(entries, index, entry):
     data = note_data(entry)
-    if set(data) != {
+    base_keys = {
         "schema", "opening", "canonical_terminal", "duplicate_terminal",
         "identity_sha256",
-    } or data.get("schema") != 1 \
+    }
+    if set(data) not in (base_keys, base_keys | {"op"}) or data.get("schema") != 1 \
             or not re.fullmatch(r"[0-9a-f]{64}", data.get("identity_sha256", "")) \
             or not isinstance(entry.get("ts"), str) or not entry["ts"]:
         fail("a durable subagent-terminal recovery has malformed authority")
@@ -23189,10 +23277,17 @@ def project_subagent_terminal_recoveries(raw_entries, opening_projected):
 def validate_recovered_construction_terminal_history(entries, raw_entries, index, entry):
     opening_index, canonical_index, _duplicate_index, opening, canonical = \
         validate_subagent_terminal_recovery_entry(raw_entries, index, entry)
-    logical = dict(note_data(opening))
-    call = logical.pop("call")
     prefix = entries[:index + 1]
     subject = "the durable recovered Construction checker terminal"
+    if opening.get("kind") == "gate-runner":
+        validate_gate_terminal_history(opening, canonical, subject)
+        open_calls = [candidate for _, candidate in open_subagent_brackets(prefix)
+                      if subagent_terminal_matches(candidate, canonical)]
+        if open_calls:
+            fail(f"{subject} does not preserve one canonical closed physical call")
+        return
+    logical = dict(note_data(opening))
+    call = logical.pop("call")
     if logical.get("check") == "design":
         validate_design_generation_history(prefix, len(prefix), logical, subject)
     elif logical.get("check") == "code":
@@ -24068,6 +24163,76 @@ def cmd_construction_terminal_duplicate_recover(args):
         validate_recovered_construction_terminal_history(
             projected_with_candidate, raw_with_candidate, len(raw_entries), candidate,
         )
+        return candidate
+
+    write_validated_line(build)
+
+
+def cmd_gate_terminal_duplicate_recover(args):
+    me = whoami()
+    caller = caller_context(me)
+    expected_caller = {
+        "mode": "construction", "lot": caller.get("lot"),
+        "task": caller.get("task"), "attempt": caller.get("attempt"),
+        "job": "implementer",
+    }
+    if caller != expected_caller \
+            or not isinstance(caller.get("lot"), str) or not caller["lot"] \
+            or not construction_positive_integer(caller.get("task")) \
+            or not construction_positive_integer(caller.get("attempt")):
+        fail("gate duplicate-terminal recovery requires the exact Construction implementer context")
+
+    def build(entries):
+        raw_entries = raw_journal_entries()
+        if raw_entries and raw_entries[-1].get("event") == "note" \
+                and raw_entries[-1].get("kind") == "subagent.terminal.recovered" \
+                and raw_entries[-1].get("by") == me["session_id"] \
+                and note_data(raw_entries[-1]).get("op") == args.op:
+            _opening_index, _canonical_index, _duplicate_index, opening, _canonical = \
+                validate_subagent_terminal_recovery_entry(
+                    raw_entries, len(raw_entries) - 1, raw_entries[-1],
+                )
+            if opening.get("kind") != "gate-runner" \
+                    or subagent_event_context(opening) != caller:
+                fail("the retained gate duplicate-terminal recovery belongs to another owner")
+            return None
+        if len(raw_entries) < 2:
+            fail("gate duplicate-terminal recovery has no exact terminal pair")
+        canonical_index = len(raw_entries) - 2
+        duplicate_index = len(raw_entries) - 1
+        data = subagent_terminal_recovery_account(
+            raw_entries, len(raw_entries), canonical_index, duplicate_index,
+            "the duplicate gate-runner terminal recovery",
+        )
+        opening_index, opening = journal_entry_from_proof(
+            raw_entries, data["opening"],
+            "the duplicate gate-runner terminal recovery",
+        )
+        if opening.get("kind") != "gate-runner" \
+                or data.get("op") != args.op \
+                or opening.get("by") != me["session_id"] \
+                or subagent_event_context(opening) != caller:
+            fail("gate duplicate-terminal recovery does not own the exact requested gate call")
+        candidate = event_entry(
+            me["session_id"], "note", kind="subagent.terminal.recovered",
+            data=data, **caller,
+        )
+        raw_with_candidate = [*raw_entries, candidate]
+        validate_subagent_terminal_recovery_entry(
+            raw_with_candidate, len(raw_entries), candidate,
+        )
+        projected_with_candidate = [*entries, candidate]
+        duplicate = raw_entries[duplicate_index]
+        projected_with_candidate[duplicate_index] = {
+            "ts": duplicate["ts"], "by": duplicate["by"], "event": "note",
+            "kind": "subagent.terminal.duplicate",
+            "data": {"recovery": "pending"},
+        }
+        validate_recovered_construction_terminal_history(
+            projected_with_candidate, raw_with_candidate, len(raw_entries), candidate,
+        )
+        if opening_index >= canonical_index:
+            fail("gate duplicate-terminal recovery has its opening after its terminal")
         return candidate
 
     write_validated_line(build)
@@ -25173,6 +25338,10 @@ def build_parser():
     sp.add_argument("check", choices=tuple(CONSTRUCTION_CHECKERS))
     sp.add_argument("round", type=positive_int)
     sp.set_defaults(func=cmd_construction_terminal_duplicate_recover)
+
+    sp = sub.add_parser("gate-terminal-duplicate-recover", help=argparse.SUPPRESS)
+    sp.add_argument("op")
+    sp.set_defaults(func=cmd_gate_terminal_duplicate_recover)
 
     sp = sub.add_parser("pass-opening-context-recover", help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_pass_opening_context_recover)
