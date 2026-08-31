@@ -17,7 +17,7 @@ flowchart LR
     E --> F[Task-by-task Construction]
     F --> G[Product Review]
 
-    G -->|No findings| H[Delivered lot]
+    G -->|No confirmed findings| H[Delivered lot]
     G -->|Bounded correction| I[Correction Round]
     G -->|Structural correction| J[Sub-lot]
 
@@ -51,9 +51,9 @@ It stays at the product level.
 
 ## 2. The spec does not validate itself
 
-Several reviewers read the complete spec.
+Several Reviewers read the complete spec.
 
-Each reviewer has one **precise mandate**. Examples include:
+Each Reviewer has one **precise mandate**. Examples include:
 
 - finding missing cases;
 - comparing claims with the existing product;
@@ -62,23 +62,23 @@ Each reviewer has one **precise mandate**. Examples include:
 - checking the lot breakdown;
 - finding indirect consequences.
 
-The reviewers produce findings. They do not edit the spec.
+The Reviewers produce findings. They do not edit the spec.
 
-A **fixer** processes all findings together. The fixer applies them or rejects them with evidence.
+A **Fixer** processes all findings together. The Fixer applies them or rejects them with evidence.
 
 A new review then checks the corrected spec.
 
 The loop continues until one complete review produces no findings.
 
-The human then approves the product contract.
+The Human then approves the product contract.
 
-## 3. Product decisions remain human decisions
+## 3. Product decisions remain Human decisions
 
 One rule applies everywhere:
 
 > **An agent that must choose behavior not defined by the spec must stop.**
 
-The orchestrator first examines the question.
+The Orchestrator first examines the question.
 
 This examination has three possible results:
 
@@ -86,7 +86,7 @@ This examination has three possible results:
 - the facts disprove the question;
 - the answer requires a product decision.
 
-Only the human decides in the third case.
+Only the Human decides in the third case.
 
 Each option describes its consequence for the user. It does not focus only on implementation cost.
 
@@ -96,7 +96,7 @@ The answer enters the spec before any new implementation starts.
 
 Construction handles one lot at a time.
 
-The orchestrator first writes a deliberately **thin plan**.
+The Orchestrator first writes a deliberately **thin plan**.
 
 The plan contains:
 
@@ -128,22 +128,21 @@ Each task is a coherent unit.
 
 It must leave the product in a usable and verifiable state.
 
-Its implementer follows this loop:
+Its Implementer follows this loop:
 
 1. Inspect the real code.
 2. Write the task **Design**.
-3. Review that Design.
+3. Self-review and correct that Design until it is internally clean.
 4. Send the Design to an independent **Design checker**.
-5. Correct the Design when necessary.
+5. Correct the findings, then repeat self-review and independent checking until clean.
 6. Declare the behaviors that need tests.
-7. Write the tests and the code.
-8. Run useful checks during implementation.
-9. Run the required gate on the complete candidate.
-10. Review the complete diff.
-11. Send the code and tests to an independent **code checker**.
-12. Correct the confirmed findings.
-13. Run the required checks again.
-14. Produce one coherent commit for the task.
+7. Write the tests and code.
+8. Run useful targeted, partial, or complete checks during implementation.
+9. Self-review and correct the complete change until it is internally clean.
+10. Send the code and tests to an independent **Code checker**.
+11. Correct the findings, then repeat self-review and independent checking until clean.
+12. Run the complete Gate.
+13. Produce one coherent commit for the task.
 
 TDD is recommended. It is not the central philosophy.
 
@@ -181,7 +180,7 @@ Working code can implement a bad Design. A good Design can receive a bad impleme
 
 ## 7. Tests do not prove everything
 
-The gate answers this question:
+The Gate answers this question:
 
 > **Did anything already verified break?**
 
@@ -205,7 +204,7 @@ It does not judge the quality of the plan.
 
 It judges what the product actually does.
 
-Several reviewers use different **lenses**. Examples include:
+Several Reviewers use different **lenses**. Examples include:
 
 - areas that nobody appears to have examined;
 - the user experience;
@@ -213,7 +212,7 @@ Several reviewers use different **lenses**. Examples include:
 - internal quality;
 - coverage of product obligations.
 
-Each reviewer examines the product from a global perspective.
+Each Reviewer examines the product from a global perspective.
 
 The lot defines the delivery scope. The complete product defines the observation scope.
 
@@ -221,7 +220,7 @@ This distinction exposes regressions outside the lot.
 
 ## 9. A finding does not become work immediately
 
-A reviewer can be wrong.
+A Reviewer can be wrong.
 
 Each finding must therefore be:
 
@@ -230,11 +229,11 @@ Each finding must therefore be:
 - verifiable;
 - tested against the real product.
 
-Another actor confirms or disproves the finding.
+Another actor confirms, disproves, or returns the finding as unverifiable.
 
 The finding author never has the final word.
 
-The orchestrator can then:
+The Orchestrator can then:
 
 - remove a disproved finding;
 - return an unclear finding;
@@ -242,9 +241,9 @@ The orchestrator can then:
 - keep a confirmed finding;
 - turn a product ambiguity into a DECISION.
 
-The orchestrator does not decide whether a confirmed finding is worth fixing.
+The Orchestrator does not decide whether a confirmed finding is worth fixing.
 
-The orchestrator performs adjudication. Adjudication does not replace review.
+The Orchestrator performs adjudication. Adjudication does not replace review.
 
 ## 10. Corrections return to Construction
 
@@ -324,7 +323,7 @@ An Amendment is a small spec that contains:
 - what it must preserve;
 - the context that exposed the issue.
 
-A **reach sweep** then finds indirect consequences.
+A **Reach Review** then finds indirect consequences.
 
 It examines textual and functional dependencies.
 
@@ -336,9 +335,9 @@ For example, removing one screen can make these elements unnecessary:
 - a test;
 - behavior owned by another lot.
 
-The fixer updates the Amendment and the living spec.
+The Fixer updates the Amendment and the living spec.
 
-An independent checker verifies the consolidation.
+An independent Checker verifies the consolidation.
 
 Code work resumes only after the product contract changes.
 
@@ -360,9 +359,9 @@ This principle is important:
 
 > **Do not reuse product reasoning created under a contract that is now false.**
 
-## 14. The workflow moves differently before and after delivery
+## 14. The workflow moves differently before and after a complete candidate exists
 
-Before the lot exists as a complete product, the workflow goes back.
+Before the lot exists as a complete candidate, the workflow goes back.
 
 It corrects:
 
@@ -372,14 +371,14 @@ It corrects:
 - the current task;
 - the decomposition.
 
-After the lot is delivered, the workflow moves forward.
+After Construction produces a complete candidate, Product Review can require forward corrections.
 
 It creates:
 
 - a Correction Round;
 - or a sub-lot.
 
-It does not rewrite the history of the delivered lot.
+It does not rewrite the history of the completed tasks.
 
 The code still remains one living product.
 
@@ -395,7 +394,7 @@ Role separation is central to the philosophy.
 | **Fixer** | Corrects a document after review |
 | **Implementer** | Writes the Design, tests, and code |
 | **Checker** | Checks a Design or implementation |
-| **Verifier** | Confirms or disproves a finding |
+| **Verifier** | Confirms, disproves, or returns a finding as unverifiable |
 
 One actor can technically perform several roles.
 
@@ -411,7 +410,7 @@ The philosophy rests on these principles:
 
 - **Evidence before action.** A confirmed finding becomes work. An unsupported claim does not.
 
-- **Tests and reviews complement each other.** A green gate does not prove that the product is correct.
+- **Tests and reviews complement each other.** A green Gate does not prove that the product is correct.
 
 - **Bounded work and global observation.** A task stays small. A review looks for consequences everywhere.
 
