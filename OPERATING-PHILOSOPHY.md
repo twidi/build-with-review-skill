@@ -1008,9 +1008,23 @@ Role prompts live in the installed BWR skill.
 
 BWR does not copy them into the BWR workspace.
 
-TwiCC must compose fixed prompt files without loading them into the parent's context.
+Every child session type has one entry prompt file.
 
-The exact TwiCC interface remains an external dependency of BWR.
+The entry file contains its role instructions.
+
+It includes its applicable common prompts with TwiCC `@@` markers.
+
+The parent starts the child prompt with one absolute `@@` marker for this entry file.
+
+TwiCC expands the complete fixed prompt before the child receives it.
+
+The parent does not load the fixed prompt files into its context.
+
+Included prompt files use `@@./path` or `@@../path` for relative includes.
+
+Each relative marker resolves against the file that contains it.
+
+Nested files therefore resolve their own relative markers from their own directories.
 
 Fixed common content comes first.
 
@@ -1034,31 +1048,35 @@ The common prompt files are:
 - `<BWR_SKILL>/prompts/common/child.md`;
 - `<BWR_SKILL>/prompts/common/parent.md`.
 
-Every child receives `child.md`.
+Every child entry file includes `child.md`.
 
-Every session that can create children also receives `parent.md`.
+Every entry file for a session that can create children also includes `parent.md`.
 
-Each session then receives its fixed role prompt.
+Each entry file then contains its fixed role instructions.
 
-The optional Human file follows all fixed prompt files:
+The parent places the optional Human file marker after the fixed entry marker:
 
 ```text
-<BWR_WORKSPACE>/ADDITIONAL-INSTRUCTIONS.md (may not exist)
+@@/absolute/bwr-workspace/ADDITIONAL-INSTRUCTIONS.md
 ```
 
-The dynamic assignment follows this optional content.
+This path is illustrative. The parent builds the marker with the real absolute BWR workspace path.
+
+TwiCC removes the marker line when the file does not exist.
+
+The dynamic assignment follows this optional include.
 
 BWR has only this one additional instruction file.
 
 It does not recreate a per-role additional prompt system.
 
-The initial Orchestrator reads the parent prompt and its role prompt.
+The entry prompt selected for the initial Orchestrator composes the parent prompt and its role prompt.
 
-A successor Orchestrator reads the child prompt, parent prompt, and its role prompt.
+The entry prompt selected for a successor Orchestrator composes the child prompt, parent prompt, and its role prompt.
 
-An Implementer reads the child prompt, parent prompt, and Implementer prompt.
+The Implementer entry prompt composes the child prompt, parent prompt, and Implementer prompt.
 
-Other actors read the child prompt and their role prompt.
+Other actor entry prompts compose the child prompt and their role prompt.
 
 ## 32. The BWR workspace lifecycle
 

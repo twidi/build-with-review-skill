@@ -1502,18 +1502,48 @@ The installed BWR skill uses:
     └── watchdog.py
 ```
 
-`SKILL.md` defines entry, authority, workflow transitions, startup, and closure. Common prompts define reusable behavior. Role prompts remain short and role-specific.
+`SKILL.md` defines entry, authority, workflow transitions, startup, and closure. Common prompts define reusable behavior.
 
-Only parent-capable roles read `parent.md`. All child sessions read `child.md`. Review roles read applicable common review, finding, and risk prompts.
+Every child session type has one entry prompt file. The entry file contains its role-specific instructions. It includes every applicable fixed common prompt with TwiCC `@@` markers.
 
-The exact TwiCC multi-file prompt composition mechanism is an external dependency. This design does not implement that TwiCC feature. The required semantic order is:
+For example, the Implementer entry file starts with:
 
-1. fixed common prompt content;
-2. fixed role prompt content;
-3. optional Human additional instructions;
-4. dynamic assignment and paths.
+```md
+@@../common/child.md
+@@../common/parent.md
 
-Fixed content must precede all dynamic values for provider prompt caching. The parent must not load repeated prompt files into its own context.
+# Implementer
+
+...
+```
+
+Only `./` and `../` markers are relative. TwiCC resolves each relative marker against the directory of the file that contains it. When file A includes file B, markers inside file B resolve against file B.
+
+Only the initial entry marker needs an absolute path. The parent constructs a new child prompt in this order:
+
+```text
+@@/absolute/bwr-skill/prompts/construction/implementer.md
+@@/absolute/bwr-workspace/ADDITIONAL-INSTRUCTIONS.md
+
+BWR_SKILL: /absolute/bwr-skill
+BWR_WORKSPACE: /absolute/bwr-workspace
+Lot: LOT.3
+...
+```
+
+The first marker selects the fixed entry prompt. The second marker includes the optional Human instructions. TwiCC removes that line when `ADDITIONAL-INSTRUCTIONS.md` does not exist.
+
+The remaining text is the dynamic assignment. The parent supplies the real absolute paths. The paths in this example are illustrative.
+
+TwiCC expands all markers before the child receives the prompt. Expansion is recursive, with a maximum depth of five levels and a final size limit of 500 KB. BWR keeps its inclusion graph shallow.
+
+All fixed prompt files are required BWR files. `ADDITIONAL-INSTRUCTIONS.md` is the only intentionally optional include.
+
+Only parent-capable roles include `parent.md`. All child sessions include `child.md`. Review roles include applicable common review, finding, and risk prompts.
+
+Fixed common content therefore precedes fixed role content. Optional Human instructions follow the fixed entry prompt. Dynamic assignments and paths come last.
+
+This order supports provider prompt caching. The parent sends the entry marker without reading, copying, or repeating the fixed prompt content in its own context.
 
 ## 32. Self-review
 
