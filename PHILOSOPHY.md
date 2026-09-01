@@ -335,7 +335,7 @@ For example, removing one screen can make these elements unnecessary:
 - a test;
 - behavior owned by another lot.
 
-The Fixer updates the Amendment and the living spec.
+The Fixer updates the Amendment and produces the Updated Spec.
 
 An independent Checker verifies the consolidation.
 

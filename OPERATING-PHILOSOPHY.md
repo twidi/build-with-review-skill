@@ -6,7 +6,7 @@ It translates the product philosophy into a simple working model.
 
 It does not define every role prompt. It does not define every report field.
 
-Those contracts belong to the next design stage.
+`BWR-DESIGN.md` defines those detailed contracts.
 
 ## 1. The operating principle
 
@@ -36,7 +36,7 @@ Build With Review uses three separate state layers.
 ```mermaid
 flowchart TB
     G[Git repository<br/>Product documents, plans, code, tests, commits]
-    W[BWR workspace<br/>PROGRESS.md, reports, handoff artifacts]
+    W[BWR workspace<br/>PROGRESS.md, GUIDE.md, reports]
     T[TwiCC<br/>Session tree, live state, annotations]
 
     H[Human]
@@ -81,6 +81,8 @@ The BWR workspace stores the operational memory of one BWR run.
 It contains:
 
 - `PROGRESS.md`;
+- `GUIDE.md`;
+- optional Human-owned `ADDITIONAL-INSTRUCTIONS.md`;
 - reviewer reports;
 - verifier reports;
 - fixer reports;
@@ -88,6 +90,8 @@ It contains:
 - other handoff artifacts when a role needs them.
 
 The BWR workspace remains the same across all lots in the run.
+
+Its path is `<ACTIVE_PROJECT_ROOT>/bwr_workspace/<FEATURE>`.
 
 ### TwiCC
 
@@ -109,12 +113,16 @@ Every former subagent role becomes a TwiCC child session.
 
 When two sources disagree, use this order:
 
-1. A current Human decision.
-2. The current spec and its incorporated Amendments.
-3. The current committed lot plan.
-4. The current task Design.
-5. The current code and tests for technical facts.
-6. Old documents and historical reports.
+1. System instructions and project instructions.
+2. A current Human decision.
+3. The Current Spec and its incorporated Amendments.
+4. The current committed Lot plan.
+5. The current Task Design.
+6. The current Git state for technical facts.
+7. `GUIDE.md`.
+8. `PROGRESS.md`.
+9. Reports.
+10. Annotations.
 
 The higher source controls product intent.
 
@@ -224,13 +232,13 @@ The parent stops the old writer before creating its replacement.
 
 ## 8. Session creation and retirement
 
-Every BWR-created session title starts with the exact prefix `- `.
+Every non-Orchestrator child session title starts with the exact prefix `- `.
 
 The prefix applies at every level of the session tree.
 
-It also applies to a successor Orchestrator.
+It never applies to an Orchestrator.
 
-The Human-created initial session is the only exception.
+Initial, successor, and Recovery Orchestrators use normal master-session titles.
 
 Every child starts in the exact TwiCC project used by its parent.
 
@@ -238,7 +246,19 @@ This rule preserves the correct checkout or worktree.
 
 The parent must never silently use the default project checkout.
 
-After final acceptance, the parent performs this sequence:
+Every non-Orchestrator child is muted at creation.
+
+This includes the watchdog.
+
+An Orchestrator remains unmuted.
+
+Children remain visible while they work.
+
+Every non-Orchestrator child starts with the Human question widget disabled.
+
+Every Orchestrator keeps the Human question widget enabled.
+
+After final acceptance of a non-Orchestrator child, the parent performs this sequence:
 
 1. Set the correct terminal status.
 2. Archive the child session.
@@ -249,6 +269,8 @@ Archiving removes completed work from ordinary live views.
 Hiding keeps the Human sidebar clean, including archived views.
 
 Historical searches must explicitly include archived and hidden sessions.
+
+BWR never archives or hides an Orchestrator.
 
 ## 9. Session status
 
@@ -404,7 +426,7 @@ BWR does not commit them to the product repository.
 
 BWR performs no automatic report compaction.
 
-## 13. PROGRESS.md
+## 13. PROGRESS.md and GUIDE.md
 
 Only the Orchestrator writes `PROGRESS.md`.
 
@@ -419,23 +441,23 @@ Its structure is:
 ```markdown
 # BWR Progress
 
-## Next Action
+## Run
 
 ## Provider Choices
 
 ## Review Concurrency
 
-## Gate
+## Lots
 
-### Included
+## Human Decisions
 
-### Excluded
+## Amendments
 
-## Open Findings
+## Durable Log
 
-## Decisions
+## Blockers
 
-## Milestones
+## Final Result
 ```
 
 `PROGRESS.md` does not duplicate the active session tree.
@@ -449,6 +471,12 @@ Annotations and TwiCC process state provide that information.
 It contains enough information for the Orchestrator to continue after context loss.
 
 It also gives a successor Orchestrator the operating choices for the next lot.
+
+Only the Orchestrator writes `GUIDE.md`.
+
+`GUIDE.md` contains the Git convention and complete Gate execution plan.
+
+Every Orchestrator and Implementer reads it.
 
 ## 14. Git history
 
@@ -531,7 +559,9 @@ The mandate set includes:
 - Ripple;
 - Scoped.
 
-The exact mandate contracts belong to the role prompt design.
+`BWR-DESIGN.md` defines the exact mandate contracts.
+
+The role prompts implement them.
 
 Each reviewer writes one separate report.
 
@@ -578,14 +608,14 @@ An Amendment starts from a verified Human product decision.
 
 The Orchestrator writes the initial Amendment.
 
-Reach reviewers then inspect its indirect effects.
+One Reach reviewer per round then inspects its indirect effects.
 
-Each Reach reviewer writes a separate report.
+That reviewer writes one report for the round.
 
 The same Amendment fixer:
 
 - updates the Amendment;
-- updates the living spec;
+- produces the Updated Spec after Reach Review becomes clean;
 - records each disposition.
 
 A clean Reach Review is required.
@@ -914,9 +944,9 @@ The initial setup does not ask for the current Orchestrator's provider.
 
 When the current Orchestrator creates a successor, it asks which provider to use.
 
-The successor receives the previous provider map.
+The successor receives the previous provider map as its defaults.
 
-It presents those choices as recommended defaults during its own setup.
+It does not repeat routine provider questions.
 
 ## 29. Presets
 
@@ -978,19 +1008,21 @@ Role prompts live in the installed BWR skill.
 
 BWR does not copy them into the BWR workspace.
 
-Every child receives a small bootstrap prompt.
+TwiCC must compose fixed prompt files without loading them into the parent's context.
 
-The bootstrap names the files that the child must read.
+The exact TwiCC interface remains an external dependency of BWR.
 
-It does not inline the complete role instructions.
+Fixed common content comes first.
 
-The fixed prompt prefix comes first.
+Fixed role content comes next.
 
-Dynamic run values come last.
+Optional Human additional instructions follow the fixed content.
+
+Dynamic assignments and paths come last.
 
 This order allows provider prompt caching.
 
-The fixed prompt uses these placeholders:
+The prompts use these placeholders:
 
 - `<BWR_SKILL>`;
 - `<BWR_WORKSPACE>`.
@@ -999,20 +1031,22 @@ The dynamic suffix gives the real values.
 
 The common prompt files are:
 
-- `<BWR_SKILL>/prompts/CHILD-SESSION.md`;
-- `<BWR_SKILL>/prompts/PARENT-SESSION.md`.
+- `<BWR_SKILL>/prompts/common/child.md`;
+- `<BWR_SKILL>/prompts/common/parent.md`.
 
-Every child reads `CHILD-SESSION.md`.
+Every child receives `child.md`.
 
-Every session that can create children also reads `PARENT-SESSION.md`.
+Every session that can create children also receives `parent.md`.
 
-Each session then reads its role prompt.
+Each session then receives its fixed role prompt.
 
-An optional file comes last:
+The optional Human file follows all fixed prompt files:
 
 ```text
 <BWR_WORKSPACE>/ADDITIONAL-INSTRUCTIONS.md (may not exist)
 ```
+
+The dynamic assignment follows this optional content.
 
 BWR has only this one additional instruction file.
 
@@ -1029,6 +1063,8 @@ Other actors read the child prompt and their role prompt.
 ## 32. The BWR workspace lifecycle
 
 One BWR run uses one BWR workspace.
+
+Its path is `<ACTIVE_PROJECT_ROOT>/bwr_workspace/<FEATURE>`.
 
 All lots in that run share it.
 
@@ -1123,7 +1159,7 @@ It presents the discovered commands to the Human.
 
 The Human decides which commands belong to the Gate.
 
-The Orchestrator records every discovered command in `PROGRESS.md`.
+The Orchestrator records every discovered command in `GUIDE.md`.
 
 It records both included and excluded commands.
 
@@ -1139,7 +1175,7 @@ A validation command created by an Implementer automatically joins the Gate.
 
 The Implementer reports the new command in its handoff report.
 
-The Orchestrator adds it to `PROGRESS.md`.
+The Orchestrator adds it to `GUIDE.md`.
 
 A simple command rename replaces the old command automatically.
 
@@ -1245,7 +1281,7 @@ After delivery, the Orchestrator:
 
 1. records the final result in `PROGRESS.md`;
 2. stops the watchdog;
-3. archives and hides remaining child sessions;
+3. archives and hides remaining non-Orchestrator child sessions;
 4. presents the delivered commits and Gate result to the Human;
 5. asks whether to keep or delete the BWR workspace.
 
@@ -1275,13 +1311,13 @@ These omissions are part of the design.
 
 They keep the workflow understandable and repairable by ordinary agents.
 
-## 42. The next design layer
+## 42. The detailed design layer
 
 This document defines responsibilities, authority, state, and transitions.
 
-The next design layer must define each role contract.
+`BWR-DESIGN.md` defines the detailed contracts used by the skill.
 
-That work includes:
+It includes:
 
 - the exact mandate of each reviewer;
 - the common finding structure;
@@ -1290,9 +1326,9 @@ That work includes:
 - the meaning of every category;
 - required report sections;
 - role-specific acceptance criteria;
-- exact prompt text.
+- prompt architecture.
 
-Those details belong in role prompts and report contracts.
+Those details become role prompts and report contracts.
 
 They do not require a new validation script.
 
