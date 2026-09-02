@@ -363,8 +363,7 @@ BWR performs no report compaction. BWR uses this structure:
 │               ├── design-check-round-1.md
 │               ├── code-check-round-1.md
 │               ├── risk-filtered-design.md
-│               ├── risk-filtered-code.md
-│               └── failure.md
+│               └── risk-filtered-code.md
 └── product-review/
     └── lot-1/
         ├── risk-filtered/
@@ -379,6 +378,8 @@ BWR performs no report compaction. BWR uses this structure:
 ```
 
 The Orchestrator can add directories that preserve the same identity rules. No script validates this tree.
+
+The Implementer uses one `implementer.md` report for the complete Attempt. A failed Attempt records its failure information in that same report. BWR creates no separate failure report.
 
 ## 7. Common handoff protocol
 
@@ -1316,6 +1317,8 @@ Before commit, the committer:
 5. excludes the BWR workspace;
 6. preserves unrelated changes.
 
+After context compaction, a provider summary can describe the committer's earlier changes as pre-existing changes. The committer does not infer ownership from that wording. It inspects the diff and includes matching assigned work.
+
 The first Orchestrator determines commit style once. It uses this priority:
 
 1. project instructions such as `AGENTS.md` or `CLAUDE.md`;
@@ -1458,92 +1461,254 @@ It does not detect a specific report-acceptance state. Its reminder says that un
 
 ## 31. Prompt architecture
 
+`PROMPT-DESIGN.md` owns the authoring rules. This section owns the exact runtime inventory and include graph.
+
+### Runtime inventory
+
 The installed BWR skill uses:
 
 ```text
 <BWR_SKILL>/
 ├── SKILL.md
 ├── prompts/
+│   ├── entries/
+│   │   ├── orchestrator.md
+│   │   ├── watchdog.md
+│   │   ├── spec/
+│   │   │   ├── enumerator.md
+│   │   │   ├── verifier.md
+│   │   │   ├── feasibility.md
+│   │   │   ├── judge.md
+│   │   │   ├── ripple.md
+│   │   │   ├── scoped.md
+│   │   │   └── fixer.md
+│   │   ├── planning/
+│   │   │   └── completeness.md
+│   │   ├── construction/
+│   │   │   ├── implementer.md
+│   │   │   ├── design-checker.md
+│   │   │   ├── code-checker.md
+│   │   │   └── diagnostic.md
+│   │   ├── product-review/
+│   │   │   ├── unlooked.md
+│   │   │   ├── user.md
+│   │   │   ├── meaning.md
+│   │   │   ├── quality.md
+│   │   │   ├── coverage.md
+│   │   │   └── finding-verifier.md
+│   │   └── amendments/
+│   │       ├── reach.md
+│   │       ├── fixer.md
+│   │       └── consolidation.md
 │   ├── common/
+│   │   ├── workflow.md
 │   │   ├── child.md
-│   │   ├── parent.md
-│   │   ├── review.md
-│   │   ├── findings.md
-│   │   └── risk.md
-│   ├── orchestrator.md
-│   ├── spec/
-│   │   ├── enumerator.md
-│   │   ├── verifier.md
-│   │   ├── feasibility.md
-│   │   ├── judge.md
-│   │   ├── ripple.md
-│   │   ├── scoped.md
-│   │   └── fixer.md
-│   ├── amendment/
-│   │   ├── reach.md
-│   │   ├── fixer.md
-│   │   └── consolidation.md
-│   ├── planning/
-│   │   └── completeness.md
-│   ├── construction/
-│   │   ├── implementer.md
-│   │   ├── design-checker.md
-│   │   ├── code-checker.md
-│   │   └── diagnostic.md
-│   └── product-review/
-│       ├── common.md
-│       ├── unlooked.md
-│       ├── user.md
-│       ├── meaning.md
-│       ├── quality.md
-│       ├── coverage.md
-│       └── finding-verifier.md
+│   │   └── parent.md
+│   ├── roles/
+│   │   ├── orchestrator.md
+│   │   ├── watchdog.md
+│   │   ├── spec/
+│   │   │   ├── enumerator.md
+│   │   │   ├── verifier.md
+│   │   │   ├── feasibility.md
+│   │   │   ├── judge.md
+│   │   │   ├── ripple.md
+│   │   │   ├── scoped.md
+│   │   │   └── fixer.md
+│   │   ├── planning/
+│   │   │   └── completeness.md
+│   │   ├── construction/
+│   │   │   ├── implementer.md
+│   │   │   ├── design-checker.md
+│   │   │   ├── code-checker.md
+│   │   │   └── diagnostic.md
+│   │   ├── product-review/
+│   │   │   ├── unlooked.md
+│   │   │   ├── user.md
+│   │   │   ├── meaning.md
+│   │   │   ├── quality.md
+│   │   │   ├── coverage.md
+│   │   │   └── finding-verifier.md
+│   │   └── amendments/
+│   │       ├── reach.md
+│   │       ├── fixer.md
+│   │       └── consolidation.md
+│   ├── workflows/
+│   │   ├── startup/
+│   │   │   ├── initial.md
+│   │   │   ├── successor.md
+│   │   │   └── recovery.md
+│   │   ├── spec/
+│   │   │   ├── write.md
+│   │   │   ├── review-round.md
+│   │   │   ├── review.md
+│   │   │   ├── correction-loop.md
+│   │   │   ├── fix.md
+│   │   │   └── human-approval.md
+│   │   ├── planning/
+│   │   │   ├── write.md
+│   │   │   ├── validate-and-commit.md
+│   │   │   └── completeness-check.md
+│   │   ├── construction/
+│   │   │   ├── attempt.md
+│   │   │   ├── design.md
+│   │   │   ├── design-review-loop.md
+│   │   │   ├── design-check.md
+│   │   │   ├── implement.md
+│   │   │   ├── code-review-loop.md
+│   │   │   ├── code-check.md
+│   │   │   ├── validate-and-deliver.md
+│   │   │   ├── report-failure.md
+│   │   │   ├── diagnose-failures.md
+│   │   │   └── restart-after-failure.md
+│   │   ├── product-review/
+│   │   │   ├── pass.md
+│   │   │   ├── review.md
+│   │   │   ├── settle-lens.md
+│   │   │   ├── verify-findings.md
+│   │   │   └── route-outcome.md
+│   │   ├── amendments/
+│   │   │   ├── write.md
+│   │   │   ├── reach-loop.md
+│   │   │   ├── reach-review.md
+│   │   │   ├── fix-amendment.md
+│   │   │   ├── update-spec.md
+│   │   │   ├── consolidation-loop.md
+│   │   │   ├── consolidation-check.md
+│   │   │   └── finalize.md
+│   │   └── delivery/
+│   │       ├── close-lot.md
+│   │       ├── handoff-successor.md
+│   │       └── close-run.md
+│   ├── contracts/
+│   │   ├── session/
+│   │   │   ├── handoff.md
+│   │   │   ├── watchdog-session.md
+│   │   │   └── orchestrator-handoff.md
+│   │   ├── review/
+│   │   │   ├── report.md
+│   │   │   ├── finding.md
+│   │   │   └── private-history.md
+│   │   ├── spec/
+│   │   │   ├── current-spec.md
+│   │   │   └── fixer-report.md
+│   │   ├── amendments/
+│   │   │   ├── amendment.md
+│   │   │   └── fixer-report.md
+│   │   ├── planning/
+│   │   │   ├── lot-plan.md
+│   │   │   ├── sub-lot-plan.md
+│   │   │   └── correction-plan.md
+│   │   ├── construction/
+│   │   │   ├── task-design.md
+│   │   │   ├── implementer-report.md
+│   │   │   └── diagnostic-report.md
+│   │   ├── product-review/
+│   │   │   └── verification-report.md
+│   │   └── bwr-workspace/
+│   │       ├── guide.md
+│   │       └── progress.md
+│   └── references/
+│       ├── review/
+│       │   ├── severity.md
+│       │   ├── probability.md
+│       │   ├── frozen-subject.md
+│       │   └── concurrency.md
+│       ├── git/
+│       │   ├── commit.md
+│       │   └── failed-attempt.md
+│       ├── gate/
+│       │   ├── discovery.md
+│       │   ├── execution.md
+│       │   └── changes.md
+│       ├── sessions/
+│       │   ├── annotations.md
+│       │   ├── provider-groups.md
+│       │   └── presets.md
+│       └── bwr-workspace/
+│           └── reports.md
 └── scripts/
     └── watchdog.py
 ```
 
-`SKILL.md` defines entry, authority, workflow transitions, startup, and closure. Common prompts define reusable behavior.
+BWR creates no empty runtime directories. Every listed file has a defined reader.
 
-Every child session type has one entry prompt file. The entry file contains its role-specific instructions. It includes every applicable fixed common prompt with TwiCC `@@` markers.
+`SKILL.md` is a minimal Router. It tells an initial Orchestrator to read the applicable Common prompts and `prompts/roles/orchestrator.md`. It contains no phase procedure, report format, review rubric, Gate detail, or full transition table.
 
-For example, the Implementer entry file starts with:
+The Watchdog is a muted `claude_code` session with the `Minimal` preset. `prompts/roles/watchdog.md` contains only its runtime task. `prompts/contracts/session/watchdog-session.md` owns its launch configuration. `scripts/watchdog.py` is the only BWR script.
+
+### Entry composers and Role prompts
+
+Each session Role has one fixed entry composer under `prompts/entries/`. The composer contains only `@@` markers for applicable Common prompts and the pure Role prompt.
+
+Common prompts and Role prompts contain no `@@` markers. TwiCC can include them through a composer. An agent can also read them directly from the filesystem.
+
+Workflows, Contracts, and References are on-demand files. An agent reads them when its current Workflow requires them. Routing to them uses normal read instructions instead of `@@` markers.
+
+The fixed include map is:
+
+| Entry composer | Fixed common prompts |
+|---|---|
+| Orchestrator | `workflow.md`, `parent.md` |
+| Implementer | `workflow.md`, `child.md`, `parent.md` |
+| Watchdog | `workflow.md`, `child.md` |
+| Every other Role | `workflow.md`, `child.md` |
+
+The initial, successor, and Recovery Orchestrators use the same pure Role file. No Orchestrator loads `child.md`. The successor startup Workflow owns acceptance by the old Orchestrator.
+
+An initial or manually assigned Role reads its applicable Common prompts and pure Role prompt directly. A session created through TwiCC receives the corresponding entry composer.
+
+For example, `prompts/entries/construction/implementer.md` contains:
 
 ```md
-@@../common/child.md
-@@../common/parent.md
-
-# Implementer
-
-...
+@@../../common/workflow.md
+@@../../common/child.md
+@@../../common/parent.md
+@@../../roles/construction/implementer.md
 ```
 
-Only `./` and `../` markers are relative. TwiCC resolves each relative marker against the directory of the file that contains it. When file A includes file B, markers inside file B resolve against file B.
+Only entry composers contain these nested markers. TwiCC resolves each relative path from the composer that contains it.
 
-Only the initial entry marker needs an absolute path. The parent constructs a new child prompt in this order:
+### Session prompt composition
+
+The parent sends one fixed Role entry, optional Human instructions, then the dynamic assignment. The two entry markers must contain resolved absolute paths before the parent creates the session.
+
+A runtime prompt can look like:
 
 ```text
-@@/absolute/bwr-skill/prompts/construction/implementer.md
-@@/absolute/bwr-workspace/ADDITIONAL-INSTRUCTIONS.md
+@@/opt/bwr/prompts/entries/construction/implementer.md
+@@/srv/project/bwr_workspace/feature-a/ADDITIONAL-INSTRUCTIONS.md
 
-BWR_SKILL: /absolute/bwr-skill
-BWR_WORKSPACE: /absolute/bwr-workspace
-Lot: LOT.3
-...
+BWR_SKILL: /opt/bwr
+BWR_WORKSPACE: /srv/project/bwr_workspace/feature-a
+LOT: lot-3
+TASK: task-2
+ATTEMPT: attempt-1
 ```
 
-The first marker selects the fixed entry prompt. The second marker includes the optional Human instructions. TwiCC removes that line when `ADDITIONAL-INSTRUCTIONS.md` does not exist.
+The example paths are illustrative. At runtime, the parent sends the real absolute paths. TwiCC does not substitute `BWR_SKILL`, `BWR_WORKSPACE`, shell variables, or angle-bracket placeholders inside an `@@` marker.
 
-The remaining text is the dynamic assignment. The parent supplies the real absolute paths. The paths in this example are illustrative.
+The first marker selects the fixed entry composer. The second marker includes the optional Human instructions. TwiCC removes that marker line when `ADDITIONAL-INSTRUCTIONS.md` does not exist.
 
-TwiCC expands all markers before the child receives the prompt. Expansion is recursive, with a maximum depth of five levels and a final size limit of 500 KB. BWR keeps its inclusion graph shallow.
+The dynamic suffix repeats the resolved `BWR_SKILL` and `BWR_WORKSPACE` values because the session needs them for later on-demand reads. It also supplies the current assignment values and exact artifact paths.
 
-All fixed prompt files are required BWR files. `ADDITIONAL-INSTRUCTIONS.md` is the only intentionally optional include.
+TwiCC expands all markers before the session receives the prompt. Expansion is recursive, with a maximum depth of five levels and a final size limit of 500 KB. BWR keeps its inclusion graph shallow.
 
-Only parent-capable roles include `parent.md`. All child sessions include `child.md`. Review roles include applicable common review, finding, and risk prompts.
+Fixed Common content precedes fixed Role content. Optional Human instructions follow the fixed entry. Dynamic values come last. This order supports provider prompt caching.
 
-Fixed common content therefore precedes fixed role content. Optional Human instructions follow the fixed entry prompt. Dynamic assignments and paths come last.
+The parent sends the entry-composer marker without reading, copying, or repeating the fixed content in its own context. Later Workflows, Contracts, and References use explicit on-demand reads. They do not use `@@`.
 
-This order supports provider prompt caching. The parent sends the entry marker without reading, copying, or repeating the fixed prompt content in its own context.
+### Shared Contract ownership
+
+`prompts/contracts/review/report.md` owns the common `CLEAN | FINDINGS | BLOCKED` Review Report. Spec, Reach, Consolidation, Plan completeness, Design, Code, and Product reviews use it. BWR creates no domain copy of that Contract.
+
+`prompts/contracts/review/finding.md` owns the public Finding shape. `prompts/contracts/review/private-history.md` owns filtered private observations. `prompts/references/review/probability.md` remains Reviewer-only. A Finding verifier never loads it.
+
+One `prompts/contracts/session/handoff.md` owns the common Report and return-message interface. Specialized Contracts extend the useful Report content without copying the common Handoff format.
+
+One Implementer Report covers one complete Attempt. The same Contract covers `READY`, `BLOCKED`, and `FAILED`. BWR has no separate failure Report Contract.
+
+`prompts/contracts/spec/current-spec.md` also validates an Updated Spec. BWR creates no duplicate Updated Spec Contract.
 
 ## 32. Self-review
 

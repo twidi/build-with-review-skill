@@ -4,7 +4,7 @@
 
 This document defines how BWR instructions are divided, loaded, and written.
 
-It applies to `SKILL.md`, prompts, workflows, contracts, and references. It does not define the final file inventory.
+It applies to `SKILL.md`, common prompts, Roles, Workflows, Contracts, and References. `BWR-DESIGN.md` defines the exact runtime inventory.
 
 > A file contains only the context needed at the same time.
 
@@ -20,12 +20,12 @@ This content includes only applicable permanent context:
 
 - role identity and authority;
 - parent or child behavior;
-- assigned inputs and completion responsibility;
+- input and completion responsibilities;
 - the short workflow map.
 
-One entry prompt composes the fixed files. The parent sends one absolute `@@` marker for that entry prompt.
+One entry composer composes the fixed files. The parent sends one absolute `@@` marker for that composer.
 
-Nested fixed includes use paths relative to their containing file. See `BWR-DESIGN.md` for the TwiCC syntax and limits.
+The entry composer contains only fixed `@@` includes. Its nested paths are relative to the composer. See `BWR-DESIGN.md` for the exact inventory, syntax, and limits.
 
 ### On-demand loading
 
@@ -34,7 +34,7 @@ Use an explicit path for details needed only during a later phase.
 ```md
 Before starting Code Review, read and execute:
 
-<BWR_SKILL>/prompts/construction/code-review.md
+<BWR_SKILL>/prompts/workflows/construction/code-review-loop.md
 ```
 
 Do not use `@@` for later reads.
@@ -104,11 +104,20 @@ It contains only:
 It does not contain phase procedures, report formats, rubrics, Gate details, or complete transitions.
 
 ```md
-If you are the Orchestrator, read and execute:
+If you are the Orchestrator, read:
 
-<BWR_SKILL>/prompts/orchestrator.md
+<BWR_SKILL>/prompts/common/workflow.md
+<BWR_SKILL>/prompts/common/parent.md
 
-If your assignment gives another BWR role, execute its assigned entry prompt.
+Then read and execute:
+
+<BWR_SKILL>/prompts/roles/orchestrator.md
+
+If your assignment gives another BWR Role, read `workflow.md` and `child.md`.
+
+If that Role creates child sessions, also read `parent.md`.
+
+Then read and execute the assigned pure Role prompt.
 ```
 
 ### Role files
@@ -123,6 +132,8 @@ A Role contains only facts that remain true for the full session:
 - short workflow map;
 - first Workflow.
 
+A Role file contains no `@@` marker. An entry composer can include it. `SKILL.md` can also tell an agent to read it directly.
+
 A Role states the general completion outcome. A Contract owns its exact shape.
 
 ```md
@@ -132,7 +143,7 @@ Deliver the implementation result through the Handoff workflow.
 
 Before handoff, read and execute:
 
-<BWR_SKILL>/prompts/construction/handoff.md
+<BWR_SKILL>/prompts/workflows/construction/validate-and-deliver.md
 ```
 
 ## 6. Workflows and routing
@@ -171,7 +182,7 @@ These verbs have different meanings:
 - `Read`: load a file into context;
 - `Execute`: follow a Workflow until an exit.
 
-Reading a Workflow is preparation, not completion. One shared runtime prompt owns this invariant. Every applicable Role includes it.
+Reading a Workflow is preparation, not completion. `common/workflow.md` owns this invariant. Every entry composer includes it. A manual Role load reads it first.
 
 Use explicit routing:
 
@@ -180,7 +191,7 @@ Enter the Handoff phase.
 
 Read and execute:
 
-<BWR_SKILL>/prompts/construction/handoff.md
+<BWR_SKILL>/prompts/workflows/construction/validate-and-deliver.md
 
 Continue until that workflow reaches an exit condition.
 ```
@@ -198,36 +209,38 @@ A Contract describes one valid shared interface. The producer and consumer read 
 The Contract uses neutral language. Their Workflows define the actions.
 
 ```md
-# Implementer handoff contract
+# Session Handoff Contract
 
 A valid handoff contains:
 
-1. an implementation Report;
+1. the assigned Report when required;
 2. a return message.
 
-The Report contains completed work, changed files, decisions, the final Gate result, and blockers.
-
-The return message contains the result, Report path, final Gate status, and any blocker.
+The return message contains the result, Report path, short summary, and expected parent action.
 ```
 
 A Contract requires useful information. It does not require machine-oriented structure without a real machine consumer.
 
 Do not add JSON, checksums, proof tokens, empty fields, or parser-oriented syntax.
 
-One Contract covers a Report and its return message by default. Split them only for different consumers or lifecycles.
+One Handoff Contract owns the common Report and return-message interface. A specialized Report Contract can add content required by its producer and consumer. It does not repeat the return-message format.
+
+All ordinary review roles use one common Review Report Contract. Role-specific mandates do not create copies of the same output shape.
+
+One Implementer Report covers the complete Attempt. A failed Attempt adds its failure information to that Report. It does not create a second failure Report.
 
 ### References and audience
 
 A shared file contains only information shared by every reader.
 
-Do not mix transmitted results with private producer reasoning. For example, reviewer likelihood remains Reviewer-only.
+Do not mix transmitted results with private producer reasoning. Probability remains Reviewer-only.
 
 ```text
-references/review/reviewer-likelihood.md
+references/review/probability.md
     Reviewer only
 
-contracts/reviewer-verifier-handoff.md
-    Reviewer and Verifier
+contracts/review/finding.md
+    Reviewer, consumer, and applicable fixer or verifier
 ```
 
 Sharing a file means sharing all its content.
@@ -236,9 +249,9 @@ Sharing a file means sharing all its content.
 
 Fixed content precedes all dynamic values.
 
-The child prompt uses this order:
+A created session prompt uses this order:
 
-1. fixed entry prompt through `@@`;
+1. fixed entry composer through `@@`;
 2. optional Human instructions through `@@`;
 3. dynamic assignment.
 
@@ -251,6 +264,20 @@ The dynamic suffix contains only:
 - exceptional corrections or limits.
 
 It does not repeat Role, Workflow, or Contract rules. This ordering supports provider prompt caching.
+
+The parent resolves every top-level `@@` path before it creates the session. TwiCC does not replace variables or placeholders inside an `@@` marker.
+
+```text
+@@/opt/bwr/prompts/entries/construction/implementer.md
+@@/srv/project/bwr_workspace/feature-a/ADDITIONAL-INSTRUCTIONS.md
+
+BWR_SKILL: /opt/bwr
+BWR_WORKSPACE: /srv/project/bwr_workspace/feature-a
+```
+
+The paths are illustrative. A runtime prompt contains real absolute paths. Relative `@@` markers exist only inside entry composers.
+
+Common prompts and Roles can be included or read manually. They contain no `@@`. Workflows, Contracts, and References are read on demand and also contain no `@@`.
 
 ## 9. Writing language
 
@@ -332,7 +359,7 @@ Describe the required result instead of one provider interface. Prefer `Create t
 
 Use exact syntax only when syntax is part of the BWR contract.
 
-Examples include `@@`, annotation names, `LOT.1.10`, assigned paths, and Gate commands.
+Examples include `@@`, annotation names, `lot-1.10`, assigned paths, and Gate commands.
 
 Load the applicable TwiCC skill when interface details are required.
 
@@ -402,4 +429,4 @@ This document guides BWR authors. Runtime sessions do not load it.
 
 Only behavior-changing rules belong in runtime files. Authoring advice stays here.
 
-The next design step defines the exact file inventory, include graph, audiences, owner responsibilities, and on-demand routes.
+`BWR-DESIGN.md` defines the exact file inventory, include graph, audiences, owner responsibilities, and on-demand routes.
