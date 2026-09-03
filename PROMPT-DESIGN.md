@@ -21,7 +21,8 @@ This content includes only applicable permanent context:
 - role identity and authority;
 - parent or child behavior;
 - input and completion responsibilities;
-- the short workflow map.
+- the short workflow map;
+- an immediate Startup Workflow when the entry has one fixed startup route.
 
 One entry composer composes the fixed files. The parent sends one absolute `@@` marker for that composer.
 
@@ -32,14 +33,22 @@ The entry composer contains only fixed `@@` includes. Its nested paths are relat
 Use an explicit path for details needed only during a later phase.
 
 ```md
-Before starting Code Review, read and execute:
+Before starting Code Review:
 
-<BWR_SKILL>/prompts/workflows/construction/code-review-loop.md
+Read once; reread as needed: <BWR_SKILL>/prompts/workflows/construction/code-review-loop.md
+
+Execute that Workflow.
 ```
 
 Do not use `@@` for later reads.
 
 Reading adds context. It does not remove earlier content. This model reduces initial context and delays later context cost.
+
+For a reusable fixed file, use `Read once; reread as needed:` followed by its path.
+
+This means: read it before first use. Later, reread it only when its exact content is no longer clear.
+
+For a mutable file, use the normal `Read` instruction at the exact point that requires its current content.
 
 ## 3. File model and ownership
 
@@ -54,6 +63,46 @@ Each file has one type, one audience, and one function.
 | Reference | Define consultable information | Terms, categories, rubrics |
 
 A common prompt is a shared fixed fragment. It contains only permanent rules needed immediately by every reader.
+
+A runtime Reference contains general rules shared by all its readers.
+
+It does not catalogue case-specific values that most readers do not need.
+
+The applicable Role or Workflow owns exact launch annotations, Report paths, and other case-specific values.
+
+### General concept and local application
+
+A file that defines a reusable concept contains only its invariant meaning and operation.
+
+It does not contain the different procedures for every Role or Workflow that uses the concept.
+
+Each applicable Role or Workflow:
+
+1. routes to the general file;
+2. states how the concept applies in that exact case;
+3. provides only the values and procedure required for that case.
+
+For example, the Review Concurrency Reference defines a limit and the general counting rule.
+
+The Spec Review Workflow defines what occupies a place during a Spec full round.
+
+The Product Review Workflow separately defines what occupies and releases a Product lens-chain place.
+
+```md
+Read once; reread as needed: <BWR_SKILL>/prompts/references/review/concurrency.md
+
+For this Workflow, one Product lens chain occupies one review place until verification settles.
+```
+
+When two phases apply one concept differently, keep only their common invariant in the general file.
+
+Put each difference in the phase that uses it.
+
+Do not enumerate excluded cases when a positive applicability statement already gives the complete scope.
+
+Do not introduce an unknown action only to prohibit it.
+
+Use a negative instruction only when the action is a credible consequence of the agent's role, inputs, or normal tools.
 
 Each rule has one owner file:
 
@@ -130,7 +179,7 @@ A Role contains only facts that remain true for the full session:
 - assigned inputs;
 - general completion responsibility;
 - short workflow map;
-- first Workflow.
+- first Workflow when its caller does not supply that Workflow.
 
 A Role file contains no `@@` marker. An entry composer can include it. `SKILL.md` can also tell an agent to read it directly.
 
@@ -141,9 +190,11 @@ A Role states the general completion outcome. A Contract owns its exact shape.
 
 Deliver the implementation result through the Handoff workflow.
 
-Before handoff, read and execute:
+Before handoff:
 
-<BWR_SKILL>/prompts/workflows/construction/validate-and-deliver.md
+Read once; reread as needed: <BWR_SKILL>/prompts/workflows/construction/validate-and-deliver.md
+
+Execute that Workflow.
 ```
 
 ## 6. Workflows and routing
@@ -189,11 +240,9 @@ Use explicit routing:
 ```md
 Enter the Handoff phase.
 
-Read and execute:
+Read once; reread as needed: <BWR_SKILL>/prompts/workflows/construction/validate-and-deliver.md
 
-<BWR_SKILL>/prompts/workflows/construction/validate-and-deliver.md
-
-Continue until that workflow reaches an exit condition.
+Execute that Workflow until it reaches an exit condition.
 ```
 
 The Role provides a short global map. Each Workflow provides only its local exits.
@@ -213,7 +262,7 @@ The Contract uses neutral language. Their Workflows define the actions.
 
 A valid handoff contains:
 
-1. the assigned Report when required;
+1. the assigned Report;
 2. a return message.
 
 The return message contains the result, Report path, short summary, and expected parent action.
@@ -236,8 +285,8 @@ A shared file contains only information shared by every reader.
 Do not mix transmitted results with private producer reasoning. Probability remains Reviewer-only.
 
 ```text
-references/review/probability.md
-    Reviewer only
+references/review/risk-filtering.md
+    Applicable Reviewer only
 
 contracts/review/finding.md
     Reviewer, consumer, and applicable fixer or verifier
@@ -277,7 +326,11 @@ BWR_WORKSPACE: /srv/project/bwr_workspace/feature-a
 
 The paths are illustrative. A runtime prompt contains real absolute paths. Relative `@@` markers exist only inside entry composers.
 
-Common prompts and Roles can be included or read manually. They contain no `@@`. Workflows, Contracts, and References are read on demand and also contain no `@@`.
+Common prompts and Roles can be included or read manually. They contain no `@@`.
+
+Workflows, Contracts, and References contain no `@@`. They are read on demand after startup.
+
+A created Orchestrator entry can include its immediate Startup Workflow.
 
 ## 9. Writing language
 

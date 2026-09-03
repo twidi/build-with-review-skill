@@ -383,23 +383,32 @@ The Implementer uses one `implementer.md` report for the complete Attempt. A fai
 
 ## 7. Common handoff protocol
 
-A child writes its report before its handoff. It then sends this concise message to its parent:
+Every child writes its assigned report before its handoff. It then sends this concise message to its parent:
 
 ```text
 RESULT: READY | BLOCKED | FAILED
-REPORT: <assigned path, or none>
+REPORT: <assigned absolute path>
 SUMMARY: <one short result>
-PARENT ACTION: <next expected action>
+PARENT ACTION: <next expected action, or none>
 ```
 
-The parent accepts visible completeness only. It checks that:
+The parent always checks that:
 
-- the announced result exists;
+- the message announces one valid result;
 - the report path matches the assignment;
-- the report exists when required;
-- the report visibly answers the mandate.
+- the report exists at that path.
 
-The parent does not verify hidden work history. It does not parse the report. It does not require a checksum.
+The current Workflow explicitly tells the parent to read or not read the report.
+
+A routing parent does not read it. It passes the exact path to the next child.
+
+The parent reads it when it must act on details, make a detailed decision, inform the Human, or analyze an exceptional result.
+
+When it reads, it checks visible completeness only. It does not repeat the assignment or verify the report's claims.
+
+The parent does not reconstruct hidden work history.
+
+The parent does not parse the report or require a checksum.
 
 `READY` means that the current deliverable is ready for routing. The child can remain `idle` while its assignment can receive a follow-up. Final acceptance changes the status to `done`.
 
@@ -1123,9 +1132,11 @@ A Gate failure first returns to correction in the same Attempt.
 
 ## 21. Failed Attempt Git workflow
 
-If a failed Attempt has useful tracked work, the Implementer creates a preservation commit. That commit can include the Design, tests, and code.
+If a failed Attempt has assigned tracked changes, the Implementer creates a preservation commit. It can include the Design, tests, and code.
 
-If nothing useful exists, it creates no empty commit. The Orchestrator never resets history. The next commit reverts the failed Attempt and can include the revised plan.
+If no assigned tracked change exists, it creates no empty commit. The Orchestrator never resets history.
+
+The next commit reverts the failed Attempt and can include the revised plan.
 
 The history becomes:
 
@@ -1272,7 +1283,11 @@ Gate groups run in order. Commands inside one parallel group start together. The
 
 A failed parallel command does not cancel siblings that already run. Every included command must pass. Excluded commands remain visible with their reasons.
 
-The final Gate record lists every included command and its result. The final Task Gate validates all accumulated work.
+The final Gate record gives a concise command-result summary. It does not copy raw output.
+
+A corrected Gate failure does not remain in the final Report. An unresolved failure keeps a concise diagnosis and useful evidence.
+
+The final Task Gate validates all accumulated work.
 
 Product Review needs no duplicate Gate when tracked files remain unchanged after the final Task Gate.
 
@@ -1503,6 +1518,9 @@ The installed BWR skill uses:
 │   ├── common/
 │   │   ├── workflow.md
 │   │   ├── child.md
+│   │   ├── reviewer.md
+│   │   ├── product-reviewer.md
+│   │   ├── fixer.md
 │   │   └── parent.md
 │   ├── roles/
 │   │   ├── orchestrator.md
@@ -1560,6 +1578,7 @@ The installed BWR skill uses:
 │   │   │   ├── validate-and-deliver.md
 │   │   │   ├── report-failure.md
 │   │   │   ├── diagnose-failures.md
+│   │   │   ├── diagnostic.md
 │   │   │   └── restart-after-failure.md
 │   │   ├── product-review/
 │   │   │   ├── pass.md
@@ -1583,19 +1602,18 @@ The installed BWR skill uses:
 │   ├── contracts/
 │   │   ├── session/
 │   │   │   ├── handoff.md
-│   │   │   ├── watchdog-session.md
 │   │   │   └── orchestrator-handoff.md
 │   │   ├── review/
 │   │   │   ├── report.md
-│   │   │   ├── finding.md
-│   │   │   └── private-history.md
+│   │   │   └── finding.md
 │   │   ├── spec/
-│   │   │   ├── current-spec.md
-│   │   │   └── fixer-report.md
+│   │   │   └── current-spec.md
 │   │   ├── amendments/
-│   │   │   ├── amendment.md
+│   │   │   └── amendment.md
+│   │   ├── correction/
 │   │   │   └── fixer-report.md
 │   │   ├── planning/
+│   │   │   ├── plan.md
 │   │   │   ├── lot-plan.md
 │   │   │   ├── sub-lot-plan.md
 │   │   │   └── correction-plan.md
@@ -1609,22 +1627,20 @@ The installed BWR skill uses:
 │   │       ├── guide.md
 │   │       └── progress.md
 │   └── references/
+│       ├── construction/
+│       │   └── checker-loop.md
 │       ├── review/
 │       │   ├── severity.md
-│       │   ├── probability.md
+│       │   ├── risk-filtering.md
 │       │   ├── frozen-subject.md
 │       │   └── concurrency.md
 │       ├── git/
-│       │   ├── commit.md
-│       │   └── failed-attempt.md
-│       ├── gate/
-│       │   ├── discovery.md
-│       │   ├── execution.md
-│       │   └── changes.md
+│       │   └── commit.md
 │       ├── sessions/
 │       │   ├── annotations.md
 │       │   ├── provider-groups.md
-│       │   └── presets.md
+│       │   ├── presets.md
+│       │   └── watchdog.md
 │       └── bwr-workspace/
 │           └── reports.md
 └── scripts/
@@ -1633,28 +1649,37 @@ The installed BWR skill uses:
 
 BWR creates no empty runtime directories. Every listed file has a defined reader.
 
-`SKILL.md` is a minimal Router. It tells an initial Orchestrator to read the applicable Common prompts and `prompts/roles/orchestrator.md`. It contains no phase procedure, report format, review rubric, Gate detail, or full transition table.
+`SKILL.md` is a minimal Router. It loads an Initial or Recovery Orchestrator and selects its Startup Workflow. It contains no phase procedure, report format, review rubric, Gate detail, or full transition table.
 
-The Watchdog is a muted `claude_code` session with the `Minimal` preset. `prompts/roles/watchdog.md` contains only its runtime task. `prompts/contracts/session/watchdog-session.md` owns its launch configuration. `scripts/watchdog.py` is the only BWR script.
+The Watchdog is a muted `claude_code` session with the `Minimal` preset. `prompts/roles/watchdog.md` contains its self-contained runtime task. Each applicable Startup Workflow owns its launch procedure. `scripts/watchdog.py` is the only BWR script.
 
 ### Entry composers and Role prompts
 
-Each session Role has one fixed entry composer under `prompts/entries/`. The composer contains only `@@` markers for applicable Common prompts and the pure Role prompt.
+Each session Role has one fixed entry composer under `prompts/entries/`. The composer contains only fixed `@@` markers.
+
+It includes applicable Common prompts and the pure Role prompt. The successor Orchestrator entry also includes its immediate Startup Workflow.
 
 Common prompts and Role prompts contain no `@@` markers. TwiCC can include them through a composer. An agent can also read them directly from the filesystem.
 
-Workflows, Contracts, and References are on-demand files. An agent reads them when its current Workflow requires them. Routing to them uses normal read instructions instead of `@@` markers.
+Workflows, Contracts, and References are on-demand files after startup. An agent reads them when its current Workflow requires them.
+
+The successor entry includes its immediate Startup Workflow. Later routing uses normal read instructions instead of `@@` markers.
 
 The fixed include map is:
 
-| Entry composer | Fixed common prompts |
+| Entry composer | Fixed includes |
 |---|---|
-| Orchestrator | `workflow.md`, `parent.md` |
+| Orchestrator | `workflow.md`, `parent.md`; then `startup/successor.md` |
 | Implementer | `workflow.md`, `child.md`, `parent.md` |
-| Watchdog | `workflow.md`, `child.md` |
+| Watchdog | None; its Role prompt is self-contained |
+| Product reviewer | `workflow.md`, `child.md`, `reviewer.md`, `product-reviewer.md` |
+| Ordinary reviewer or checker | `workflow.md`, `child.md`, `reviewer.md` |
+| Spec fixer or Amendment fixer | `workflow.md`, `child.md`, `fixer.md` |
 | Every other Role | `workflow.md`, `child.md` |
 
-The initial, successor, and Recovery Orchestrators use the same pure Role file. No Orchestrator loads `child.md`. The successor startup Workflow owns acceptance by the old Orchestrator.
+The Initial, successor, and Recovery Orchestrators use the same pure Role file. No Orchestrator loads `child.md`.
+
+`SKILL.md` selects the Initial or Recovery Startup Workflow. The successor entry includes `startup/successor.md`.
 
 An initial or manually assigned Role reads its applicable Common prompts and pure Role prompt directly. A session created through TwiCC receives the corresponding entry composer.
 
@@ -1702,7 +1727,7 @@ The parent sends the entry-composer marker without reading, copying, or repeatin
 
 `prompts/contracts/review/report.md` owns the common `CLEAN | FINDINGS | BLOCKED` Review Report. Spec, Reach, Consolidation, Plan completeness, Design, Code, and Product reviews use it. BWR creates no domain copy of that Contract.
 
-`prompts/contracts/review/finding.md` owns the public Finding shape. `prompts/contracts/review/private-history.md` owns filtered private observations. `prompts/references/review/probability.md` remains Reviewer-only. A Finding verifier never loads it.
+`prompts/contracts/review/finding.md` owns the public Finding shape. `prompts/references/review/risk-filtering.md` owns Probability, admission, and filtered private observations. Only an applicable Reviewer loads it. A Finding verifier never loads it.
 
 One `prompts/contracts/session/handoff.md` owns the common Report and return-message interface. Specialized Contracts extend the useful Report content without copying the common Handoff format.
 

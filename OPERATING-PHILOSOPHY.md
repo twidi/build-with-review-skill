@@ -354,23 +354,28 @@ The common handoff format is:
 
 ```text
 RESULT: READY | BLOCKED | FAILED
-REPORT: <assigned path, or none>
+REPORT: <assigned absolute path>
 SUMMARY: <one short result>
-PARENT ACTION: <next expected action>
+PARENT ACTION: <next expected action, or none>
 ```
 
 The child sends this handoff through a direct TwiCC message.
 
 The parent accepts a handoff when:
 
-- the child announces a result;
+- the child announces one valid result;
 - the child returns the exact assigned report path;
-- the report file exists when the assignment requires one;
-- the report visibly answers the mandate.
+- the report exists at that path.
 
-The parent checks visible completeness.
+The active Workflow explicitly tells the parent to read or not read the report.
 
-It does not parse the report with a validation script.
+A routing parent does not read it. It passes the exact path to the next child.
+
+The parent reads it when it must act on details, make a detailed decision, inform the Human, or analyze an exceptional result.
+
+When it reads, it checks visible completeness only.
+
+It does not repeat the assignment, verify claims, reconstruct hidden work history, or use a validation script.
 
 `READY` is the child's claim that its current deliverable is ready for the parent.
 
@@ -1008,13 +1013,13 @@ Role prompts live in the installed BWR skill.
 
 BWR does not copy them into the BWR workspace.
 
-Every child session type has one entry prompt file.
+Every session type created by BWR has one entry prompt file.
 
 The entry file contains its role instructions.
 
 It includes its applicable common prompts with TwiCC `@@` markers.
 
-The parent starts the child prompt with one absolute `@@` marker for this entry file.
+The creator starts the session prompt with one absolute `@@` marker for this entry file.
 
 TwiCC expands the complete fixed prompt before the child receives it.
 
@@ -1029,6 +1034,8 @@ Nested files therefore resolve their own relative markers from their own directo
 Fixed common content comes first.
 
 Fixed role content comes next.
+
+An immediate fixed Startup Workflow follows when the entry has one startup route.
 
 Optional Human additional instructions follow the fixed content.
 
@@ -1070,13 +1077,23 @@ BWR has only this one additional instruction file.
 
 It does not recreate a per-role additional prompt system.
 
-The entry prompt selected for the initial Orchestrator composes the parent prompt and its role prompt.
+An Initial or Recovery Orchestrator starts directly through `SKILL.md`. The skill routes it to the applicable Startup Workflow.
 
-The entry prompt selected for a successor Orchestrator composes the child prompt, parent prompt, and its role prompt.
+A current Orchestrator creates its successor with the Orchestrator entry prompt.
+
+That entry composes the common Workflow, parent, Orchestrator Role, and Successor Startup Workflow.
 
 The Implementer entry prompt composes the child prompt, parent prompt, and Implementer prompt.
 
+Product reviewer entries compose the child prompt, reviewer prompt, product reviewer prompt, and their lens Role prompt.
+
+Other ordinary reviewer and checker entries compose the child prompt, reviewer prompt, and their role prompt.
+
+Spec fixer and Amendment fixer entries compose the child prompt, fixer prompt, and their role prompt.
+
 Other actor entry prompts compose the child prompt and their role prompt.
+
+The Watchdog entry contains only its self-contained Watchdog prompt.
 
 ## 32. The BWR workspace lifecycle
 
