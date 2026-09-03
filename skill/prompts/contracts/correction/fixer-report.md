@@ -6,6 +6,7 @@ It contains:
 
 - the current stage and corrected target path;
 - every processed reviewer Report path;
+- every processed Human correction or decision, when applicable;
 - one disposition for every input Finding;
 - every self-detected correction;
 - the touched locations and checked relevant dependents;
@@ -22,6 +23,8 @@ Use one disposition:
 - `DECLINED`: state the contradictory evidence.
 
 Every input Finding appears exactly once.
+
+For each processed Human correction or decision, state its applied result and location.
 
 ## Self-detected corrections
 

@@ -56,7 +56,11 @@ For `CLEAN`, do not read the checker Report. Retire the checker.
 
 For `FINDINGS`, read the checker Report and retire the checker. Pass its path back to the Plan write Workflow.
 
-For `BLOCKED` or `FAILED`, read the available Report. Resolve the cause before continuing.
+For `BLOCKED`, read the available Report. Resolve the cause and follow up with the same checker.
+
+For `FAILED`, read the available Report. When the unchanged check remains executable, use the failed-child replacement procedure for the same assignment and Report path.
+
+Otherwise, stop and retire the failed checker. Present the assignment failure to the Human.
 
 ## Commit a clean Plan
 
@@ -66,16 +70,20 @@ Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/references/git/commit.md`.
 
-Commit only the clean Plan through that procedure.
+Commit the clean Plan through that procedure.
+
+When the invoking Workflow transferred an exact pending revert into this commit scope, include that revert in the same commit.
+
+Commit no other working-tree change.
 
 Confirm the created commit and working-tree state.
 
-Update `PROGRESS.md` with the accepted Plan, its commit, and its first Task.
+Update `PROGRESS.md` with the accepted Plan, its commit, and its earliest incomplete or revised Task.
 
 Set your `bwr.phase` annotation to `construction`. Keep the applicable Lot and Correction Round annotations.
 
 ## Exit
 
 - `FINDINGS` → read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md` with the checker Report as a correction source.
-- `CLEAN` and committed Plan → read and execute `<BWR_SKILL>/prompts/workflows/construction/attempt.md` for the first Task.
+- `CLEAN` and committed Plan → read and execute `<BWR_SKILL>/prompts/workflows/construction/attempt.md` for the earliest incomplete or revised Task.
 - Unresolved blocker or commit failure → remain in this Workflow.

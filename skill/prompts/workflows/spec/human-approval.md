@@ -22,10 +22,9 @@ Ask the Human to approve the candidate as the Current Spec or state the required
 
 When the Human requests changes:
 
-1. Retire the idle Spec Fixer when one exists.
-2. Update `PROGRESS.md` with the Human request and the new candidate state.
-3. Apply the requested changes to the candidate Spec.
-4. Read and execute `<BWR_SKILL>/prompts/workflows/spec/write.md` for complete self-review and a fresh full round.
+1. Update `PROGRESS.md` with the exact Human request and the new candidate state.
+2. Pass that request as a Human correction input to the Spec correction loop.
+3. Keep the existing Spec Fixer when one exists. The correction loop creates one otherwise.
 
 ## Approval
 
@@ -41,5 +40,5 @@ When the Human explicitly approves the candidate:
 ## Exit
 
 - Approved and committed Current Spec → read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md`.
-- Human-requested changes → continue through the Spec write Workflow.
+- Human-requested changes → read and execute `<BWR_SKILL>/prompts/workflows/spec/correction-loop.md` with the exact request.
 - Commit blocker → remain in this Workflow and resolve it before planning.

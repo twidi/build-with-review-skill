@@ -48,6 +48,12 @@ Provide:
 - `<BWR_WORKSPACE>/GUIDE.md`;
 - the assigned Implementer Report path.
 
+For an Attempt created by the restart-after-failure Workflow, also provide:
+
+- the selected restart boundary;
+- every exact failed Implementer Report path selected as evidence;
+- the exact Diagnostic Report path when one informed that boundary.
+
 Update `PROGRESS.md` with the Task, Attempt, expected base commit, and Report path.
 
 ## Receive the Implementer

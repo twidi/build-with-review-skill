@@ -12,6 +12,12 @@ Read the assigned Current Spec, Plan, Task, applicable parent Plans, and `GUIDE.
 
 Read applicable project instructions.
 
+When failure evidence is assigned, read every failed Implementer Report and Diagnostic Report before writing the Design.
+
+Use these Reports as evidence. The current Spec, Plan, Task, and project state remain authoritative.
+
+Use the evidence to avoid repeating a known failure. For a `DESIGN` restart, produce a new complete Design instead of preserving the failed approach.
+
 When a Design checker Report is assigned:
 
 1. Read once; reread as needed:

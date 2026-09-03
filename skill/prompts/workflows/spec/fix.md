@@ -10,6 +10,8 @@ Read once; reread as needed:
 
 Read the complete current Spec and every newly assigned Reviewer Report.
 
+Read every exact Human correction input assigned by your parent.
+
 Keep the Spec Fixer Report complete across follow-ups. Preserve its earlier source paths, dispositions, corrections, and decisions.
 
 ## Process the Findings
@@ -24,6 +26,10 @@ For a `DECISION` Finding:
 - otherwise record the unresolved question, context, options, consequences, and source Finding identity.
 
 Do not select a product option yourself.
+
+Apply each assigned Human correction exactly. Record its result and touched location.
+
+When an assigned Human correction needs another unresolved product choice, return that new decision to your parent.
 
 Keep related corrections coherent across the complete Spec. Record every additional correction found during this work.
 
@@ -48,6 +54,8 @@ Repeat the complete self-review after each correction until it finds no remainin
 Replace the assigned Fixer Report with its complete current state.
 
 Set its stage to `Spec correction`. Include every processed Reviewer Report and every Finding disposition accumulated during the cycle.
+
+Include every processed Human correction input, its result, and its touched locations.
 
 Use this Handoff mapping:
 

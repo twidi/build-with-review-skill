@@ -12,6 +12,10 @@ For `STAGE: reach`, read once; reread as needed:
 
 Read the current Amendment, old Current Spec, and every newly assigned Reach Report.
 
+When the assignment includes a new Human decision, read it and apply it exactly to the Amendment.
+
+Record that decision, its applied result, and its exact location in the Fixer Report.
+
 Verify each Finding against the complete Amendment and its product context.
 
 Apply each supported correction to the Amendment. Record `APPLIED` with its exact result and location.

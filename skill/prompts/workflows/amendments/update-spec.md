@@ -56,11 +56,17 @@ Record the completed generation and Fixer Report path in `PROGRESS.md`.
 
 For `DECISION` with `BLOCKED`, read the Fixer Report and present the complete decision to the Human.
 
-A new decision changes the Amendment. Return the same fixer to `STAGE: reach`, update the Amendment, and run a fresh Reach Round.
+A new decision changes the Amendment. Return the same fixer to `STAGE: reach` with the exact Human decision.
+
+The Fixer applies it to the Amendment and records its result. Then run a fresh Reach Round.
 
 For another `BLOCKED`, resolve its exact external cause and follow up with the same fixer.
 
-For `FAILED`, read the Fixer Report and resolve the assignment failure before continuing.
+For `FAILED`, read the available Fixer Report.
+
+When Updated Spec generation remains executable, use the failed-child replacement procedure for the same assignment and Report path. Provide both Amendment stages' complete current inputs and accumulated correction sources.
+
+Otherwise, stop and retire the failed Fixer. Present the assignment failure to the Human.
 
 ## Exit
 

@@ -56,7 +56,9 @@ Send its exact path to the Amendment fixer.
 
 For `BLOCKED`, read the available Report. Resolve the blocker and follow up with the same reviewer.
 
-For `FAILED`, read the available Report and resolve the assignment failure before continuing.
+For `FAILED`, read the available Report. When the same frozen assignment remains executable, use the failed-child replacement procedure for its Report path.
+
+Otherwise, stop and retire the failed reviewer. Present the assignment failure to the Human.
 
 ## Start or resume the Amendment fixer
 
@@ -95,7 +97,12 @@ Use the Fixer Handoff summary to route its result:
 
 - `CORRECTED` with `READY` → start a fresh Reach Round;
 - `DECISION` with `BLOCKED` → resolve the product decision;
-- another `BLOCKED` or `FAILED` result → resolve its stated cause before continuing.
+- another `BLOCKED` result → resolve its stated cause and follow up with the same Fixer;
+- `FAILED` → use the failed-child replacement procedure.
+
+For a failed Fixer, read its available Report. When Amendment correction remains executable, use the failed-child replacement procedure for the same assignment and Report path.
+
+Provide the current Amendment, old Current Spec, current stage, and every accumulated correction source. Otherwise, stop and retire the failed Fixer. Present the assignment failure to the Human.
 
 For `DECISION`:
 
@@ -105,7 +112,7 @@ Read the Fixer Report and referenced Reach Report.
 
 Present the complete decision through the Orchestrator Human-decision procedure. Record the answer in `PROGRESS.md`.
 
-Send the exact Human decision to the same fixer as a `reach` stage follow-up.
+Send the exact Human decision to the same fixer as a `STAGE: reach` follow-up. The Fixer applies it to the Amendment and records its result.
 
 Update `PROGRESS.md` with the Fixer Report path and every processed Reach Report path.
 

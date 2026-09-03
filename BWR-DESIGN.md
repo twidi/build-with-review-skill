@@ -323,9 +323,11 @@ The Human can ask the Orchestrator to send a follow-up to active sessions.
 
 Reports are durable working memory for one BWR run. They are not product authority.
 
-They are not committed. The parent constructs an exact unique report path before session creation. One report has one writer.
+They are not committed. The parent constructs an exact unique report path before session creation. One report has one active writer.
 
 A new logical assignment gets a new file. A follow-up for the same assignment overwrites the same file. BWR creates no `v2` file for a follow-up.
+
+A replacement session for the same logical assignment inherits that Report path only after the failed writer stops and retires. Recovery assigns a fresh path for unfinished work.
 
 BWR performs no report compaction. BWR uses this structure:
 
@@ -479,6 +481,10 @@ BWR uses:
 Terminal values are `done`, `failed`, `cancelled`, and `superseded`. BWR has no `paused` or `stopped` state. The child maintains its status.
 
 The parent can correct a stale status after observing real state.
+
+`BLOCKED` work resumes in the same session. `FAILED` work never does.
+
+The owning Workflow can stop the work, create a new logical assignment, or replace the failed session. A replacement for the same assignment starts only after the old writer stops and retires.
 
 ### Annotations
 
@@ -877,6 +883,8 @@ It verifies findings before changing the Spec. It records:
 - `DECLINED` with evidence;
 - `SELF-DETECTED` corrections.
 
+It also applies exact Human-requested Spec corrections and records their results and touched locations.
+
 It self-reviews the complete corrected Spec. It does not write code, write plans, commit, or make product decisions. A missing product decision returns to the Orchestrator.
 
 ## 16. Spec workflow
@@ -901,7 +909,9 @@ Full round
 
 A clean full round skips the Fixer and Scoped stages. Spec findings do not use Finding verifiers. A clean full round goes to Human approval.
 
-Human approval makes the document the Current Spec. The Orchestrator commits it.
+When the Human requests a change, the same Spec fixer applies it. The correction then receives Scoped Review and a fresh full round.
+
+Human approval makes the document the Current Spec. The Orchestrator commits it and retires the Spec fixer.
 
 ## 17. Amendment roles and workflow
 
@@ -938,7 +948,7 @@ It does not rejudge the untouched baseline. Reach Review does not use Finding ve
 
 ### Amendment fixer
 
-One Amendment fixer session handles two stages. In stage one, it edits only the Amendment after Reach findings. The loop continues until a fresh Reach reviewer returns clean.
+One Amendment fixer session handles two stages. In stage one, it edits only the Amendment after Reach findings or a returned Human decision. It records and applies that decision exactly. The loop continues until a fresh Reach reviewer returns clean.
 
 The accepted Amendment then freezes. In stage two, the fixer produces the Updated Spec from the old Current Spec and accepted Amendment. Consolidation corrections change only the Updated Spec.
 
@@ -1130,6 +1140,10 @@ A new checker receives:
 
 A Gate failure first returns to correction in the same Attempt.
 
+A fresh Attempt after failure receives the selected restart boundary, relevant failed Implementer Report paths, and any Diagnostic Report path. The new Implementer reads them as evidence. The Current Spec, Plan, Task, and project state remain authoritative.
+
+A `DESIGN` restart produces a new complete Design. It does not preserve the failed approach as authority.
+
 ## 21. Failed Attempt Git workflow
 
 If a failed Attempt has assigned tracked changes, the Implementer creates a preservation commit. It can include the Design, tests, and code.
@@ -1137,6 +1151,10 @@ If a failed Attempt has assigned tracked changes, the Implementer creates a pres
 If no assigned tracked change exists, it creates no empty commit. The Orchestrator never resets history.
 
 The next commit reverts the failed Attempt and can include the revised plan.
+
+An `EARLIER_TASK` or `PLAN` route enters the Plan write Workflow. It provides the relevant failed Implementer Reports, any Diagnostic Report, and the selected restart boundary.
+
+The pending revert becomes explicit Planning commit scope. The clean revised Plan and that revert form one commit. Construction resumes from the earliest incomplete or revised Task.
 
 The history becomes:
 
@@ -1423,6 +1441,12 @@ After acceptance, the old Orchestrator remains visible, unmuted, unarchived, and
 ### Recovery
 
 Recovery uses a new independent Orchestrator after loss or abandonment of the old one. It starts only after the Human confirms that the old Orchestrator no longer works. BWR creates no lock.
+
+The Recovery Orchestrator uses an exact BWR workspace path supplied by the Human when it contains `PROGRESS.md` and `GUIDE.md`. Otherwise, it inspects direct children of `<ACTIVE_PROJECT_ROOT>/bwr_workspace/` that contain both files.
+
+It asks the Human to confirm one discovered candidate. When discovery finds none or several, it asks for the exact path. It sets `<BWR_WORKSPACE>` only after that confirmation.
+
+It reads `ADDITIONAL-INSTRUCTIONS.md` when that file exists.
 
 The Recovery Orchestrator reads:
 

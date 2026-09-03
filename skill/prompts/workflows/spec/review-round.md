@@ -69,7 +69,11 @@ A `BLOCKED` or `FAILED` Handoff summary states its exact obstacle or failure.
 
 Do not read the Reviewer Reports during collection. Keep every exact Report path for later routing.
 
-Resolve a `BLOCKED` or `FAILED` assignment before settling the Full Round. Use the same child for a follow-up to that assignment.
+For `BLOCKED`, resolve the obstacle and follow up with the same reviewer.
+
+For `FAILED`, read the available Report. When the unchanged mandate remains executable, use the failed-child replacement procedure for the same assignment and Report path.
+
+Otherwise, stop and retire the failed reviewer. Present the assignment failure to the Human.
 
 Settle the Full Round only after every expected mandate returns an accepted `READY` Handoff.
 

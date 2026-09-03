@@ -1,6 +1,6 @@
 # Spec correction loop
 
-Execute this Workflow when a full or Scoped Spec review reports Findings.
+Execute this Workflow when a full or Scoped Spec review reports Findings, or when the Human requests a Spec correction.
 
 Keep one Spec Fixer session for the complete Spec correction cycle. Keep it available during later Scoped and full rounds.
 
@@ -25,11 +25,13 @@ bwr.phase: spec
 
 Provide the exact Current Spec path and every source Reviewer Report path from the current correction input.
 
+When the Human requested the correction, also provide that exact request as a Human correction input.
+
 Create the Fixer for the first correction. Send a follow-up to the same Fixer for each later correction input.
 
 Do not read the source Reviewer Reports. The Fixer consumes them.
 
-Update `PROGRESS.md` with the Fixer Report path and current source Report paths.
+Update `PROGRESS.md` with the Fixer Report path and current correction sources.
 
 ## Receive the Fixer
 
@@ -37,7 +39,12 @@ Use the Fixer Handoff summary to route its result:
 
 - `CORRECTED` with `READY` → continue to Scoped review;
 - `DECISION` with `BLOCKED` → resolve the product decision;
-- another `BLOCKED` or `FAILED` result → resolve its stated cause before continuing.
+- another `BLOCKED` result → resolve its stated cause and follow up with the same Fixer;
+- `FAILED` → use the failed-child replacement procedure.
+
+For `FAILED`, read the available Fixer Report. When the correction remains executable, use the failed-child replacement procedure for the same assignment and Report path.
+
+Provide the complete current Spec and every accumulated correction source to that replacement. Otherwise, stop and retire the failed Fixer. Present the assignment failure to the Human.
 
 For `DECISION`:
 
@@ -85,6 +92,7 @@ Provide:
 - the exact Current Spec path;
 - the current Spec Fixer Report path;
 - every source Reviewer Report path processed by that Fixer Report;
+- every exact Human correction input processed by that Fixer Report;
 - `<BWR_WORKSPACE>/reports/spec/risk-filtered/scoped.md` as `PRIVATE_HISTORY`;
 - the Scoped Report path.
 
@@ -96,7 +104,8 @@ Do not read the Scoped Report. Use its Handoff summary.
 
 - `CLEAN` → retire the Scoped reviewer and continue to a fresh full round;
 - `FINDINGS` → retire the Scoped reviewer and send its Report path to the same Spec Fixer;
-- `BLOCKED` or `FAILED` → resolve the assignment before continuing.
+- `BLOCKED` → read the available Report, resolve the obstacle, and follow up with the same reviewer;
+- `FAILED` → read the available Report. When the same frozen assignment remains executable, use the failed-child replacement procedure for its Report path. Otherwise, stop and retire the failed reviewer and present the assignment failure to the Human.
 
 Keep the Spec Fixer `idle` while a reviewer works.
 

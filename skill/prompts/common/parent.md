@@ -112,6 +112,23 @@ The child updates the same Report and returns a new Handoff.
 
 Correct a stale `bwr.status` only from observed session state.
 
+## Replace a failed child
+
+A `FAILED` Handoff ends that child session. Never send it a follow-up.
+
+The current Workflow decides whether the work stops, starts as a new logical assignment, or receives a replacement session.
+
+When the work does not receive a replacement, stop any live process and retire the failed child before continuing.
+
+For a replacement of the same logical assignment:
+
+1. Load TwiCC's current process-stop instructions when needed.
+2. Stop any live process for the failed child.
+3. Retire that child with `bwr.status: failed`.
+4. Create the replacement with the same assignment and Report path.
+
+Recovery assigns a fresh Report path instead.
+
 ## Retire a child
 
 Retire a child only when the current Workflow gives its result final acceptance.

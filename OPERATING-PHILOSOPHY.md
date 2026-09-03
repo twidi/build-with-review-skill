@@ -230,6 +230,8 @@ A replacement session uses the same logical assignment only when the original se
 
 The parent stops the old writer before creating its replacement.
 
+The replacement inherits the same Report path. Recovery uses a fresh Report path for unfinished work.
+
 ## 8. Session creation and retirement
 
 Every non-Orchestrator child session title starts with the exact prefix `- `.
@@ -285,6 +287,8 @@ BWR uses these status values:
 - `cancelled`.
 
 `idle` means that the session waits for a possible follow-up.
+
+`blocked` work can resume in the same session. `failed` work cannot.
 
 It does not mean pause.
 
@@ -605,6 +609,10 @@ Spec findings do not use Finding verifiers.
 
 The next review round validates the fixer's work.
 
+When the Human requests a Spec change, the same Spec fixer applies it and records the exact result.
+
+That correction receives Scoped Review before the next complete round.
+
 The Human approves the resulting product contract.
 
 ## 18. Amendment
@@ -620,6 +628,7 @@ That reviewer writes one report for the round.
 The same Amendment fixer:
 
 - updates the Amendment;
+- applies and records each Human decision returned during correction;
 - produces the Updated Spec after Reach Review becomes clean;
 - records each disposition.
 
@@ -737,6 +746,14 @@ The diagnostic reads the failure report paths.
 It does not need the old session transcripts.
 
 It compares the failed Attempts and recommends the next route.
+
+A fresh Attempt receives the relevant failed Attempt reports and any Diagnostic report.
+
+The new Implementer uses them as evidence and follows the current Spec, Plan, Task, and project state as authority.
+
+An earlier-Task or Plan restart passes the same evidence through Planning.
+
+Planning commits the revised Plan with the pending failed-Attempt revert. Construction resumes at the earliest affected Task.
 
 ## 22. Product Review
 
@@ -1106,6 +1123,12 @@ All lots in that run share it.
 The BWR workspace contains operational evidence only.
 
 It does not contain a copied BWR skill.
+
+A Recovery Orchestrator uses a Human-supplied BWR workspace path when available.
+
+Otherwise, it discovers candidates below the active project's `bwr_workspace/` directory and asks the Human to confirm one.
+
+It reads the selected BWR workspace's Human-owned additional instructions when they exist.
 
 At feature completion, the Orchestrator asks the Human whether to keep or delete it.
 

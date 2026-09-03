@@ -53,11 +53,15 @@ Start a fresh Attempt for the same Task. Provide the failed Implementer Report a
 
 For `DESIGN`, state that the failed Design is evidence only. The new Implementer must produce a new complete Design.
 
-For `EARLIER_TASK` or `PLAN`, revise the active Plan through the Planning Workflows.
+For `EARLIER_TASK` or `PLAN`, prepare a revision of the active Plan.
 
-Treat the pending revert as explicitly transferred into the Orchestrator commit scope. Commit it with the clean revised Plan.
+Provide the selected boundary, relevant failed Implementer Report paths, any Diagnostic Report path, and the earliest Task that must change.
 
-Resume construction from the earliest incomplete or revised Task.
+Treat the pending revert as explicitly transferred into the Planning commit scope. Provide its preservation commit identifier when one exists.
+
+Then read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md` for the active Plan.
+
+The Planning Workflows commit the clean revised Plan with that transferred revert. They resume construction from the earliest incomplete or revised Task.
 
 For `AMENDMENT`, commit the pending revert when one exists. Then execute the applicable Amendment Workflow.
 
@@ -70,6 +74,6 @@ Update `PROGRESS.md` with the restored base commit and next route.
 ## Exit
 
 - `IMPLEMENTATION` or `DESIGN` prepared → execute `<BWR_SKILL>/prompts/workflows/construction/attempt.md` with a fresh Attempt identifier.
-- `EARLIER_TASK` or `PLAN` prepared → execute `<BWR_SKILL>/prompts/workflows/construction/attempt.md` for the selected Task.
+- `EARLIER_TASK` or `PLAN` selected → continue through `<BWR_SKILL>/prompts/workflows/planning/write.md`; its Workflows return to construction.
 - `AMENDMENT` → execute `<BWR_SKILL>/prompts/workflows/amendments/write.md`.
 - `BLOCKED` → wait for the required Human or external action.

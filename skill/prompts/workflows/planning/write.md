@@ -41,6 +41,12 @@ Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/contracts/product-review/verification-report.md`.
 
+When a failed Attempt requires this Plan revision, read every assigned failed Implementer Report and Diagnostic Report.
+
+Use them as evidence for the assigned `EARLIER_TASK` or `PLAN` boundary. The Current Spec and current repository state remain authoritative.
+
+Preserve the exact pending revert as transferred commit scope. Do not alter unrelated working-tree changes.
+
 ## Write the Plan
 
 Choose the tracked Plan path from applicable repository conventions.
@@ -69,7 +75,7 @@ Correct every issue found.
 
 Repeat the complete self-review after each correction until it finds no remaining issue.
 
-Update `PROGRESS.md` with the Plan type, identifier, path, sources, and current planning state.
+Update `PROGRESS.md` with the Plan type, identifier, path, sources, current planning state, and any transferred commit scope.
 
 ## Exit
 

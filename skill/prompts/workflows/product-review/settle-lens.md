@@ -23,11 +23,11 @@ For `FINDINGS`, do not read the Reviewer Report. Keep the reviewer in `idle` and
 
 For `BLOCKED`, read the available Reviewer Report. Resolve the blocker and follow up with the same reviewer.
 
-For `FAILED`, read the available Reviewer Report and retire the reviewer with `bwr.status: failed`.
+For `FAILED`, read the available Reviewer Report.
 
-If the unchanged lens assignment remains executable, start a replacement reviewer with the same Report path.
+If the unchanged lens assignment remains executable, use the failed-child replacement procedure for the same assignment and Report path.
 
-Otherwise, present the exact assignment failure to the Human.
+Otherwise, stop and retire the failed reviewer. Present the exact assignment failure to the Human.
 
 ## Start the Finding verifier
 
@@ -63,11 +63,11 @@ Read the complete Verification Report for every Handoff.
 
 For `BLOCKED`, resolve the named blocker and follow up with the same verifier.
 
-For `FAILED`, retire the verifier with `bwr.status: failed`.
+For `FAILED`, the complete Verification Report is already read.
 
-If the unchanged verification assignment remains executable, start a replacement verifier with the same Verification Report path.
+If the unchanged verification assignment remains executable, use the failed-child replacement procedure for the same assignment and Verification Report path.
 
-Otherwise, present the exact assignment failure to the Human.
+Otherwise, stop and retire the failed verifier. Present the exact assignment failure to the Human.
 
 For `READY`, inspect the verdicts recorded for the source Findings.
 

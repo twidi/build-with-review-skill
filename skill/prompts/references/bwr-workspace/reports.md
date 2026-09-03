@@ -6,11 +6,15 @@ Store every Report under `<BWR_WORKSPACE>/reports/`.
 
 Create and assign its absolute path before creating the child.
 
-One logical assignment has one Report path and one writer.
+One logical assignment has one Report path and one active writer.
 
 A new logical assignment gets a new path.
 
 A follow-up to the same assignment keeps the same path. The child replaces the Report with its current complete result.
+
+A replacement session can inherit that path only after its failed predecessor stops and retires.
+
+Recovery uses a fresh Report path for unfinished work.
 
 Use the exact path pattern declared by the current Workflow. Do not invent another pattern.
 

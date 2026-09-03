@@ -8,6 +8,20 @@ Obtain Human confirmation that the previous Orchestrator no longer works.
 
 When that confirmation already appears in the current conversation, use it directly.
 
+## Locate the BWR workspace
+
+Use an exact BWR workspace path supplied by the Human when it contains `PROGRESS.md` and `GUIDE.md`.
+
+Otherwise, inspect the direct children of `<active checkout>/bwr_workspace/` that contain both files.
+
+When exactly one candidate exists, present its path and obtain Human confirmation.
+
+When no candidate or several candidates exist, ask the Human for the exact path.
+
+Set `<BWR_WORKSPACE>` only after confirming the selected path.
+
+Read `<BWR_WORKSPACE>/ADDITIONAL-INSTRUCTIONS.md` when it exists.
+
 ## Reconstruct durable state
 
 Read once; reread as needed:
