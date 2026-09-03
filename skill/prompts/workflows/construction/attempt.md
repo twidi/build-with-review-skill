@@ -52,15 +52,11 @@ Update `PROGRESS.md` with the Task, Attempt, expected base commit, and Report pa
 
 ## Receive the Implementer
 
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`.
+
 Read the complete Implementer Report for every Handoff.
 
-For `READY`, confirm that the Report contains:
-
-- a `PASSED` final Gate with a concise command-result summary;
-- the created Attempt commit;
-- every Design and Code Review round;
-- every checker Finding disposition;
-- every new validation command and recommended Gate group.
+For `READY`, confirm that the Report satisfies the Implementer Report Contract.
 
 Inspect the reported commit and current Git state. Do not rerun the Gate.
 

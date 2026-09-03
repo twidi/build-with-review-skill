@@ -125,20 +125,3 @@ Then complete these steps in order:
 1. Set the applicable terminal `bwr.status`.
 2. Archive the child.
 3. Hide the child.
-
-## Create a successor Orchestrator
-
-A successor Orchestrator does not use the child assignment, Report, retirement, title, or notification rules above.
-
-Read and execute `<BWR_SKILL>/prompts/workflows/delivery/handoff-successor.md`.
-
-Use `<BWR_SKILL>/prompts/contracts/session/orchestrator-handoff.md` for its dynamic context.
-
-Create the Orchestrator with:
-
-- a title without `- `;
-- `mute_on_user_turn: false`;
-- `question_widget: true`;
-- `hidden: false`.
-
-Never archive or hide an Orchestrator.

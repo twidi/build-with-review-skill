@@ -326,9 +326,11 @@ BWR_WORKSPACE: /srv/project/bwr_workspace/feature-a
 
 The paths are illustrative. A runtime prompt contains real absolute paths. Relative `@@` markers exist only inside entry composers.
 
-Common prompts and Roles can be included or read manually. They contain no `@@`.
+Common prompts and Roles can be included or read manually. They contain no active nested `@@` includes.
 
-Workflows, Contracts, and References contain no `@@`. They are read on demand after startup.
+Workflows, Contracts, and References load their dependencies through on-demand reads, not `@@`.
+
+A file can still show resolved top-level `@@` syntax when it defines session prompt composition.
 
 A created Orchestrator entry can include its immediate Startup Workflow.
 
@@ -474,7 +476,7 @@ For each Role, inspect one representative path from entry to Handoff.
 
 For the full graph, inspect missing includes, cycles, unreachable Workflows, unused Contracts, and duplicate owners.
 
-Do not create Markdown snapshots, wording tests, or a BWR validation script.
+Do not create Markdown snapshots or wording tests. Keep mechanical graph validation outside the deployed `skill/` directory.
 
 ## 13. Scope of this document
 

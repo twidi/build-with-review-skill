@@ -6,6 +6,14 @@ Execute this Workflow after every lens in one frozen Pass has settled.
 
 Use the settled lens records in `PROGRESS.md`.
 
+When those records contain a confirmed Finding:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`;
+- `<BWR_SKILL>/prompts/contracts/product-review/verification-report.md`.
+
 Read each Verification Report that contains a `CONFIRMED` verdict.
 
 Read the corresponding Reviewer Reports. Keep every confirmed Finding identity with its verification path.

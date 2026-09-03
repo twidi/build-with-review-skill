@@ -2,6 +2,11 @@
 
 Execute this Workflow for the Consolidation assignment from your parent.
 
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/spec/current-spec.md`;
+- `<BWR_SKILL>/prompts/contracts/amendments/amendment.md`.
+
 ## Read the frozen comparison set
 
 Read the complete old Current Spec from its assigned commit and path.

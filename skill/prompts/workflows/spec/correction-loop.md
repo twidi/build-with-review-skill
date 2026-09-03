@@ -39,7 +39,15 @@ Use the Fixer Handoff summary to route its result:
 - `DECISION` with `BLOCKED` → resolve the product decision;
 - another `BLOCKED` or `FAILED` result → resolve its stated cause before continuing.
 
-For `DECISION`, read the current Fixer Report and the referenced source Reviewer Report.
+For `DECISION`:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/correction/fixer-report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+
+Read the current Fixer Report and the referenced source Reviewer Report.
 
 Present the complete decision context, options, and consequences to the Human. Record the answer in `PROGRESS.md`.
 

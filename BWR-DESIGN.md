@@ -1659,7 +1659,9 @@ Each session Role has one fixed entry composer under `prompts/entries/`. The com
 
 It includes applicable Common prompts and the pure Role prompt. The successor Orchestrator entry also includes its immediate Startup Workflow.
 
-Common prompts and Role prompts contain no `@@` markers. TwiCC can include them through a composer. An agent can also read them directly from the filesystem.
+Common prompts and Role prompts contain no active nested `@@` includes. TwiCC can include them through a composer.
+
+An agent can also read them directly. A prompt-composition example can show resolved top-level `@@` syntax.
 
 Workflows, Contracts, and References are on-demand files after startup. An agent reads them when its current Workflow requires them.
 
@@ -1721,7 +1723,9 @@ TwiCC expands all markers before the session receives the prompt. Expansion is r
 
 Fixed Common content precedes fixed Role content. Optional Human instructions follow the fixed entry. Dynamic values come last. This order supports provider prompt caching.
 
-The parent sends the entry-composer marker without reading, copying, or repeating the fixed content in its own context. Later Workflows, Contracts, and References use explicit on-demand reads. They do not use `@@`.
+The parent sends the entry-composer marker without reading, copying, or repeating the fixed content in its own context.
+
+Later Workflows, Contracts, and References use explicit on-demand reads for their dependencies. They do not load dependencies through `@@`.
 
 ### Shared Contract ownership
 

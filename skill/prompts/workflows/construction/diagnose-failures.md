@@ -50,9 +50,11 @@ Update `PROGRESS.md` with the Diagnostic number, inputs, question, and Report pa
 
 ## Receive the Diagnostic
 
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/construction/diagnostic-report.md`.
+
 Read the Diagnostic Report for every Handoff.
 
-For `READY`, confirm that the Report contains one classification, its evidence, and one concrete restart point.
+For `READY`, confirm that the Report satisfies the Construction Diagnostic Report Contract.
 
 Request a correction from the same Diagnostic when the Report is incomplete or internally contradictory.
 

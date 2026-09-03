@@ -2,11 +2,12 @@
 
 Execute this Workflow for one assigned Design Check Round.
 
-## Load the Design contract
+## Load the contracts
 
 Read once; reread as needed:
 
-- `<BWR_SKILL>/prompts/contracts/construction/task-design.md`.
+- `<BWR_SKILL>/prompts/contracts/construction/task-design.md`;
+- `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`.
 
 This Workflow uses risk filtering. Use the assigned `PRIVATE_HISTORY` through the loaded risk-filtering rules.
 

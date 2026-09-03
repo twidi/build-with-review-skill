@@ -6,6 +6,13 @@ The complete lens chain keeps one Review Concurrency place until this Workflow s
 
 ## Route the Reviewer Handoff
 
+Before reading a Reviewer Report:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+
 Require the Handoff summary to start with the Reviewer Report verdict.
 
 For `CLEAN`, do not read the Reviewer Report. Retire the reviewer with `bwr.status: done`.
@@ -49,6 +56,8 @@ Provide the frozen Pass inputs, exact Reviewer Report path, lens name, and assig
 Update `PROGRESS.md` with both Report paths and the active lens-chain state.
 
 ## Receive the verifier
+
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/product-review/verification-report.md`.
 
 Read the complete Verification Report for every Handoff.
 

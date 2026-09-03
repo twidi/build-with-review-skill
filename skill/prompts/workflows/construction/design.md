@@ -12,7 +12,12 @@ Read the assigned Current Spec, Plan, Task, applicable parent Plans, and `GUIDE.
 
 Read applicable project instructions.
 
-When a Design checker Report is assigned, read it before changing the Design.
+When a Design checker Report is assigned:
+
+1. Read once; reread as needed:
+   - `<BWR_SKILL>/prompts/contracts/review/report.md`;
+   - `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+2. Read that Report before changing the Design.
 
 Resolve each ordinary checker Finding during this Workflow.
 

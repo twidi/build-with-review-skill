@@ -18,6 +18,7 @@ Before verification:
 
 Read once; reread as needed:
 
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
 - `<BWR_SKILL>/prompts/contracts/review/finding.md`;
 - `<BWR_SKILL>/prompts/contracts/product-review/verification-report.md`.
 

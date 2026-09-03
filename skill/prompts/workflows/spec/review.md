@@ -2,6 +2,8 @@
 
 Execute this Workflow for one assigned Spec review mandate.
 
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/spec/current-spec.md`.
+
 ## Read the subject
 
 Read the assigned Current Spec in full.

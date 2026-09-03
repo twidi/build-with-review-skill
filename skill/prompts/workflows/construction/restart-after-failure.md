@@ -2,6 +2,12 @@
 
 Execute this Workflow after the Orchestrator accepts an Implementer `FAILED` Handoff.
 
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`.
+
+When a Diagnostic Report is assigned:
+
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/construction/diagnostic-report.md`.
+
 ## Select the restart boundary
 
 Read the failed Implementer Report, Current Spec, active Plan, assigned Task, and current Git state.

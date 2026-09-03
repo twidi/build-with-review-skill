@@ -2,6 +2,8 @@
 
 Your assignment provides the current Spec and the Spec Fixer Report from the preceding correction cycle.
 
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/correction/fixer-report.md`.
+
 Read that Fixer Report.
 
 Use its applied corrections, self-detected corrections, and touched locations as the exact starting change set.

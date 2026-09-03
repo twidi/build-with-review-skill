@@ -43,6 +43,13 @@ Update `PROGRESS.md` with the Check Round identifier, frozen Plan path, and assi
 
 ## Receive the checker
 
+Before reading a checker Report:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+
 Use the checker Handoff summary to identify `CLEAN`, `FINDINGS`, or `BLOCKED`.
 
 For `CLEAN`, do not read the checker Report. Retire the checker.

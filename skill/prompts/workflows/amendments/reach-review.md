@@ -2,6 +2,11 @@
 
 Execute this Workflow for the Reach Review assignment from your parent.
 
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/spec/current-spec.md`;
+- `<BWR_SKILL>/prompts/contracts/amendments/amendment.md`.
+
 ## Read the frozen subject
 
 Read the complete old Current Spec and assigned Amendment candidate.

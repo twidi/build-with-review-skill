@@ -2,6 +2,11 @@
 
 Execute this Workflow for one assigned Code Check Round.
 
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/construction/task-design.md`;
+- `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`.
+
 This Workflow uses risk filtering. Use the assigned `PRIVATE_HISTORY` through the loaded risk-filtering rules.
 
 ## Read the subject

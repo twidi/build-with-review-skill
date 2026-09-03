@@ -10,7 +10,12 @@ Inspect the complete working-tree state and relevant project instructions.
 
 Identify the exact candidate diff boundary from the expected base commit and assigned Task.
 
-When a Code checker Report is assigned, read it before changing the candidate.
+When a Code checker Report is assigned:
+
+1. Read once; reread as needed:
+   - `<BWR_SKILL>/prompts/contracts/review/report.md`;
+   - `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+2. Read that Report before changing the candidate.
 
 Resolve each ordinary checker Finding during this Workflow.
 

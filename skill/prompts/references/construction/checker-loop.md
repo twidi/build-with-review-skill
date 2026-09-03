@@ -8,6 +8,8 @@ The active Workflow defines the exact checker role, subject, paths, annotations,
 
 Read once; reread as needed:
 
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`;
 - `<BWR_SKILL>/prompts/references/review/frozen-subject.md`.
 
 Start a Round only after the complete subject passes Implementer self-review.

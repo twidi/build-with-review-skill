@@ -2,6 +2,8 @@
 
 Your assignment provides the corrected Spec and its current Spec Fixer Report.
 
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/correction/fixer-report.md`.
+
 Read that Fixer Report and every source Reviewer Report it references.
 
 Check:

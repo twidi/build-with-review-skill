@@ -32,7 +32,10 @@ Execute the Reviewer completion procedure for the complete current result.
 
 ## Revise after `UNVERIFIABLE`
 
-When your parent provides a Verification Report, read it completely.
+When your parent provides a Verification Report:
+
+1. Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/product-review/verification-report.md`.
+2. Read the complete Verification Report.
 
 For every `UNVERIFIABLE` result, use its concrete check and observation to revise the source Finding.
 

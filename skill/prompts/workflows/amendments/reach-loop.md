@@ -37,6 +37,13 @@ Update `PROGRESS.md` with the Reach Round, frozen candidate, and assigned paths.
 
 ## Receive the Reach reviewer
 
+Before reading a Reach Report:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+
 Use the Handoff summary to identify `CLEAN`, `FINDINGS`, or `BLOCKED`.
 
 For `CLEAN`, do not read the Reach Report. Retire the reviewer with `bwr.status: done`.
@@ -90,7 +97,11 @@ Use the Fixer Handoff summary to route its result:
 - `DECISION` with `BLOCKED` → resolve the product decision;
 - another `BLOCKED` or `FAILED` result → resolve its stated cause before continuing.
 
-For `DECISION`, read the Fixer Report and referenced Reach Report.
+For `DECISION`:
+
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/correction/fixer-report.md`.
+
+Read the Fixer Report and referenced Reach Report.
 
 Present the complete decision through the Orchestrator Human-decision procedure. Record the answer in `PROGRESS.md`.
 

@@ -54,10 +54,10 @@ Ask whether to keep or delete the exact `<BWR_WORKSPACE>` directory. Recommend k
 
 Delete that directory only after the Human explicitly selects deletion for that exact path.
 
-Set your own `bwr.status` to `done` after the workspace choice is complete.
+Set your own `bwr.status` to `done` after the BWR workspace choice is complete.
 
 ## Exit
 
-- Workspace kept → end the BWR run and preserve every repository object.
-- Workspace deletion explicitly selected → delete only `<BWR_WORKSPACE>`, then end the BWR run.
+- BWR workspace kept → end the BWR run and preserve every repository object.
+- BWR workspace deletion explicitly selected → delete only `<BWR_WORKSPACE>`, then end the BWR run.
 - Delivery condition missing → return to the Workflow that owns that open condition.

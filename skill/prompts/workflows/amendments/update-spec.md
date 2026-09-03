@@ -46,6 +46,10 @@ Send these values as a follow-up when the fixer already exists.
 
 ## Receive the Updated Spec
 
+Before reading the Fixer Report:
+
+Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/correction/fixer-report.md`.
+
 For `UPDATED` with `READY`, do not read the Fixer Report. Confirm the Updated Spec target exists.
 
 Record the completed generation and Fixer Report path in `PROGRESS.md`.

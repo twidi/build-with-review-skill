@@ -15,7 +15,7 @@ Use the current TwiCC project and these settings:
 Use this prompt after replacing every placeholder with its current value:
 
 ```text
-@@<BWR_SKILL>/prompts/roles/watchdog.md
+@@<BWR_SKILL>/prompts/entries/watchdog.md
 
 BWR_SKILL: <absolute path>
 BWR_WORKSPACE: <absolute path>

@@ -28,6 +28,19 @@ For a Correction Round Plan, also read the parent Plan, confirmed Findings, and 
 
 When correcting a completeness check, also read its assigned checker Report.
 
+When source Findings or Reviewer Reports control this Plan:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/review/report.md`;
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+
+When Verification Reports control this Plan:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/contracts/product-review/verification-report.md`.
+
 ## Write the Plan
 
 Choose the tracked Plan path from applicable repository conventions.
