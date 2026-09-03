@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "watchdog.py"
+SCRIPT = Path(__file__).parents[1] / "skill" / "scripts" / "watchdog.py"
 
 
 def load_watchdog():
