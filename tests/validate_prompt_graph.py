@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skill"
 ENTRIES = SKILL / "prompts" / "entries"
 ROLES = SKILL / "prompts" / "roles"

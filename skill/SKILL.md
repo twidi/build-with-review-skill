@@ -1,6 +1,9 @@
 ---
 name: build-with-review
 description: Use when the user invokes BWR or requests its structured Spec, planning, implementation, independent review, correction, and product-validation workflow.
+metadata:
+  author: twidi
+  version: "2.0.0"
 ---
 
 # Build With Review
