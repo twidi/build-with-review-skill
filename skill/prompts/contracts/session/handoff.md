@@ -14,7 +14,7 @@ PARENT ACTION: <next expected action, or none>
 `RESULT` has one value:
 
 - `READY`: the current deliverable is complete and ready for routing;
-- `BLOCKED`: work can resume after specified external information or action;
+- `BLOCKED`: work can resume after specified information, choice, or action;
 - `FAILED`: the current assignment ended without a valid deliverable.
 
 `REPORT` contains the exact assigned absolute path.

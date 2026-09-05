@@ -98,7 +98,7 @@ Do not read the Fixer Report for `READY` or a non-decision `BLOCKED` result.
 Use the Fixer Handoff summary to route its result:
 
 - `CORRECTED` with `READY` → start a fresh Reach Round;
-- `DECISION` with `BLOCKED` → resolve the product decision;
+- `DECISION` with `BLOCKED` → examine the reported `DECISION` classification;
 - another `BLOCKED` result → resolve its stated cause and follow up with the same Fixer;
 - `FAILED` → use the failed-child replacement procedure.
 
@@ -112,9 +112,9 @@ Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/correction/fixer-rep
 
 Read the Fixer Report and referenced Reach Report.
 
-Present the complete decision through the Orchestrator Human-decision procedure. Record the answer in `PROGRESS.md`.
+Apply the Orchestrator decision-adjudication procedure. Present the complete question when a Human product decision or Human technical choice remains. Record an answer in `PROGRESS.md` only when the Human answered.
 
-Send the exact Human decision to the same fixer as a `STAGE: reach` follow-up. The Fixer applies it to the Amendment and records its result.
+Send the exact resolution to the same fixer as a `STAGE: reach` follow-up. For a Human product decision, the Fixer applies it to the Amendment. Otherwise, it records the disposition and resumes the correction. When the resolution is a Human technical choice, record its applying Plan or Task Design.
 
 Update `PROGRESS.md` with the Fixer Report path and every processed Reach Report path.
 

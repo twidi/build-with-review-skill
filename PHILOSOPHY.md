@@ -24,7 +24,7 @@ flowchart LR
     I --> F
     J --> E
 
-    K[DECISION] --> L[Human decision]
+    K[DECISION] --> L[Human product decision]
     L --> M[Spec or Amendment]
     M --> E
     M --> F
@@ -74,23 +74,33 @@ The Human then approves the product contract.
 
 ## 3. Product decisions remain Human decisions
 
+Agents make ordinary decisions inside their assigned authority. The Orchestrator chooses routing. The Implementer chooses implementation mechanisms. Fixers choose compliant edits.
+
+`DECISION` has one narrower meaning: an unresolved product choice that requires the Human.
+
 One rule applies everywhere:
 
-> **An agent that must choose behavior not defined by the spec must stop.**
+> **An agent that must choose product behavior not defined by the spec must stop.**
 
-The Orchestrator first examines the question.
+The Orchestrator first classifies the question.
 
-This examination has three possible results:
+This examination has five possible results:
 
-- the spec already gives the answer;
+- an applicable authority already gives the answer;
 - the facts disprove the question;
-- the answer requires a product decision.
+- a technical role owns the choice;
+- the answer requires a product decision;
+- no reasonable technical solution avoids a grave, durable consequence beyond the approved feature.
 
-Only the Human decides in the third case.
+The first two results close with evidence. The third returns to its technical owner.
+
+Only the Human decides in the last two cases. Difficulty and implementation cost do not select those routes.
 
 Each option describes its consequence for the user. It does not focus only on implementation cost.
 
-The answer enters the spec before any new implementation starts.
+The answer to a product decision enters the spec before any new implementation starts.
+
+The answer to an exceptional technical choice enters the applicable Plan or Design. It does not create an Amendment unless it also changes product behavior.
 
 ## 4. Construction makes the product concrete in stages
 
@@ -149,6 +159,10 @@ TDD is recommended. It is not the central philosophy.
 The central principle is broader:
 
 > **Every declared behavior must have suitable evidence.**
+
+Before creating a material mechanism, the Implementer looks for an existing implementation or suitable dependency. Reuse follows shared meaning and expected evolution, not similar code shape.
+
+A small duplication can be better than an abstraction that joins different concepts. The Design explains only material choices between reuse, a dependency, and a new implementation.
 
 ## 6. Design and code have different reviews
 

@@ -4,6 +4,8 @@ Execute the stage named by your parent's `STAGE` assignment.
 
 Keep one complete Fixer Report across both stages. Preserve completed earlier-stage records when updating it.
 
+When your parent resolves an earlier `DECISION`, read the exact resolution. Apply a Human product decision in the Reach stage. Otherwise, record the disposition with its authority or evidence and resume the assigned stage.
+
 ## Reach stage
 
 For `STAGE: reach`, read once; reread as needed:

@@ -29,6 +29,8 @@ When those sources do not resolve a required product choice, identify that decis
 
 Use the smallest complete mechanism that satisfies the authoritative obligations and fits the existing architecture.
 
+For each material mechanism, record the selected reuse, dependency, or new implementation when a credible alternative exists. State why the selected option has the correct semantic fit.
+
 `Smallest` means the least added mechanism that fully satisfies the contract. It does not mean the shortest patch.
 
 Trace each new state, abstraction, persistent field, version, lock, retry, synchronization mechanism, service, or compatibility layer to an exact obligation or admitted scenario. Explain why a simpler solution is insufficient.

@@ -14,7 +14,13 @@ Use repository inspection, focused commands, and observable behavior as appropri
 
 For each ordinary Finding, independently check its fact, requirement, scope connection, every scenario condition, causal path, consequence, and evidence.
 
-For each `DECISION`, inspect the complete relevant Current Spec context and verify the claimed unresolved choice.
+When the Reviewer Report contains a `DECISION`:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/references/decisions/adjudication.md`.
+
+For each `DECISION`, inspect the complete relevant Current Spec context. Verify the claimed unresolved product choice and its classification through the decision-adjudication and Verification Report Contracts.
 
 Assign one Contract verdict to every source Finding.
 

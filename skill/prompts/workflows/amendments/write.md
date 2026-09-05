@@ -59,7 +59,9 @@ Correct every issue found.
 
 Repeat the complete self-review after each correction until it finds no remaining issue.
 
-When another product decision remains necessary, use the Orchestrator Human-decision procedure. Then update the same Amendment candidate.
+When another product decision remains necessary, use the Orchestrator decision-adjudication procedure.
+
+Update the same Amendment candidate for a Human product decision. Leave an ordinary technical choice to its owner. Record a Human technical choice for its applying Plan or Task Design and keep the Amendment product content unchanged.
 
 Update `PROGRESS.md` with:
 
@@ -71,5 +73,6 @@ When the interrupted work is Planning, include its complete Planning assignment,
 ## Exit
 
 - Internally clean Amendment → execute `<BWR_SKILL>/prompts/workflows/amendments/reach-loop.md`.
-- Required Human decision → remain in this Workflow and continue after the answer.
+- Human product decision → remain in this Workflow and apply the answer to the Amendment.
+- Human technical choice → record its applying artifact and continue this Workflow.
 - External blocker → record it in `PROGRESS.md` and present it to the Human.

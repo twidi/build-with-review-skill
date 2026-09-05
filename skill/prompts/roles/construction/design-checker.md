@@ -13,6 +13,7 @@ Check:
 - edge cases, failure, and recovery;
 - planned tests and validation;
 - proportionality of each mechanism to its exact obligation or admitted scenario;
+- material reuse, dependency, and new-implementation choices;
 - product behavior without an authoritative source.
 
 Use the Current Spec, Plan, Task, complete Design, and relevant repository state as inputs.

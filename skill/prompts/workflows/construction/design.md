@@ -6,7 +6,8 @@ Execute this Workflow at the start of one Implementer Attempt and after Design c
 
 Read once; reread as needed:
 
-- `<BWR_SKILL>/prompts/contracts/construction/task-design.md`.
+- `<BWR_SKILL>/prompts/contracts/construction/task-design.md`;
+- `<BWR_SKILL>/prompts/references/construction/reuse.md`.
 
 Read the assigned Current Spec, Plan, Task, applicable parent Plans, and `GUIDE.md`.
 
@@ -29,7 +30,7 @@ Resolve each ordinary checker Finding during this Workflow.
 
 After a completed correction, record `APPLIED`. Otherwise, record `DISAGREED` with concrete contradictory evidence.
 
-Treat a `DECISION` Finding or invalid controlling contract as a blocker for this Workflow.
+When a checker reports a `DECISION`, examine its classification. When authoritative inputs resolve product behavior and the Finding asks for an implementation mechanism, record `DISAGREED` with that evidence. Correct any underlying ordinary obligation and own the technical choice. Otherwise, treat it as a blocker for this Workflow.
 
 ## Inspect the repository
 
@@ -38,6 +39,8 @@ Inspect the current Git state and confirm the expected base commit.
 Inspect the code, tests, configuration, documentation, dependencies, and tooling relevant to the Task.
 
 Identify existing patterns, interfaces, state transitions, failure behavior, and validation boundaries.
+
+Apply the Reuse and Abstraction Reference to every material proposed mechanism.
 
 Preserve unrelated working-tree changes.
 
@@ -53,6 +56,8 @@ Define the implementation structure, ordered steps, interfaces, state, errors, r
 
 Record material alternatives and the reason for the selected approach.
 
+Record only material reuse, dependency, or new-implementation selections with credible alternatives.
+
 When an authoritative source does not resolve a required product choice, return that decision to your parent.
 
 ## Self-review
@@ -66,7 +71,8 @@ Review the complete Design against:
 - edge cases, errors, and recovery;
 - planned tests and other validation;
 - the boundary between product intent and implementation design;
-- the proportionality of each proposed mechanism to its exact obligation or admitted scenario.
+- the proportionality of each proposed mechanism to its exact obligation or admitted scenario;
+- application of the Reuse and Abstraction Reference to each material mechanism.
 
 Correct every issue found.
 
@@ -77,4 +83,4 @@ Update the Implementer Report with the Design state and any targeted validation 
 ## Exit
 
 - Internally clean complete Design → read and execute `<BWR_SKILL>/prompts/workflows/construction/design-review-loop.md`.
-- Required product decision, invalid Task contract, or external blocker → read and execute `<BWR_SKILL>/prompts/workflows/construction/report-failure.md`.
+- Required product choice, technical choice outside the Implementer's authority, invalid Task contract, or external blocker → read and execute `<BWR_SKILL>/prompts/workflows/construction/report-failure.md`.

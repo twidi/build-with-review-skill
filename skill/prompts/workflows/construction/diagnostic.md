@@ -36,6 +36,8 @@ Include every required Contract field, the comparison, the classification, and t
 
 When indispensable evidence is missing, record the exact missing input and why it prevents a valid classification.
 
+For a `BLOCKED` classification, identify the exact required information, technical choice, or external action. Do not select a Human product option or exceptional Human technical choice.
+
 ## Hand off
 
 When the Report contains a valid classification, complete the Child Handoff with:

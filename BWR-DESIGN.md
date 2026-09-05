@@ -186,6 +186,10 @@ It does not invent a product decision. A material Design change during coding st
 
 The Design uses the smallest complete mechanism that satisfies its authoritative obligations and remains coherent with the existing architecture. Every new state, abstraction, persistent field, version, lock, retry, synchronization mechanism, service, or compatibility layer traces to an exact obligation or admitted scenario. The Design explains why a simpler solution is insufficient.
 
+For a material new mechanism, the Implementer performs a targeted search for an equivalent repository mechanism or suitable dependency. It compares meaning, rules, ownership, lifecycle, and expected evolution. It reuses a mechanism when these semantics match. Similar code does not justify an abstraction that needs unrelated modes, branches, or case-specific flags.
+
+The Design records only material choices between credible reuse, dependency, and new-implementation alternatives. It can keep a small duplication when the concepts or expected evolution differ.
+
 `Smallest` means the least added mechanism that fully satisfies the contract. It does not mean the shortest patch. Implementation cost alone does not create a product decision.
 
 Coding resumes only after a clean Design check.
@@ -840,6 +844,8 @@ When one assignment overwrites its report, surviving findings keep their identif
 
 ### DECISION finding
 
+`DECISION` identifies an unresolved product choice that requires the Human. It does not identify an ordinary implementation choice or every decision made during BWR.
+
 A DECISION uses:
 
 ```markdown
@@ -901,11 +907,13 @@ For each finding, it checks:
 - the consequence;
 - the evidence.
 
-For a DECISION, it checks Current Spec silence. It uses a concrete verification action. The verdicts are:
+For a DECISION, it checks Current Spec silence and whether the question changes product behavior rather than selecting an implementation mechanism. It uses a concrete verification action. The verdicts are:
 
 - `CONFIRMED`;
 - `DISPROVED`;
 - `UNVERIFIABLE`.
+
+A credible issue framed as a technical choice is `UNVERIFIABLE`; the reviewer must rewrite it as an ordinary Finding. An authoritative answer or false premise is `DISPROVED`.
 
 An environment failure is `BLOCKED`, not `UNVERIFIABLE`. The verifier does not:
 
@@ -1163,6 +1171,8 @@ One Implementer owns one Task and one Attempt. It is the only tracked writer dur
 
 It cannot make product decisions. It can mark a checker finding `APPLIED` or `DISAGREED` with evidence. A disagreement does not close review.
 
+For every material mechanism introduced by the Design or implementation, it performs a targeted search for an equivalent repository mechanism or suitable dependency. It uses semantic fit rather than code resemblance. Its code self-review repeats that check against the actual diff.
+
 Only a fresh clean checker closes the relevant review stage.
 
 ### Design checker
@@ -1186,6 +1196,8 @@ It checks:
 - planned tests;
 - invented behavior.
 
+It also checks material selections between existing mechanisms, dependencies, and new implementations. A reuse Finding cites a credible alternative and explains the semantic match. It does not demand an abstraction for superficially similar code.
+
 It tries to falsify the Design. It reports a Task-contract blocker instead of silently widening scope. A fresh checker reviews every corrected complete Design.
 
 ### Code checker
@@ -1203,7 +1215,9 @@ The Code checker receives the complete diff, files, tests, Task contract, and ac
 - contract changes;
 - maintainability.
 
-It does not reopen an architecture preference already settled by the accepted Design. A fresh checker reviews every corrected complete candidate.
+It checks duplication of responsibility or intent in every material mechanism introduced by the candidate. It cites the existing mechanism and establishes matching semantics. It does not report similar code when ownership, rules, lifecycle, or expected evolution differ.
+
+It does not reopen an architecture preference already settled by the accepted Design without new repository or implementation evidence. When that evidence requires a material Design change, the Attempt returns to the Design workflow. A fresh checker reviews every corrected complete candidate.
 
 ### Construction diagnostic
 
@@ -1214,9 +1228,9 @@ The Orchestrator can launch a diagnostic after repeated comparable failed Attemp
 - `EARLIER_TASK`;
 - `PLAN`;
 - `AMENDMENT` when the Current Spec requires a Human product decision or correction;
-- `BLOCKED` only when indispensable information is missing.
+- `BLOCKED` when indispensable information, a technical choice, or an external action is missing.
 
-It reports evidence and the required restart point. It modifies nothing. An `AMENDMENT` classification identifies the product question or Current Spec problem. The Human must decide the resulting product change before the Amendment workflow starts.
+It reports evidence and the required restart point. It modifies nothing. An `AMENDMENT` classification identifies the product question or Current Spec problem. A `BLOCKED` technical choice passes through decision adjudication. The Human decides only a remaining Human product decision or exceptional Human technical choice.
 
 ## 20. Construction workflow
 
@@ -1516,6 +1530,20 @@ It records a short convention in `GUIDE.md`. Future committers reuse it. Project
 
 ## 27. Human decisions
 
+An ordinary `decision` is any choice made inside a role's authority. `DECISION` is the BWR Finding type for an unresolved Human product decision. A Human setup choice or exceptional Human technical choice is not a `DECISION`.
+
+Before a question reaches the Human, the Orchestrator classifies it by authority:
+
+1. an applicable authority already answers it;
+2. evidence disproves its premise;
+3. a technical role owns the choice;
+4. a real product choice remains;
+5. no reasonable technical solution avoids a grave, durable consequence beyond the approved Feature.
+
+The first two outcomes close with evidence. The third returns to its technical owner. The fourth is a `DECISION`. The fifth is a Human technical choice and remains a blocker or checkpoint rather than an Amendment unless it also changes product behavior.
+
+Dependencies, migrations, interfaces, and architectural changes are evidence to examine, not automatic escalation triggers. The Orchestrator evaluates the actual scope, reasonable alternatives, reversibility, project conventions, and continuing consequences.
+
 The Orchestrator is the only normal Human interlocutor. Every decision request contains:
 
 - context;
@@ -1533,7 +1561,9 @@ The Orchestrator is the only normal Human interlocutor. Every decision request c
 
 The question widget comes after this explanation. The Human does not need to read reports, transcripts, topology, or `PROGRESS.md`. An agent never silently decides undefined product behavior.
 
-Before asking, the Orchestrator checks three outcomes: the Current Spec already answers, facts disprove the question, or a real product choice remains. Only the third outcome reaches the Human.
+For a Human product decision, the answer enters the Current Spec through the applicable Spec or Amendment workflow. For a Human technical choice, `PROGRESS.md` records its question, answer, scope, and applying artifact. The applicable Plan or Task Design becomes the technical authority.
+
+The Orchestrator sends the answer to the responsible role. That role updates its artifact and resumes the normal review loop. Before asking a later question, the Orchestrator checks applicable Spec, Amendment, Plan, Design, and `PROGRESS.md` authority within the earlier answer's recorded scope.
 
 ## 28. Initial run setup
 
@@ -1796,7 +1826,10 @@ The installed BWR skill uses:
 │   │       └── progress.md
 │   └── references/
 │       ├── construction/
-│       │   └── checker-loop.md
+│       │   ├── checker-loop.md
+│       │   └── reuse.md
+│       ├── decisions/
+│       │   └── adjudication.md
 │       ├── review/
 │       │   ├── severity.md
 │       │   ├── risk-filtering.md

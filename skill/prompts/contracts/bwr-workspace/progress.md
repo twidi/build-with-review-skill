@@ -37,7 +37,7 @@ Include:
 - the current provider choices;
 - the current Review Concurrency;
 - completed Lots and the current Lot;
-- accepted Human decisions;
+- accepted Human decisions, with `Product` or `Technical` type, scope, and applying artifact;
 - Amendment paths and outcomes;
 - the final result when the run closes.
 

@@ -7,7 +7,8 @@ Execute this Workflow for one assigned Design Check Round.
 Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/contracts/construction/task-design.md`;
-- `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`.
+- `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`;
+- `<BWR_SKILL>/prompts/references/construction/reuse.md`.
 
 This Workflow uses risk filtering. Use the assigned `PRIVATE_HISTORY` through the loaded risk-filtering rules.
 
@@ -34,6 +35,8 @@ Verify the evidence for every `DISAGREED` disposition. Report the problem again 
 Report any controlling-contract conflict that prevents a valid Design as a checkable Finding.
 
 Support each Finding with the exact Design location, controlling obligation, and repository evidence.
+
+Apply the Reuse and Abstraction Reference to every material selection in the Design.
 
 Confirm that the complete controlling input set received coverage.
 

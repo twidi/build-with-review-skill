@@ -18,11 +18,11 @@ Use one classification:
 - `EARLIER_TASK`: correct an already completed Task first;
 - `PLAN`: revise the active Plan before construction continues;
 - `AMENDMENT`: the Current Spec requires a Human product decision or correction before construction continues;
-- `BLOCKED`: indispensable external information or action is missing.
+- `BLOCKED`: indispensable information, technical choice, or external action is missing.
 
 For `AMENDMENT`, identify the exact Current Spec problem or unresolved product choice. Do not select the product decision.
 
-For `BLOCKED`, state the exact missing information or action.
+For `BLOCKED`, state the exact required information, technical choice, or external action.
 
 The restart recommendation must identify the concrete Plan, Task, or Attempt boundary.
 

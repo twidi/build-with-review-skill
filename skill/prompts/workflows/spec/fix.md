@@ -22,10 +22,12 @@ For an ordinary Finding, apply the correction or record contradictory evidence f
 
 For a `DECISION` Finding:
 
-- apply an exact Human decision supplied by your parent;
-- otherwise record the unresolved question, context, options, consequences, and source Finding identity.
+- when your parent supplies an exact Human product decision, apply it;
+- otherwise, when an authoritative source resolves the behavior, record `DECLINED` with that evidence;
+- otherwise, when it asks for an implementation mechanism, record `DECLINED` and identify the technical owner;
+- otherwise, record the unresolved question, context, options, consequences, and source Finding identity.
 
-Do not select a product option yourself.
+Select no unresolved product option yourself.
 
 Apply each assigned Human correction exactly. Record its result and touched location.
 

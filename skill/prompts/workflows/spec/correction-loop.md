@@ -40,7 +40,7 @@ Do not read the Fixer Report for `READY` or a non-decision `BLOCKED` result.
 Use the Fixer Handoff summary to route its result:
 
 - `CORRECTED` with `READY` → continue to Scoped review;
-- `DECISION` with `BLOCKED` → resolve the product decision;
+- `DECISION` with `BLOCKED` → examine the reported `DECISION` classification;
 - another `BLOCKED` result → resolve its stated cause and follow up with the same Fixer;
 - `FAILED` → use the failed-child replacement procedure.
 
@@ -54,13 +54,22 @@ Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/contracts/correction/fixer-report.md`;
 - `<BWR_SKILL>/prompts/contracts/review/report.md`;
-- `<BWR_SKILL>/prompts/contracts/review/finding.md`.
+- `<BWR_SKILL>/prompts/contracts/review/finding.md`;
+- `<BWR_SKILL>/prompts/references/decisions/adjudication.md`.
 
 Read the current Fixer Report and the referenced source Reviewer Report.
 
-Present the complete decision context, options, and consequences to the Human. Record the answer in `PROGRESS.md`.
+Apply the decision-adjudication procedure.
 
-Send the exact Human decision to the same Fixer as a follow-up. Keep the same Fixer Report path.
+When authority or evidence resolves the question, send that resolution to the same Fixer.
+
+When the question belongs to a technical owner, tell the Fixer that the Spec selects no mechanism. The Fixer records the `DECISION` Finding as declined.
+
+Only for a Human product decision, present the complete context, options, and consequences. Record the answer in `PROGRESS.md`.
+
+For a Human technical choice, present the complete question. Record its answer, scope, and future applying Plan or Task Design in `PROGRESS.md`. Tell the Fixer that product behavior remains unchanged and that the `DECISION` Finding is declined.
+
+Send the exact resolution or Human product decision to the same Fixer as a follow-up. Keep the same Fixer Report path.
 
 ## Start a Scoped review
 

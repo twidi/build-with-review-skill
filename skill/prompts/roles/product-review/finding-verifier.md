@@ -12,7 +12,7 @@ For each ordinary Finding, check:
 - the consequence;
 - the evidence.
 
-For a `DECISION`, verify the claimed Current Spec silence.
+For a `DECISION`, verify the claimed Current Spec silence and that the unresolved choice changes product behavior instead of selecting an implementation mechanism.
 
 Use a concrete verification action. Preserve the source Finding identity.
 

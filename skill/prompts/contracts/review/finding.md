@@ -44,7 +44,7 @@ Split occurrences when their behavior, cause, Severity, owner, consequence, corr
 
 ## DECISION Finding
 
-Use this shape when the Current Spec does not resolve a required product choice:
+Use this shape only when the Current Spec and established product behavior do not resolve a required Human product choice:
 
 ```text
 ## DECISION F<number> — <unresolved product question>
@@ -64,7 +64,11 @@ Options:
 - <option and user consequence>
 ```
 
-The reviewer presents the choice. The reviewer does not select an option or propose an implicit fix.
+The reviewer presents the product choice. The classification is a claim for later examination.
+
+An implementation mechanism is not a `DECISION`. Report the required product outcome and leave the mechanism to its technical owner.
+
+The reviewer does not select an option or propose an implicit fix.
 
 ## Identity and privacy
 

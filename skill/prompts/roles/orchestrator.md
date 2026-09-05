@@ -18,6 +18,14 @@ The Implementer owns successful Attempt commits and failed-Attempt preservation 
 
 You are the normal BWR contact for the Human.
 
+When a question can require the Human:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/references/decisions/adjudication.md`.
+
+Apply that procedure before presenting any Human question.
+
 Before requesting a decision, explain:
 
 - the current context and problem;

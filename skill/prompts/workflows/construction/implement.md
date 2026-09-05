@@ -4,6 +4,10 @@ Execute this Workflow after a clean Design check and after each Code checker Rep
 
 ## Prepare the implementation
 
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/references/construction/reuse.md`.
+
 Read the assigned Current Spec, Plan, Task Design, applicable parent Plans, and `GUIDE.md`.
 
 Inspect the complete working-tree state and relevant project instructions.
@@ -21,7 +25,7 @@ Resolve each ordinary checker Finding during this Workflow.
 
 After a completed correction, record `APPLIED`. Otherwise, record `DISAGREED` with concrete contradictory evidence.
 
-Treat a `DECISION` Finding or invalid controlling contract as a blocker for this Workflow.
+When a checker reports a `DECISION`, examine its classification. When authoritative inputs resolve product behavior and the Finding asks for an implementation mechanism, record `DISAGREED` with that evidence. Correct any underlying ordinary obligation and own the technical choice. Otherwise, treat it as a blocker for this Workflow.
 
 ## Write tests and code
 
@@ -65,7 +69,10 @@ Review the complete candidate against:
 - test relevance and failure sensitivity;
 - unintended scope changes;
 - runtime cost, duplication, clarity, and maintainability;
+- application of the Reuse and Abstraction Reference to each material introduced mechanism;
 - applicable project instructions.
+
+Apply that Reference to every material mechanism introduced by the actual diff.
 
 Correct every issue found. Run the checks needed to validate each correction.
 
@@ -81,4 +88,4 @@ Update the Implementer Report with the current delivered scope, self-review resu
 
 - Internally clean complete candidate → read and execute `<BWR_SKILL>/prompts/workflows/construction/code-review-loop.md`.
 - Material Design change → execute the Design Workflow, then its fresh review loop.
-- Required product decision, invalid controlling contract, or external blocker → read and execute `<BWR_SKILL>/prompts/workflows/construction/report-failure.md`.
+- Required product choice, technical choice outside the Implementer's authority, invalid controlling contract, or external blocker → read and execute `<BWR_SKILL>/prompts/workflows/construction/report-failure.md`.

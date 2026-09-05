@@ -591,6 +591,12 @@ One Finding normally represents one correction obligation. It groups occurrences
 
 A correction uses the smallest complete mechanism that satisfies the authoritative contract and fits the existing architecture. Each additional mechanism needs a traceable obligation and a reason that a simpler solution is insufficient.
 
+For every material new mechanism, the Implementer performs a targeted search for an equivalent repository mechanism or suitable dependency. The search follows the introduced concept through nearby code, shared services, utilities, validation, storage, and installed dependencies.
+
+Reuse requires matching meaning, rules, ownership, lifecycle, and expected evolution. Similar code alone does not justify an abstraction. A reuse that needs special modes, unrelated branches, or case-specific flags can be worse than a small duplication.
+
+The Task Design records only a material selection among credible alternatives. The Design checker challenges unnecessary custom work with a cited alternative and a semantic comparison. Implementer self-review and the Code checker repeat a targeted check against mechanisms introduced by the actual code.
+
 ## 17. Spec Review
 
 The Current Spec lists root Lots in execution order. Each root Lot depends only on earlier root Lots.
@@ -774,7 +780,7 @@ Any content correction returns through self-review and a fresh Code checker.
 
 The Implementer uses `FAILED` only when it cannot produce a valid complete Gate.
 
-It uses `BLOCKED` only when resolution needs external information or action.
+It uses `BLOCKED` only when resolution needs information, a technical choice, or external action.
 
 Every failed Attempt report includes:
 
@@ -895,21 +901,34 @@ No lens can reuse a verdict from an older commit.
 
 ## 25. Product decisions
 
+An ordinary decision is a choice made inside one role's authority. The Orchestrator owns routing and planning choices. The Implementer owns implementation mechanisms. Fixers own compliant artifact edits.
+
+`DECISION` means an unresolved product choice that requires the Human. A reviewer that reports a `DECISION` makes a claim about that classification; the report does not establish it by itself.
+
 A Product Review finding that appears to require a product decision first goes to its Finding verifier.
 
 The verifier checks:
 
 - whether the spec already answers the question;
 - whether evidence disproves the question;
+- whether the question changes product behavior rather than selecting an implementation mechanism;
 - whether a real product choice remains.
 
-Only a verified product choice reaches the Human.
+Only a verified product choice from that Finding reaches the Human as a `DECISION`.
+
+When the issue is credible but the `DECISION` classification asks for a technical mechanism, the verifier returns `UNVERIFIABLE`. The same reviewer rewrites it as an ordinary Finding. A false premise or an existing authoritative answer is `DISPROVED`.
 
 An accepted Amendment resolves the exact Product Review decision identities recorded in it.
 
 Those identities do not open another Amendment. Its implementation obligations keep the same source traceability.
 
 Outside Product Review, the Orchestrator performs the same examination before asking the Human.
+
+When a question belongs to a technical role, the Orchestrator routes it to that owner. The owner records a material choice in its normal artifact and continues through the normal review loop.
+
+A technical choice reaches the Human only when no authority resolves it and no reasonable solution avoids a grave, durable consequence beyond the approved Feature. Examples can indicate a need for examination, but no dependency, migration, interface, or architectural change triggers escalation by category alone.
+
+The Orchestrator examines the actual scope, project conventions, reasonable alternatives, reversibility, and continuing consequences. Difficulty, code volume, or implementation cost alone does not justify a Human question.
 
 The Orchestrator gives the Human a self-contained explanation.
 
@@ -938,11 +957,15 @@ A short question widget never replaces this context.
 
 The Human must not need to read reports, session history, or `PROGRESS.md` before answering.
 
-During Spec work, the Spec fixer integrates the decision.
+During Spec work, the Spec fixer integrates a Human product decision.
 
-After Construction starts, the Orchestrator creates an Amendment.
+After Construction starts, a Human product decision creates an Amendment.
 
-The Orchestrator records the decision and its consequence in `PROGRESS.md`.
+The Orchestrator records each Human decision and its consequence in `PROGRESS.md`.
+
+For a Human technical choice, `PROGRESS.md` records the question, answer, scope, and applying artifact. The applicable Plan or Task Design becomes the technical authority. The same role updates that artifact and resumes its normal review loop.
+
+Before asking, the Orchestrator checks the applicable Spec, Amendments, Plans, Designs, and recorded Human decisions. It reuses an earlier answer only inside its recorded scope.
 
 ## 26. Blockers
 
@@ -950,7 +973,7 @@ A child never asks the Human directly.
 
 It sends the parent:
 
-- the missing information;
+- the missing information or required choice;
 - why it is required;
 - what it already checked;
 - the action that can unblock the work.
@@ -959,7 +982,7 @@ The parent answers when it has authority and evidence.
 
 Otherwise, the issue moves up to the Orchestrator.
 
-The Orchestrator presents a complete question to the Human.
+The Orchestrator applies decision adjudication. It presents a complete question only when a Human product decision, Human technical choice, or external Human action remains.
 
 The system does not repeat the same acknowledged blocker.
 

@@ -40,7 +40,7 @@ Execute the Lot closure Workflow.
 
 ## Resolve confirmed decisions
 
-Before correction planning, resolve every pending confirmed `DECISION` through the Orchestrator Human-decision procedure.
+Every pending confirmed `DECISION` has passed Finding verification as a Human product decision.
 
 Present the complete verified context and options. The Human must not need to read either source Report.
 

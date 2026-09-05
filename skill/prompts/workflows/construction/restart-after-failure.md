@@ -29,7 +29,7 @@ Select the smallest boundary that must change:
 - `EARLIER_TASK`: a completed Task must be corrected first;
 - `PLAN`: the active Plan must change;
 - `AMENDMENT`: the Current Spec needs a product decision or correction;
-- `BLOCKED`: indispensable external information or action is missing.
+- `BLOCKED`: indispensable information, technical choice, or external action is missing.
 
 When repeated comparable failures leave this choice uncertain, read and execute:
 
@@ -38,6 +38,12 @@ When repeated comparable failures leave this choice uncertain, read and execute:
 Then return here with its Report.
 
 Record the selected boundary, evidence paths, and reason in `PROGRESS.md`.
+
+When the selected boundary contains a product or technical question:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/references/decisions/adjudication.md`.
 
 ## Revert the failed state
 
@@ -75,11 +81,15 @@ Then read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md` for the 
 
 The Planning Workflows commit the clean revised Plan with that transferred revert. They resume construction from the earliest incomplete or revised Task.
 
-For `AMENDMENT`, present the exact Current Spec problem, evidence, options, consequences, and recommendation through the Orchestrator Human-decision procedure.
+For `AMENDMENT`:
 
-Record the exact Human decision in `PROGRESS.md`.
+Apply the decision-adjudication procedure to the exact Current Spec problem, evidence, options, consequences, and recommendation.
 
-When that decision does not require a Current Spec change, preserve the current revert state. Re-evaluate the smallest restart boundary from the decision.
+Present the complete question only when a Human product decision or Human technical choice remains.
+
+Record the exact resolution or Human decision in `PROGRESS.md`.
+
+When the result is a technical choice or does not require a Current Spec change, preserve the current revert state. Record any Human technical choice with its scope and applying artifact. Re-evaluate the smallest restart boundary from the resolution.
 
 When it requires an Amendment, record this Workflow and the interrupted Task as the return context. Commit the pending revert when one exists.
 
@@ -89,9 +99,11 @@ For `BLOCKED`, commit the pending revert when one exists.
 
 Record the current Git commit as the restart base. Also record the failed Attempt, its preservation commit when one exists, and whether its revert is complete or unnecessary.
 
-Present the complete context and required action to the Human.
+Apply the decision-adjudication procedure when the blocker is a product or technical choice.
 
-Create every commit through that procedure.
+Resolve an ordinary technical choice through its owner. Present the complete context only when a Human product decision, Human technical choice, or external Human action remains.
+
+Create every commit through the Commit Reference procedure.
 
 Update `PROGRESS.md` with the next route and its committed Git state when applicable.
 
@@ -102,5 +114,6 @@ Update `PROGRESS.md` with the next route and its committed Git state when applic
 - Human decision requires an Amendment → execute `<BWR_SKILL>/prompts/workflows/amendments/write.md` with the prepared inputs.
 - Human decision changes the restart route → repeat boundary selection with that decision.
 - Required Human decision remains open → remain in this Workflow.
-- `BLOCKED` → wait for the required Human or external action.
+- `BLOCKED` resolved without the Human → repeat boundary selection from the restart base.
+- `BLOCKED` requires the Human or external action → wait for it.
 - Recorded blocker resolved → repeat boundary selection from the restart base.

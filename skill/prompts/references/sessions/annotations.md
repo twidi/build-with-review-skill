@@ -39,7 +39,7 @@ Use this mapping:
 
 `idle` means that no work is pending, but the same assignment can receive a follow-up.
 
-`blocked` means that specified external information or action is required before work can resume.
+`blocked` means that specified information, choice, or action is required before work can resume.
 
 Terminal values are `done`, `failed`, `cancelled`, and `superseded`.
 

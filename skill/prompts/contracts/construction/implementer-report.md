@@ -54,6 +54,6 @@ A ready Report contains a `PASSED` final Gate and the successful Attempt commit 
 
 A failed Report states the exact unresolved failure and any preservation commit.
 
-A blocked Report states the exact external information or action required.
+A blocked Report states the exact information, choice, or action required.
 
 The same Report covers every outcome.

@@ -82,15 +82,37 @@ After accepting the result, retire the Implementer. Update `PROGRESS.md` with th
 
 ## Route a non-ready Attempt
 
-For a validation coverage decision, present its complete context to the Human.
+### Validation coverage choice
+
+For a validation coverage choice, present its complete context to the Human.
 
 Update `GUIDE.md` with the exact Human-approved Gate configuration.
 
-Resume the same Implementer with the exact decision and current `GUIDE.md` path.
+Resume the same Implementer with the exact choice and current `GUIDE.md` path.
 
-For a product decision, record the blocker and start the applicable Amendment Workflow.
+### Product or technical question
 
-For an external blocker, present its complete context to the Human. Resume the same Implementer after resolution.
+When the Implementer Report contains a product or technical question:
+
+Read once; reread as needed:
+
+- `<BWR_SKILL>/prompts/references/decisions/adjudication.md`.
+
+Apply the decision-adjudication procedure before selecting a Human route.
+
+When authority or evidence resolves the question, send the exact resolution to the same Implementer. Resume its normal Design or implementation loop.
+
+For a Human product decision, present the complete question, record the answer, and start the applicable Amendment Workflow.
+
+For a technical choice inside the Implementer's authority, send the relevant authority and evidence to the same Implementer. Resume its normal Design or implementation loop.
+
+For a Human technical choice, present the complete question. Record its answer, scope, and applying artifact in `PROGRESS.md`. Resume the same Implementer with that answer. The Implementer updates its Task Design before coding when the choice changes the Design.
+
+### External blocker
+
+For an external blocker, resolve it when current authority and evidence allow. Otherwise, present the complete required Human action. Resume the same Implementer after resolution.
+
+### Failed Attempt
 
 For `FAILED`, retire the Implementer and preserve its Report path. Then use the restart-after-failure Workflow.
 
@@ -99,5 +121,8 @@ For `FAILED`, retire the Implementer and preserve its Report path. Then use the 
 - Accepted `READY` with another Task → execute this Workflow for that next Task and a fresh Attempt.
 - Accepted `READY` with every Plan Task complete → read and execute `<BWR_SKILL>/prompts/workflows/product-review/pass.md`.
 - `FAILED` → read and execute `<BWR_SKILL>/prompts/workflows/construction/restart-after-failure.md`.
-- Product decision → read and execute `<BWR_SKILL>/prompts/workflows/amendments/write.md`.
+- Question resolved by authority or evidence → resume the same Implementer.
+- Human product decision → read and execute `<BWR_SKILL>/prompts/workflows/amendments/write.md`.
+- Technical choice routed to the Implementer → resume the same Implementer.
+- Human technical choice resolved → resume the same Implementer.
 - Unresolved external blocker → remain in this Workflow.

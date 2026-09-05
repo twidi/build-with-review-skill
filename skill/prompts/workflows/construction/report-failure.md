@@ -4,11 +4,11 @@ Execute this Workflow when the Implementer cannot continue through the current c
 
 ## Select the Attempt outcome
 
-Use `BLOCKED` when exact external information or action can let this same Attempt continue.
+Use `BLOCKED` when exact information, choice, or action can let this same Attempt continue.
 
 Use `FAILED` when this Attempt cannot produce a valid complete result.
 
-An unresolved product decision or environment dependency is `BLOCKED` while its resolution can preserve the Attempt objective.
+An unresolved product decision, required technical choice, missing information, or environment dependency is `BLOCKED` while its resolution can preserve the Attempt objective.
 
 An invalid Task contract or abandoned objective is `FAILED`.
 
@@ -45,7 +45,7 @@ Write the complete current Implementer Report through the Child Handoff procedur
 For a resumable blocker, use:
 
 - `RESULT`: `BLOCKED`;
-- `SUMMARY`: `DECISION — <required choice>` or `BLOCKED — <required external action>`;
+- `SUMMARY`: `DECISION — <required product choice>` or `BLOCKED — <required information, technical choice, or external action>`;
 - `PARENT ACTION`: the exact action required to resume this Attempt.
 
 For a failed Attempt, use:
@@ -71,4 +71,4 @@ When the parent ends this Attempt, execute this Workflow again with outcome `FAI
 - `BLOCKED` Handoff sent → wait for a parent follow-up.
 - `FAILED` Handoff sent → wait for final retirement.
 - Product, Task, or Design input changed → read and execute `<BWR_SKILL>/prompts/workflows/construction/design.md`.
-- External blocker resolved → resume the interrupted Workflow.
+- Non-product blocker resolved → resume the applicable Design or interrupted Workflow.

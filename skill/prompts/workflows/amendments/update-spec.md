@@ -56,11 +56,15 @@ For `UPDATED` with `READY`, confirm the Updated Spec target exists.
 
 Record the completed generation and Fixer Report path in `PROGRESS.md`.
 
-For `DECISION` with `BLOCKED`, read the Fixer Report and present the complete decision to the Human.
+For `DECISION` with `BLOCKED`, read the Fixer Report and apply the Orchestrator decision-adjudication procedure.
 
-A new decision changes the Amendment. Return the same fixer to `STAGE: reach` with the exact Human decision.
+Present the complete question when a Human product decision or Human technical choice remains.
 
-The Fixer applies it to the Amendment and records its result. Then run a fresh Reach Round.
+For a Human product decision, return the same fixer to `STAGE: reach` with the exact answer. The new decision changes the Amendment.
+
+For another resolution, return the same fixer to `STAGE: consolidation`. The Fixer records the disposition and resumes Updated Spec generation. When the resolution is a Human technical choice, record its applying Plan or Task Design.
+
+Run a fresh Reach Round when the Amendment changed.
 
 For another `BLOCKED`, resolve its exact external cause and follow up with the same fixer.
 

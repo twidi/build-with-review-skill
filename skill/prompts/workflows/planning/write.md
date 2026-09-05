@@ -59,7 +59,9 @@ Define coherent Tasks with explicit outcomes, order, dependencies, probable loca
 
 Keep technical design choices for the Implementer. Leave every Task `Design` section empty.
 
-When planning exposes a required product choice absent from the Current Spec, use the Orchestrator decision procedure.
+When planning exposes an unresolved product or technical question, use the Orchestrator decision-adjudication procedure.
+
+Leave an ordinary implementation choice to its future Implementer. Apply a Human product decision through an Amendment. Record a Human technical choice for its applying Plan or Task Design.
 
 ## Self-review
 
@@ -82,5 +84,7 @@ Update `PROGRESS.md` with the Plan type, identifier, path, sources, current plan
 ## Exit
 
 - Internally clean Plan → read and execute `<BWR_SKILL>/prompts/workflows/planning/validate-and-commit.md`.
-- Required product decision → resolve it through the applicable Amendment Workflow before completing this Plan.
+- Human product decision → resolve it through the applicable Amendment Workflow before completing this Plan.
+- Technical question resolved or assigned to its owner → continue this Workflow.
+- Human technical choice resolved → apply it through the named Plan or future Task Design and continue this Workflow.
 - External blocker → record it in `PROGRESS.md` and present it to the Human.

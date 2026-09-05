@@ -5,7 +5,8 @@ Execute this Workflow for one assigned Code Check Round.
 Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/contracts/construction/task-design.md`;
-- `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`.
+- `<BWR_SKILL>/prompts/contracts/construction/implementer-report.md`;
+- `<BWR_SKILL>/prompts/references/construction/reuse.md`.
 
 This Workflow uses risk filtering. Use the assigned `PRIVATE_HISTORY` through the loaded risk-filtering rules.
 
@@ -18,6 +19,8 @@ Read the previous checker Report when assigned.
 Inspect the complete candidate diff from the assigned base commit.
 
 Read every affected file and test in its relevant repository context.
+
+Apply the Reuse and Abstraction Reference to each material mechanism introduced by the candidate.
 
 Treat this complete input set as the review subject.
 
@@ -36,6 +39,8 @@ Report a still-valid disagreed Finding again with current evidence.
 Run focused checks when they provide useful evidence for a candidate problem.
 
 Support every Finding with exact affected locations, controlling obligations, and concrete evidence.
+
+When a reuse Finding requires a material change to the accepted Design, report that Design impact.
 
 Confirm that the complete diff, affected behavior, and Role mandate received coverage.
 

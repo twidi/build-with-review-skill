@@ -16,7 +16,9 @@ Write the complete candidate Spec at the path recorded in `PROGRESS.md`.
 
 Derive product behavior from authoritative Human decisions and verified project facts.
 
-When a required product choice remains unresolved, present it to the Human through the Orchestrator decision procedure.
+When a required product choice remains unresolved, apply the Orchestrator decision-adjudication procedure. Present it when a Human product decision or Human technical choice remains.
+
+Apply a Human product decision to the candidate Spec. Leave an ordinary technical choice to its future owner. Record a Human technical choice for its future Plan or Task Design and keep product behavior unchanged.
 
 ## Self-review
 
@@ -37,5 +39,6 @@ Update `PROGRESS.md` with the candidate Spec path and current Spec phase.
 ## Exit
 
 - Internally clean candidate → read and execute `<BWR_SKILL>/prompts/workflows/spec/review-round.md`.
-- Required Human decision → remain in this Workflow and continue after the answer.
+- Human product decision → remain in this Workflow and apply the answer to the candidate Spec.
+- Human technical choice → record its future applying artifact and continue this Workflow.
 - External blocker → record it in `PROGRESS.md` and present it to the Human.

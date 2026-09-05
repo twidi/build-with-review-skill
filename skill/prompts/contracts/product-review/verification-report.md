@@ -24,11 +24,13 @@ Use `CONFIRMED` when the verification supports the complete Finding claim.
 
 Use `DISPROVED` when the verification contradicts that claim.
 
-Use `UNVERIFIABLE` when the source Finding lacks enough precise evidence for either verdict.
+Use `UNVERIFIABLE` when the source Finding lacks enough precision or evidence for either verdict. Also use it when a credible issue is framed as a `DECISION` but asks for an implementation mechanism instead of a product choice.
 
 For an ordinary Finding, the verification addresses its observed fact, requirement, scope connection, every scenario condition, causal path, consequence, and evidence.
 
-For a `DECISION`, it verifies the claimed Current Spec silence.
+For a `DECISION`, verify the claimed Current Spec silence and that the unresolved choice changes product behavior.
+
+Use `DISPROVED` when an authority resolves the question or evidence disproves its premise.
 
 Every source Finding appears exactly once.
 
