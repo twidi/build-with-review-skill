@@ -57,7 +57,7 @@ Set its stage to `Spec correction`. Include every processed Reviewer Report and 
 
 Include every processed Human correction input, its result, and its touched locations.
 
-Use this Handoff mapping:
+For ready or blocked correction results, use this Handoff mapping:
 
 | Current result | Handoff result | Handoff summary starts with |
 |---|---|---|

@@ -28,15 +28,17 @@ Update `PROGRESS.md` with:
 
 ## Retire BWR sessions
 
-Stop the current Watchdog process. Then set its `bwr.status` to `done`, archive it, and hide it.
+Load TwiCC's current session-update and topology instructions when needed.
 
-Inspect the current TwiCC topology.
+Set the current Watchdog's `bwr.status` to `done`. Then archive and hide it.
 
-For every remaining non-Orchestrator child, stop any live process and apply its accurate terminal status.
+Inspect your direct children in the current TwiCC topology.
+
+For every remaining direct non-Orchestrator child, apply its accurate terminal status.
 
 Archive and hide each of those children.
 
-Keep every Orchestrator visible, unmuted, unarchived, and not hidden.
+Keep every Orchestrator and every session owned by another parent unchanged.
 
 ## Report delivery
 

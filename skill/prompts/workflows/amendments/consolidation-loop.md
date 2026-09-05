@@ -10,7 +10,7 @@ Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/references/review/frozen-subject.md`.
 
-Assign the next Consolidation Round identifier.
+Assign `consolidation-round-<next sequential number>` as the Consolidation Round identifier.
 
 Freeze the exact old Current Spec reference, accepted Amendment, and complete Updated Spec for this Round.
 
@@ -19,7 +19,7 @@ Use the `Document reviewers` provider group and the `ReviewerMedium` preset.
 Use this Report path:
 
 ```text
-<BWR_WORKSPACE>/reports/amendments/amendment-<number>/consolidation-round-<round>.md
+<BWR_WORKSPACE>/reports/amendments/amendment-<number>/<ROUND>.md
 ```
 
 Set these annotations:
@@ -47,7 +47,7 @@ Read once; reread as needed:
 - `<BWR_SKILL>/prompts/contracts/review/report.md`;
 - `<BWR_SKILL>/prompts/contracts/review/finding.md`.
 
-Use the Handoff summary to identify `CLEAN`, `FINDINGS`, or `BLOCKED`.
+Use the Handoff summary to identify `CLEAN`, `FINDINGS`, `BLOCKED`, or `FAILED`.
 
 For `CLEAN`, do not read the Consolidation Report. Retire the checker with `bwr.status: done`.
 
@@ -61,7 +61,7 @@ For `BLOCKED`, read the available Report. Resolve the blocker and follow up with
 
 For `FAILED`, read the available Report. When the same frozen assignment remains executable, use the failed-child replacement procedure for its Report path.
 
-Otherwise, stop and retire the failed checker. Present the assignment failure to the Human.
+Otherwise, retire the failed checker. Present the assignment failure to the Human.
 
 ## Resume the Amendment fixer
 
@@ -78,6 +78,8 @@ The fixer reads the Consolidation Report, corrects the complete Updated Spec, an
 
 ## Receive the fixer
 
+Do not read the Fixer Report for `READY` or a non-decision `BLOCKED` result.
+
 Use the Fixer Handoff summary to route its result:
 
 - `CORRECTED` with `READY` → start a fresh Consolidation Round;
@@ -87,7 +89,7 @@ Use the Fixer Handoff summary to route its result:
 
 For a failed Fixer, read its available Report. When correction remains executable, use the failed-child replacement procedure for the same assignment and Report path.
 
-Provide both Amendment stages' complete current inputs and accumulated correction sources. Otherwise, stop and retire the failed Fixer. Present the assignment failure to the Human.
+Provide both Amendment stages' complete current inputs and accumulated correction sources. Otherwise, retire the failed Fixer. Present the assignment failure to the Human.
 
 For `DECISION`:
 

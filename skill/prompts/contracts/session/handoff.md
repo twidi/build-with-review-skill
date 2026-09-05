@@ -20,5 +20,3 @@ PARENT ACTION: <next expected action, or none>
 `REPORT` contains the exact assigned absolute path.
 
 `SUMMARY` states the concrete result or obstacle. `PARENT ACTION` states the expected next action or `none`.
-
-The interface requires no JSON, checksum, proof token, empty field, or additional parser-oriented syntax.

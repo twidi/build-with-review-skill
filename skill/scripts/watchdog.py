@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Report one BWR Orchestrator's open direct children.
+"""Report open direct children to parents in one BWR Orchestrator subtree.
 
 Usage: python3 watchdog.py <orchestrator-session-id> [stale-minutes] [--print-only]
 
 The script reads TwiCC session and process state. It writes no project state.
-Without --print-only, it sends the report directly to the Orchestrator.
+Without --print-only, it sends each report directly to its parent session.
 """
 
 import argparse
@@ -210,27 +210,33 @@ def render_snapshot(orchestrator_title, rows, stale_after, now=None):
     return "\n\n".join(blocks)
 
 
-def deliver(orchestrator_session_id, report, print_only=False):
-    """Print the report and optionally send it through TwiCC."""
-    print(report)
-    if print_only:
-        return
+def deliver(deliveries, print_only=False):
+    """Print every report and optionally send it through TwiCC."""
+    errors = []
+    for recipient, report in deliveries:
+        print(report)
+        if print_only:
+            continue
 
-    command = TWICC + ["send-message", orchestrator_session_id, report]
-    try:
-        result = subprocess.run(
-            command,
-            cwd=NEUTRAL_CWD,
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
-    except Exception as exc:
-        fail("could not deliver the Watchdog report", exc)
+        command = TWICC + ["send-message", recipient, report]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=NEUTRAL_CWD,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        except Exception as exc:
+            errors.append(f"{recipient}: {exc}")
+            continue
 
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        fail("delivering the Watchdog report failed", detail)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            errors.append(f"{recipient}: {detail}")
+
+    if errors:
+        fail("one or more Watchdog reports could not be delivered", "\n".join(errors))
 
 
 def parse_arguments(arguments=None):
@@ -245,7 +251,7 @@ def parse_arguments(arguments=None):
 
 
 def read_topology(topology, orchestrator_session_id):
-    """Extract one Orchestrator and its direct children."""
+    """Extract one Orchestrator and its complete descendant subtree."""
     if not isinstance(topology, dict):
         fail("the TwiCC topology returned the wrong shape", type(topology).__name__)
 
@@ -258,24 +264,75 @@ def read_topology(topology, orchestrator_session_id):
         fail("the TwiCC topology has no node list", type(nodes).__name__)
 
     orchestrator = None
-    sessions = []
-    processes = []
     for node in nodes:
         session = node.get("session") or {}
         if node.get("id") == orchestrator_session_id:
             orchestrator = session
-        if session.get("spawned_by") != orchestrator_session_id:
-            continue
 
+    if orchestrator is None:
+        fail("the Orchestrator is absent from its TwiCC topology", orchestrator_session_id)
+
+    descendant_ids = set()
+    while True:
+        added = {
+            (node.get("session") or {}).get("id")
+            for node in nodes
+            if (node.get("session") or {}).get("spawned_by")
+            in {orchestrator_session_id, *descendant_ids}
+        } - descendant_ids
+        added.discard(None)
+        if not added:
+            break
+        descendant_ids.update(added)
+
+    sessions = []
+    processes = []
+    for node in nodes:
+        session = node.get("session") or {}
+        if session.get("id") not in descendant_ids:
+            continue
         sessions.append(session)
         process = node.get("process")
         if process:
             processes.append({**process, "session_id": session.get("id")})
 
-    if orchestrator is None:
-        fail("the Orchestrator is absent from its TwiCC topology", orchestrator_session_id)
-
     return orchestrator, sessions, processes
+
+
+def build_deliveries(
+    orchestrator,
+    sessions,
+    processes,
+    own_session_id,
+    stale_after,
+    now=None,
+):
+    """Build one direct-child snapshot for each parent that needs one."""
+    owners = [orchestrator]
+    owners.extend(
+        session
+        for session in sessions
+        if session.get("id") != own_session_id
+        and not session.get("archived")
+        and bwr_status(session) not in TERMINAL_STATUSES
+    )
+
+    deliveries = []
+    for owner in owners:
+        owner_id = owner.get("id")
+        direct_children = [
+            session for session in sessions if session.get("spawned_by") == owner_id
+        ]
+        rows = collect_rows(direct_children, processes, own_session_id, now)
+        if owner_id != orchestrator.get("id") and not rows:
+            continue
+        deliveries.append(
+            (
+                owner_id,
+                render_snapshot(owner.get("title"), rows, stale_after, now),
+            )
+        )
+    return deliveries
 
 
 def main(arguments=None):
@@ -290,13 +347,14 @@ def main(arguments=None):
     orchestrator, sessions, processes = read_topology(
         topology, options.orchestrator_session_id
     )
-    rows = collect_rows(sessions, processes, identity["session_id"])
-    report = render_snapshot(
-        orchestrator.get("title"),
-        rows,
+    deliveries = build_deliveries(
+        orchestrator,
+        sessions,
+        processes,
+        identity["session_id"],
         stale_after=options.stale_minutes,
     )
-    deliver(options.orchestrator_session_id, report, options.print_only)
+    deliver(deliveries, options.print_only)
 
 
 if __name__ == "__main__":

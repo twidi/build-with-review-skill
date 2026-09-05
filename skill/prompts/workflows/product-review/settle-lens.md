@@ -27,7 +27,7 @@ For `FAILED`, read the available Reviewer Report.
 
 If the unchanged lens assignment remains executable, use the failed-child replacement procedure for the same assignment and Report path.
 
-Otherwise, stop and retire the failed reviewer. Present the exact assignment failure to the Human.
+Otherwise, retire the failed reviewer. Present the exact assignment failure to the Human.
 
 ## Start the Finding verifier
 
@@ -67,7 +67,7 @@ For `FAILED`, the complete Verification Report is already read.
 
 If the unchanged verification assignment remains executable, use the failed-child replacement procedure for the same assignment and Verification Report path.
 
-Otherwise, stop and retire the failed verifier. Present the exact assignment failure to the Human.
+Otherwise, retire the failed verifier. Present the exact assignment failure to the Human.
 
 For `READY`, inspect the verdicts recorded for the source Findings.
 
@@ -75,9 +75,27 @@ If one or more verdicts are `UNVERIFIABLE`, keep both sessions and Report paths 
 
 Send the Verification Report path to the same reviewer. Ask it to revise its complete Reviewer Report for every `UNVERIFIABLE` result.
 
-After the reviewer returns an accepted revised Report, send that same Reviewer Report path to the same verifier.
+## Receive the revised reviewer
 
-The verifier overwrites its complete Verification Report. Repeat this alternation while an `UNVERIFIABLE` result remains.
+Require the revised Reviewer Handoff summary to start with its Report verdict.
+
+For `FINDINGS` with `READY`, send the same Reviewer Report path to the same verifier.
+
+For `CLEAN` with `READY`, do not read the Reviewer Report. Retire both the reviewer and verifier with `bwr.status: done`.
+
+Record the lens as settled with no confirmed Finding. Its review place is now free.
+
+For `BLOCKED`, read the available Reviewer Report. Resolve the blocker and follow up with the same reviewer.
+
+For `FAILED`, read the available Reviewer Report.
+
+If the unchanged lens assignment remains executable, replace the failed reviewer for the same assignment and Reviewer Report path. Provide the current Verification Report path and frozen Pass inputs.
+
+Otherwise, retire both lens-chain sessions. Present the exact assignment failure to the Human.
+
+After an accepted revised `FINDINGS` Report, the verifier overwrites its complete Verification Report.
+
+Repeat this alternation while an `UNVERIFIABLE` result remains.
 
 ## Close the lens chain
 
@@ -98,4 +116,5 @@ Record in `PROGRESS.md`:
 - Verification settled → return to the current Pass with one free review place.
 - `UNVERIFIABLE` remains → remain in this Workflow with the same reviewer and verifier.
 - Resolvable assignment blocker → remain in this Workflow.
+- Unresolvable lens assignment failure → remain in this Workflow and wait for the Human.
 - Frozen subject changed → return to the current Pass Workflow.

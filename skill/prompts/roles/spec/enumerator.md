@@ -7,6 +7,7 @@ Check every:
 - internal reference;
 - cited path, symbol, command, and test;
 - closed value list;
+- required identifier and identifier format;
 - count and absolute statement;
 - table definition;
 - named behavior without a validation method.

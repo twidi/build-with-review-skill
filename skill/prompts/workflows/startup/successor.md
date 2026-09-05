@@ -17,6 +17,7 @@ Confirm that:
 - every assigned path exists;
 - the repository matches the assigned Git commit;
 - the new Lot exists in the Current Spec;
+- the assigned controlling obligations match that Lot in the Current Spec;
 - `PROGRESS.md` and `GUIDE.md` contain the required current state.
 
 Adopt the provider map and Review Concurrency from `PROGRESS.md` as current defaults.
@@ -51,15 +52,23 @@ Read once; reread as needed:
 
 Start the Watchdog for this Orchestrator with that configuration. Keep its returned `session_id`.
 
+Wait for its first message.
+
+For `WATCHDOG: READY`, keep the session and continue.
+
+For `WATCHDOG: FAILED`, or when the session ends before confirmation, retire it with `bwr.status: failed`. Resolve the cause and create a replacement.
+
+Do not accept ownership without one confirmed Watchdog.
+
 ## Accept ownership
 
 Load TwiCC's current send-message instructions when not already loaded.
 
-Send the `ACCEPTED` message from the Orchestrator Handoff Contract to the `parent` target.
-
 Update `PROGRESS.md` with the new current Lot and accepted succession.
+
+Send the `ACCEPTED` message from the Orchestrator Handoff Contract to the `parent` target.
 
 ## Exit
 
-- Valid handoff and started Watchdog → read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md`.
+- Valid handoff and started Watchdog → read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md` with the received Planning assignment.
 - Unresolved handoff blocker → remain in this Workflow and wait.

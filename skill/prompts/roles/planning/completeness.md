@@ -12,7 +12,9 @@ Check:
 - every Task keeps its Design section empty;
 - Plan detail remains inside the applicable Plan Contract.
 
-Use the Current Spec and every assigned parent Plan or source Report as authoritative inputs.
+Use the Current Spec and assigned parent Plans as authority.
+
+Use assigned Reports as evidence for the accepted correction obligations.
 
 Start with:
 

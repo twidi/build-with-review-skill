@@ -50,6 +50,8 @@ A Lot is one planned delivery stage from the Current Spec. Every Lot identifier 
 
 The string prefix prevents tools from treating `1.10` as a decimal number.
 
+A Sub-lot appends `.<next sequential number>` to its complete root Lot identifier. It does not add another `lot-` prefix.
+
 ### Task
 
 A Task is one coherent construction unit inside a plan. Tasks run sequentially.
@@ -64,11 +66,11 @@ A Round identifies one review or check assignment. Round numbers provide identit
 
 ### Pass
 
-A Pass is one complete Product Review of one frozen commit. All five Product Review lenses belong to the same Pass.
+A Pass is one complete Product Review of one frozen commit. All five Product Review lenses belong to the same Pass. Its identifier is `pass-<number>`, sequential within the root Lot.
 
 ### Correction Round
 
-A Correction Round handles one bounded correction set after Product Review. It is not a sub-lot. Its identifier uses the parent Lot and a correction number.
+A Correction Round handles one bounded correction set after Product Review. It is not a sub-lot. Its identifier is `correction-<number>`, sequential within the root Lot.
 
 Example:
 
@@ -101,22 +103,15 @@ This order does not make every source interchangeable. The Current Spec controls
 
 The plan controls the current decomposition. The Design controls the implementation approach for one Task. Git shows the real technical state.
 
-`GUIDE.md` stores current run instructions. `PROGRESS.md` stores durable operating memory. Reports store observations and handoffs.
+`GUIDE.md` stores current run instructions. `PROGRESS.md` stores durable operating memory. Reports store detailed specialist results. Handoffs route them by exact path.
 
 Annotations make live sessions readable. If project instructions make `GUIDE.md` stale, the project instructions win. The Orchestrator then updates `GUIDE.md`.
 
 ## 4. Tracked product documents
 
-BWR follows existing repository conventions first. When the repository has no relevant convention, use these paths:
+BWR follows existing repository conventions first. The Orchestrator proposes each tracked document path.
 
-```text
-docs/specs/<feature>.md
-docs/specs/<feature>-amendment-1.md
-docs/specs/<feature>-amendment-2.md
-docs/plans/<feature>-lot-1.md
-docs/plans/<feature>-lot-1.1.md
-docs/plans/<feature>-lot-1-correction-1.md
-```
+When no clear convention determines a path, the Orchestrator asks the Human to confirm or replace its proposal before writing.
 
 Amendments stay beside the Current Spec. BWR does not create a separate Amendment directory. Plans and Correction Round plans stay beside other plans.
 
@@ -135,10 +130,10 @@ The Current Spec contains, with flexible headings:
 - important interactions;
 - global constraints;
 - verification behaviors and proof boundaries;
-- the Lot breakdown;
+- the ordered root Lot breakdown;
 - dependencies between Lots.
 
-Each Lot states its responsibility, obligations, dependencies, and end state. The approved Current Spec has no necessary unresolved product question. It does not predefine future functions, signatures, commands, tasks, or reports.
+Each Lot states its responsibility, obligations, dependencies, and end state. Root Lots appear in execution order and depend only on earlier root Lots. The approved Current Spec has no necessary unresolved product question. It does not predefine future functions, signatures, commands, tasks, or reports.
 
 BWR has no global requirement identifier registry. Actors reference an obligation with its heading path and a short exact quote.
 
@@ -193,6 +188,7 @@ A Correction Round plan contains:
 - parent plan path;
 - every confirmed source finding;
 - every verification report;
+- every accepted Amendment that creates a correction obligation;
 - the resulting correction obligations;
 - obligations that must remain preserved;
 - ordered Tasks with empty Design sections.
@@ -207,7 +203,10 @@ A sub-lot plan contains:
 - Current Spec path;
 - reviewed commit;
 - parent plan path;
-- all source findings;
+- every confirmed source finding;
+- every corresponding verification report;
+- every accepted Amendment that creates a correction obligation;
+- the resulting correction obligations;
 - parent, Current Spec, and earlier correction obligations to preserve;
 - ordered Tasks with empty Design sections.
 
@@ -218,7 +217,7 @@ The sub-lot follows the normal plan check, construction, and Product Review work
 The BWR workspace is inside the active checkout or worktree. Its path is:
 
 ```text
-<ACTIVE_PROJECT_ROOT>/bwr_workspace/<FEATURE>
+<active checkout>/bwr_workspace/<FEATURE>
 ```
 
 This complete path is `<BWR_WORKSPACE>`. The parent directory can contain several BWR workspaces. BWR does not commit the BWR workspace.
@@ -268,7 +267,7 @@ It does not contain:
 
 `PROGRESS.md` is free Markdown. No tool parses it. Ordinary children do not read it.
 
-The Human, active Orchestrator, successor Orchestrator, and Recovery Orchestrator use it.
+The Human, active Orchestrator, and successor Orchestrator use it.
 
 The Orchestrator edits current configuration in place. It appends only durable events to the chronological log.
 
@@ -313,7 +312,7 @@ A Construction diagnostic reads it when Git, Gate, or environment facts are rele
 
 ### `ADDITIONAL-INSTRUCTIONS.md`
 
-This file belongs to the Human. The Orchestrator never rewrites it. When it exists, every newly created BWR session receives its content.
+This file belongs to the Human. The Orchestrator never rewrites it. When it exists, every newly created BWR session except the self-contained Watchdog receives its content.
 
 These instructions do not replace higher authority. A later edit applies automatically to sessions created after the edit. It does not automatically change an active session.
 
@@ -325,9 +324,13 @@ Reports are durable working memory for one BWR run. They are not product authori
 
 They are not committed. The parent constructs an exact unique report path before session creation. One report has one active writer.
 
+Before writing an assigned BWR workspace file, the child creates its parent directory and any missing ancestors. An existing directory is not an error.
+
 A new logical assignment gets a new file. A follow-up for the same assignment overwrites the same file. BWR creates no `v2` file for a follow-up.
 
-A replacement session for the same logical assignment inherits that Report path only after the failed writer stops and retires. Recovery assigns a fresh path for unfinished work.
+A replacement session for the same logical assignment inherits that Report path only after the failed writer retires.
+
+Private-history files remain at their stable paths.
 
 BWR performs no report compaction. BWR uses this structure:
 
@@ -394,6 +397,8 @@ SUMMARY: <one short result>
 PARENT ACTION: <next expected action, or none>
 ```
 
+Before sending the Handoff, the child sets its own status to `idle`, `blocked`, or `failed`. The Handoff is its final visible action before waiting.
+
 The parent always checks that:
 
 - the message announces one valid result;
@@ -428,7 +433,7 @@ Every parent creates a child in the same TwiCC project. This rule preserves the 
 
 Every non-Orchestrator child title starts with the exact prefix `- `.
 
-An Orchestrator title never starts with this prefix. This rule includes initial, successor, and Recovery Orchestrators.
+An Orchestrator title never starts with this prefix. This rule includes initial and successor Orchestrators.
 
 Every non-Orchestrator child uses:
 
@@ -456,11 +461,13 @@ It reports blockers to its parent. It never asks the Human directly.
 
 ### Retirement rules
 
-After final acceptance of a non-Orchestrator child, the direct parent:
+When the owning Workflow declares a non-Orchestrator child's session lifecycle complete, the direct parent:
 
 1. sets the terminal annotation status;
 2. archives the session;
 3. hides the session.
+
+Archiving a session stops its live process. BWR does not stop it separately before retirement.
 
 The child never archives or hides itself.
 
@@ -478,13 +485,15 @@ BWR uses:
 - `cancelled`;
 - `superseded`.
 
-Terminal values are `done`, `failed`, `cancelled`, and `superseded`. BWR has no `paused` or `stopped` state. The child maintains its status.
+Terminal values are `done`, `failed`, `cancelled`, and `superseded`. BWR has no `paused` or `stopped` state.
+
+The child updates its status before each Handoff. The parent updates it for follow-up and retirement.
 
 The parent can correct a stale status after observing real state.
 
 `BLOCKED` work resumes in the same session. `FAILED` work never does.
 
-The owning Workflow can stop the work, create a new logical assignment, or replace the failed session. A replacement for the same assignment starts only after the old writer stops and retires.
+The owning Workflow can end the work, create a new logical assignment, or replace the failed session. A replacement for the same assignment starts only after the old writer retires.
 
 ### Annotations
 
@@ -504,6 +513,10 @@ BWR uses these optional keys:
 
 Every BWR session receives `bwr.role`, `bwr.status`, and `bwr.feature`. It receives other keys only when they apply. Do not write empty placeholder values.
 
+When an assignment changes, replace its complete applicable annotation set. Remove keys that applied only to the completed assignment.
+
+Each Round uses one complete text identifier. Its annotation and Report path use that exact identifier without rebuilding it from a separate number.
+
 Annotations never prove a workflow transition.
 
 Use this applicability map:
@@ -517,7 +530,7 @@ Use this applicability map:
 | Reach reviewer | `bwr.phase=amendment`, `bwr.round` |
 | Amendment fixer | `bwr.phase=amendment` |
 | Consolidation checker | `bwr.phase=amendment`, `bwr.round` |
-| Plan completeness checker | `bwr.phase=planning`, `bwr.lot`, `bwr.round` |
+| Plan completeness checker | `bwr.phase=planning`, `bwr.lot`, `bwr.round`, and correction when applicable |
 | Implementer | `bwr.phase=construction`, Lot, Task, Attempt, and correction when applicable |
 | Design or Code checker | Implementer keys plus `bwr.round` |
 | Construction diagnostic | construction, Lot, Task, and correction when applicable |
@@ -530,9 +543,9 @@ Use this applicability map:
 
 The Orchestrator owns workflow, routing, and durable operating memory. It does not replace specialist roles.
 
-It writes the initial Spec, Amendments, and plans. It also corrects its own plans.
+It writes or corrects a Spec, Amendment, or Plan when the active Workflow assigns that artifact to it.
 
-It creates sessions, assignments, report paths, annotations, handoffs, and commits for its owned documents. It maintains `PROGRESS.md` and `GUIDE.md`.
+It creates sessions, assignments, report paths, and annotations. It creates a commit only when the active Workflow authorizes it, and only for its assigned commit scope. It maintains `PROGRESS.md` and `GUIDE.md`.
 
 It checks visible handoff completeness only. It does not redo a reviewer, fixer, checker, Implementer, verifier, or diagnostic mandate.
 
@@ -575,6 +588,8 @@ The provider can require several consecutive widgets. The design defines no widg
 
 The initial setup does not ask for the current Orchestrator provider. The Human can change a provider choice at any time. The Orchestrator updates `PROGRESS.md`.
 
+When the `Implementer checkers` provider changes, the Orchestrator sends the new choice to every active Implementer that can still create checkers. Those Implementers use it for future checker sessions.
+
 When an Orchestrator creates a successor, it asks for the successor provider. The successor receives the previous provider map as recommended defaults.
 
 ### Presets
@@ -601,7 +616,7 @@ The watchdog always uses provider `claude_code` and preset `Minimal`.
 
 ## 11. Review Concurrency
 
-The Human selects one Review Concurrency value during initial setup. The Orchestrator records it in `PROGRESS.md`.
+The Human selects one Review Concurrency value during initial setup. It is an integer of `1` or more. A value above the available review units is valid. The Orchestrator records it in `PROGRESS.md`.
 
 The value applies to Spec full-round fanout and Product lens chains. It does not apply to Reach, Plan, Consolidation, Design, or Code checks. It never creates parallel Implementers.
 
@@ -633,7 +648,7 @@ A review report uses this base shape:
 # <Role> Report
 
 Subject: <exact subject>
-Verdict: CLEAN | FINDINGS | BLOCKED
+Verdict: CLEAN | FINDINGS | BLOCKED | FAILED
 
 ## Coverage
 
@@ -644,7 +659,7 @@ Verdict: CLEAN | FINDINGS | BLOCKED
 <admitted findings, or none>
 ```
 
-`CLEAN` means that the role completed its complete mandate and admitted no finding. `FINDINGS` means that the role completed its mandate and reported all admitted findings. `BLOCKED` means that an exact operational obstacle prevents the mandate.
+`CLEAN` means that the role completed its complete mandate and admitted no finding. `FINDINGS` means that the role completed its mandate and reported all admitted findings. `BLOCKED` means that an exact resumable operational obstacle prevents the mandate. `FAILED` means that the assignment cannot complete or resume a valid review.
 
 A DECISION uses the `FINDINGS` report verdict. The reviewer proposes no fix unless its role requires correction work.
 
@@ -693,7 +708,7 @@ The reviewer uses Probability privately. The public finding contains Severity on
 
 ### Cases without Probability filtering
 
-The Spec Feasibility reviewer reports every infeasible written contract. The Product `coverage` reviewer reports every concrete missing obligation. A direct violation of the Current Spec or Task contract is always reported.
+The Spec Feasibility reviewer reports every infeasible written contract. The Product `coverage` reviewer reports every concrete missing obligation. A direct violation of the assigned authoritative contract is always reported.
 
 This rule applies to Design, Code, and Product review. Probability applies only to a new inferred risk beyond an explicit contract. Plan completeness and Consolidation do not use Probability.
 
@@ -727,6 +742,8 @@ The heading states a verifiable claim. The finding includes a direct scope link 
 - spec silence for a DECISION.
 
 Finding identifiers are local to one report. The stable identity is `<report-path>#F<number>`.
+
+When one assignment overwrites its report, surviving findings keep their identifiers. Removed identifiers are never reused. New findings use the next never-used identifier.
 
 ### DECISION finding
 
@@ -907,6 +924,8 @@ Full round
 -> fresh full round
 ```
 
+The Orchestrator records every round verdict and Report path. It passes only `FINDINGS` Reports to the Spec fixer.
+
 A clean full round skips the Fixer and Scoped stages. Spec findings do not use Finding verifiers. A clean full round goes to Human approval.
 
 When the Human requests a change, the same Spec fixer applies it. The correction then receives Scoped Review and a fresh full round.
@@ -968,6 +987,8 @@ Each correction receives a fresh checker.
 
 ### Amendment workflow
 
+The Orchestrator uses `bwr.phase: amendment` throughout this workflow. After finalization, it restores the complete applicable annotation set from the recorded return context.
+
 ```text
 Human decision
 -> Orchestrator writes initial Amendment
@@ -989,6 +1010,10 @@ The Orchestrator also re-evaluates interrupted work. Work with the same objectiv
 
 Work created under a now-false objective starts again from the appropriate plan or Attempt boundary.
 
+When the same Attempt continues, the Amendment commit replaces its expected base commit. Existing assigned working-tree changes form the candidate diff from that new base.
+
+When an Amendment interrupts Planning, its return context preserves the complete Planning assignment and candidate state. Finalization rebuilds that assignment against the Updated Spec before Planning resumes.
+
 ## 18. Planning roles and workflow
 
 ### Plan completeness checker
@@ -1004,6 +1029,10 @@ The checker validates:
 It does not choose implementation preferences. It does not design signatures or code.
 
 ### Planning workflow
+
+Each Planning invocation starts with an explicit Plan type, identifier, Current Spec path, and complete controlling source set.
+
+A Correction Round or Sub-lot Plan records every confirmed source Finding, its Verification Report, and every accepted Amendment that creates one of its obligations.
 
 The Orchestrator:
 
@@ -1086,9 +1115,10 @@ The Orchestrator can launch a diagnostic after repeated comparable failed Attemp
 - `DESIGN`;
 - `EARLIER_TASK`;
 - `PLAN`;
+- `AMENDMENT` when the Current Spec requires a Human product decision or correction;
 - `BLOCKED` only when indispensable information is missing.
 
-It reports evidence and the required restart point. It modifies nothing.
+It reports evidence and the required restart point. It modifies nothing. An `AMENDMENT` classification identifies the product question or Current Spec problem. The Human must decide the resulting product change before the Amendment workflow starts.
 
 ## 20. Construction workflow
 
@@ -1150,13 +1180,19 @@ If a failed Attempt has assigned tracked changes, the Implementer creates a pres
 
 If no assigned tracked change exists, it creates no empty commit. The Orchestrator never resets history.
 
-The next commit reverts the failed Attempt and can include the revised plan.
+The next commit reverts the failed Attempt and can include the revised plan. This revert is applied at most once.
 
 An `EARLIER_TASK` or `PLAN` route enters the Plan write Workflow. It provides the relevant failed Implementer Reports, any Diagnostic Report, and the selected restart boundary.
 
 The pending revert becomes explicit Planning commit scope. The clean revised Plan and that revert form one commit. Construction resumes from the earliest incomplete or revised Task.
 
-The history becomes:
+A route reselection preserves any pending or committed revert for that failed Attempt. It never reapplies the same revert.
+
+A `BLOCKED` route commits any pending revert before it waits. It records the current commit as its restart base and records whether the failed Attempt revert is complete or unnecessary.
+
+The restart base is a reference, not a checkout target. After resolution, the Orchestrator preserves legitimate later changes and selects the restart boundary again.
+
+For a route that revises the Plan, the history becomes:
 
 ```text
 Plan commit
@@ -1234,7 +1270,9 @@ A lens settles when:
 - its reviewer is clean; or
 - every finding is `CONFIRMED` or `DISPROVED`.
 
-`UNVERIFIABLE` returns to the same reviewer and verifier. The Pass closes only after all five lenses settle. The Orchestrator can merge duplicates or split the set into traceable obligations.
+`UNVERIFIABLE` returns to the same reviewer and verifier. A revised Report can become `CLEAN` or return its remaining Findings for verification. Blocked and failed revisions follow their normal session routes.
+
+The Pass closes only after all five lenses settle. The Orchestrator can merge duplicates or split the set into traceable obligations.
 
 It does not rejudge findings. A combined obligation cites every source identity. BWR creates no extra consolidated finding file.
 
@@ -1243,6 +1281,10 @@ If no confirmed finding remains, the Pass is clean. After correction, all five l
 A `DISPROVED` finding closes without work. A confirmed ordinary finding becomes a correction obligation.
 
 A confirmed DECISION goes to the Human before correction planning. The resulting product change uses the Amendment workflow.
+
+An accepted Amendment records every exact `DECISION` source identity it resolves. Product Review never opens another Amendment for those identities.
+
+The Amendment's implementation obligations join the correction set with their source identities. When it creates none, a fresh Pass reviews the Updated Spec and current commit.
 
 ## 24. Correction routing
 
@@ -1293,7 +1335,13 @@ It presents every credible validation command to the Human. The Human selects:
 - execution order;
 - commands that can run in parallel.
 
-The Orchestrator records the result in `GUIDE.md`. An existing Gate is inherited during Recovery or succession.
+The first Orchestrator announces and runs the complete approved Gate before creating the BWR workspace.
+
+When it passes, startup continues. When it fails, the Orchestrator gives the Human a concise failure summary and returns control.
+
+The Human owns diagnosis, correction, and disposition of that starting-state failure. The Orchestrator reruns the complete Gate after the Human asks it to continue.
+
+The Orchestrator records the approved Gate configuration in `GUIDE.md`. It does not persist the baseline execution result. A successor inherits the existing Gate.
 
 ### Execution
 
@@ -1307,7 +1355,13 @@ A corrected Gate failure does not remain in the final Report. An unresolved fail
 
 The final Task Gate validates all accumulated work.
 
-Product Review needs no duplicate Gate when tracked files remain unchanged after the final Task Gate.
+Before Product Review, the Orchestrator compares the current commit with the commit covered by the most recent passing complete Gate.
+
+When a later change can affect an included Gate command, the Orchestrator announces and runs the complete Gate. Otherwise, Product Review needs no duplicate Gate.
+
+When that Gate fails, the Orchestrator gives the Human a concise failure summary and returns control. The Human owns the next action.
+
+When that Gate passes, the Orchestrator records `PASSED`, its covered commit, and a concise command-result summary in `PROGRESS.md`. This rule does not apply to the initial baseline Gate.
 
 ### Changes
 
@@ -1315,9 +1369,11 @@ A validation command created by an Implementer automatically joins the Gate. The
 
 The Orchestrator updates `GUIDE.md`. When the correct group is uncertain, use a new sequential group. Removing a command without replacement requires a Human decision.
 
-Reducing coverage also requires a Human decision.
+Any validation coverage change requires a Human decision.
 
-A preexisting validation command discovered later requires a Human inclusion decision. A simple command rename replaces the previous command automatically.
+A preexisting validation command discovered later requires a Human inclusion decision.
+
+For a simple command rename, the Implementer records the exact old-to-new replacement and confirms equivalent validation coverage. The final Gate and `GUIDE.md` replace the old command automatically and preserve its execution group.
 
 ## 26. Git commits
 
@@ -1330,7 +1386,7 @@ The Orchestrator commits:
 - approved Current Spec;
 - Lot, sub-lot, and Correction Round plans;
 - Amendment and Updated Spec;
-- failed Attempt revert and revised plan.
+- failed Attempt reverts, alone or with a revised Plan as the active Workflow requires.
 
 ### Implementer commit scope
 
@@ -1393,17 +1449,20 @@ The initial configuration occurs before any BWR workspace write. The sequence is
 6. It asks all provider choices.
 7. It asks Review Concurrency.
 8. It presents the Feature identifier.
-9. It creates `<BWR_WORKSPACE>`.
-10. It writes `GUIDE.md` and `PROGRESS.md`.
-11. It starts the muted watchdog.
-12. It writes and self-reviews the first Spec.
-13. It launches the first Spec Review immediately.
+9. It presents the proposed Current Spec path and requests confirmation when the repository convention is unclear.
+10. It announces and runs the complete approved Gate.
+11. If the Gate fails, it reports the failure to the Human and waits. It reruns the complete Gate after the Human asks it to continue.
+12. It creates `<BWR_WORKSPACE>`.
+13. It writes `GUIDE.md` and `PROGRESS.md`.
+14. It starts the muted watchdog.
+15. It writes and self-reviews the first Spec.
+16. It launches the first Spec Review immediately.
 
-Steps five through eight form one Human setup phase. After setup, the Human can leave the screen.
+Steps five through nine form one Human setup phase before the starting Gate runs.
 
-The Feature identifier does not require a separate question when it is obvious. If its exact BWR workspace already exists, the Orchestrator asks whether to use Recovery or choose another identifier.
+The Feature identifier does not require a separate question when it is obvious. If its exact BWR workspace already exists, the Orchestrator asks for another identifier.
 
-## 29. Continuation, succession, and Recovery
+## 29. Continuation and succession
 
 ### Continuation
 
@@ -1416,9 +1475,9 @@ Succession is optional between Lots. The old Orchestrator:
 1. completes the current Lot;
 2. updates `PROGRESS.md`;
 3. asks for the successor provider;
-4. stops its watchdog;
-5. creates the successor in the same TwiCC project;
-6. waits for acceptance.
+4. creates the successor in the same TwiCC project;
+5. waits for acceptance;
+6. retires its watchdog after acceptance.
 
 The successor receives:
 
@@ -1434,41 +1493,15 @@ The successor receives:
 - Review Concurrency;
 - Gate through `GUIDE.md`.
 
-It does not receive topology, transcripts, old session lists, or watchdog state. It starts its own muted watchdog.
+It does not receive topology, transcripts, old session lists, or watchdog state. It confirms its own muted watchdog and records ownership before sending `ACCEPTED`.
 
 After acceptance, the old Orchestrator remains visible, unmuted, unarchived, and not hidden.
 
-### Recovery
-
-Recovery uses a new independent Orchestrator after loss or abandonment of the old one. It starts only after the Human confirms that the old Orchestrator no longer works. BWR creates no lock.
-
-The Recovery Orchestrator uses an exact BWR workspace path supplied by the Human when it contains `PROGRESS.md` and `GUIDE.md`. Otherwise, it inspects direct children of `<ACTIVE_PROJECT_ROOT>/bwr_workspace/` that contain both files.
-
-It asks the Human to confirm one discovered candidate. When discovery finds none or several, it asks for the exact path. It sets `<BWR_WORKSPACE>` only after that confirmation.
-
-It reads `ADDITIONAL-INSTRUCTIONS.md` when that file exists.
-
-The Recovery Orchestrator reads:
-
-- `PROGRESS.md`;
-- `GUIDE.md`;
-- Current Spec;
-- current plans;
-- durable reports named by the current work.
-
-It preserves valid commits. It can reuse a clearly complete report. It ignores incomplete or ambiguous reports.
-
-It creates fresh sessions for unfinished work. It does not depend on old transcripts or topology. It never assigns a report path that an old active session still uses.
-
-When activity is uncertain, it asks the Human to confirm that the old session stopped.
-
-It reuses provider choices, Review Concurrency, Gate, and Git guidance when they remain valid. It asks only for missing or invalid configuration.
-
 ## 30. Watchdog
 
-The watchdog is the only BWR runtime script. The implementation reuses the legacy watchdog behavior.
+The watchdog is the only BWR runtime script. The implementation reuses the legacy observation and filtering behavior.
 
-It removes only provider-subagent support. Remove:
+It removes provider-subagent support and extends delivery to active parents in the current Orchestrator subtree. Remove:
 
 - `journal_context` import;
 - `PROGRESS` integration;
@@ -1491,12 +1524,26 @@ Preserve:
 - idle sessions never stale;
 - blocked sessions eligible for stale reporting;
 - existing ordering;
-- self-message snapshot;
+- direct delivery of complete parent-local snapshots;
 - loud error reporting.
 
 The watchdog observes and reminds. It does not change workflow state. It does not repair annotations.
 
-It does not detect a specific report-acceptance state. Its reminder says that unfinished work without a blocker should resume. The Orchestrator stops it before succession and final delivery.
+The script reads the current Orchestrator subtree once per tick. It always sends the Orchestrator a snapshot of its direct children.
+
+It also sends each descendant parent a snapshot when that parent has an open direct child. A descendant without an open direct child receives no message.
+
+The Watchdog session relays only script errors. One failed delivery does not prevent the script from attempting the other deliveries.
+
+A quiet child or absent live process is advisory. Each recipient uses its judgment against the direct child's assignment and expected work.
+
+When a state looks abnormal, the parent can ask that child to resume and return a missing Handoff. Otherwise, it can ask for the current step, blocker, and next action.
+
+This request changes no assignment, Report, or `bwr.status`.
+
+Each Startup Workflow waits for the Watchdog's initial cron confirmation. A failed or stopped setup receives a replacement before startup completes.
+
+It does not detect a specific report-acceptance state. Its reminder says that unfinished work without a blocker should resume. The Orchestrator retires it after successor acceptance or before final delivery.
 
 ## 31. Prompt architecture
 
@@ -1578,8 +1625,7 @@ The installed BWR skill uses:
 │   ├── workflows/
 │   │   ├── startup/
 │   │   │   ├── initial.md
-│   │   │   ├── successor.md
-│   │   │   └── recovery.md
+│   │   │   └── successor.md
 │   │   ├── spec/
 │   │   │   ├── write.md
 │   │   │   ├── review-round.md
@@ -1673,7 +1719,7 @@ The installed BWR skill uses:
 
 BWR creates no empty runtime directories. Every listed file has a defined reader.
 
-`SKILL.md` is a minimal Router. It loads an Initial or Recovery Orchestrator and selects its Startup Workflow. It contains no phase procedure, report format, review rubric, Gate detail, or full transition table.
+`SKILL.md` is a minimal Router. It loads the Initial Orchestrator and selects its Startup Workflow. It contains no phase procedure, report format, review rubric, Gate detail, or full transition table.
 
 The Watchdog is a muted `claude_code` session with the `Minimal` preset. `prompts/roles/watchdog.md` contains its self-contained runtime task. Each applicable Startup Workflow owns its launch procedure. `scripts/watchdog.py` is the only BWR script.
 
@@ -1703,9 +1749,9 @@ The fixed include map is:
 | Spec fixer or Amendment fixer | `workflow.md`, `child.md`, `fixer.md` |
 | Every other Role | `workflow.md`, `child.md` |
 
-The Initial, successor, and Recovery Orchestrators use the same pure Role file. No Orchestrator loads `child.md`.
+The Initial and successor Orchestrators use the same pure Role file. No Orchestrator loads `child.md`.
 
-`SKILL.md` selects the Initial or Recovery Startup Workflow. The successor entry includes `startup/successor.md`.
+`SKILL.md` selects the Initial Startup Workflow. The successor entry includes `startup/successor.md`.
 
 An initial or manually assigned Role reads its applicable Common prompts and pure Role prompt directly. A session created through TwiCC receives the corresponding entry composer.
 
@@ -1753,11 +1799,11 @@ Later Workflows, Contracts, and References use explicit on-demand reads for thei
 
 ### Shared Contract ownership
 
-`prompts/contracts/review/report.md` owns the common `CLEAN | FINDINGS | BLOCKED` Review Report. Spec, Reach, Consolidation, Plan completeness, Design, Code, and Product reviews use it. BWR creates no domain copy of that Contract.
+`prompts/contracts/review/report.md` owns the common `CLEAN | FINDINGS | BLOCKED | FAILED` Review Report. Spec, Reach, Consolidation, Plan completeness, Design, Code, and Product reviews use it. BWR creates no domain copy of that Contract.
 
 `prompts/contracts/review/finding.md` owns the public Finding shape. `prompts/references/review/risk-filtering.md` owns Probability, admission, and filtered private observations. Only an applicable Reviewer loads it. A Finding verifier never loads it.
 
-One `prompts/contracts/session/handoff.md` owns the common Report and return-message interface. Specialized Contracts extend the useful Report content without copying the common Handoff format.
+One `prompts/contracts/session/handoff.md` owns the common return-message interface. Specialized Contracts define useful Report content without copying the common Handoff format.
 
 One Implementer Report covers one complete Attempt. The same Contract covers `READY`, `BLOCKED`, and `FAILED`. BWR has no separate failure Report Contract.
 
@@ -1805,8 +1851,8 @@ The Orchestrator then:
 
 1. updates the final result in `PROGRESS.md`;
 2. records Current Spec, commits, Gate, final Pass, and accepted limits;
-3. stops the watchdog;
-4. retires remaining non-Orchestrator children;
+3. retires the watchdog;
+4. retires its remaining direct non-Orchestrator children;
 5. reports the result to the Human;
 6. asks whether to keep or delete the BWR workspace.
 

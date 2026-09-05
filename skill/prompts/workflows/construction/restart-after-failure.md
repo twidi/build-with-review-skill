@@ -8,6 +8,14 @@ When a Diagnostic Report is assigned:
 
 Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/construction/diagnostic-report.md`.
 
+When this Workflow resumes after its `BLOCKED` exit, read its recorded restart base and blocker from `PROGRESS.md`.
+
+Inspect the resolution evidence and current Git state. Record that evidence in `PROGRESS.md`.
+
+Use the restart base as a Git reference. Preserve legitimate later changes. Do not reset to it.
+
+Return directly to restart-boundary selection.
+
 ## Select the restart boundary
 
 Read the failed Implementer Report, Current Spec, active Plan, assigned Task, and current Git state.
@@ -35,7 +43,11 @@ Record the selected boundary, evidence paths, and reason in `PROGRESS.md`.
 
 When the failed Implementer Report names a preservation commit, inspect that commit and the current Git state.
 
-Apply `git revert --no-commit <preservation-commit>`.
+Determine whether this Workflow already applied that exact preservation commit's revert. The revert can be pending or included in a later commit.
+
+When it is already applied, preserve that state and do not apply it again.
+
+Otherwise, apply `git revert --no-commit <preservation-commit>`. Immediately record the applied revert in `PROGRESS.md`.
 
 Preserve unrelated working-tree changes. Do not reset or rewrite Git history.
 
@@ -63,17 +75,32 @@ Then read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md` for the 
 
 The Planning Workflows commit the clean revised Plan with that transferred revert. They resume construction from the earliest incomplete or revised Task.
 
-For `AMENDMENT`, commit the pending revert when one exists. Then execute the applicable Amendment Workflow.
+For `AMENDMENT`, present the exact Current Spec problem, evidence, options, consequences, and recommendation through the Orchestrator Human-decision procedure.
 
-For `BLOCKED`, commit the pending revert when one exists. Present the complete context and required action to the Human.
+Record the exact Human decision in `PROGRESS.md`.
+
+When that decision does not require a Current Spec change, preserve the current revert state. Re-evaluate the smallest restart boundary from the decision.
+
+When it requires an Amendment, record this Workflow and the interrupted Task as the return context. Commit the pending revert when one exists.
+
+Then provide the exact Human decision, Current Spec, relevant failed Implementer Reports, any Diagnostic Report, origin context, and return context to `<BWR_SKILL>/prompts/workflows/amendments/write.md`.
+
+For `BLOCKED`, commit the pending revert when one exists.
+
+Record the current Git commit as the restart base. Also record the failed Attempt, its preservation commit when one exists, and whether its revert is complete or unnecessary.
+
+Present the complete context and required action to the Human.
 
 Create every commit through that procedure.
 
-Update `PROGRESS.md` with the restored base commit and next route.
+Update `PROGRESS.md` with the next route and its committed Git state when applicable.
 
 ## Exit
 
 - `IMPLEMENTATION` or `DESIGN` prepared → execute `<BWR_SKILL>/prompts/workflows/construction/attempt.md` with a fresh Attempt identifier.
 - `EARLIER_TASK` or `PLAN` selected → continue through `<BWR_SKILL>/prompts/workflows/planning/write.md`; its Workflows return to construction.
-- `AMENDMENT` → execute `<BWR_SKILL>/prompts/workflows/amendments/write.md`.
+- Human decision requires an Amendment → execute `<BWR_SKILL>/prompts/workflows/amendments/write.md` with the prepared inputs.
+- Human decision changes the restart route → repeat boundary selection with that decision.
+- Required Human decision remains open → remain in this Workflow.
 - `BLOCKED` → wait for the required Human or external action.
+- Recorded blocker resolved → repeat boundary selection from the restart base.

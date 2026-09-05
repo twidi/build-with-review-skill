@@ -46,11 +46,13 @@ Send these values as a follow-up when the fixer already exists.
 
 ## Receive the Updated Spec
 
+Do not read the Fixer Report for `READY` or a non-decision `BLOCKED` result. Use the Handoff summary to route it.
+
 Before reading the Fixer Report:
 
 Read once; reread as needed: `<BWR_SKILL>/prompts/contracts/correction/fixer-report.md`.
 
-For `UPDATED` with `READY`, do not read the Fixer Report. Confirm the Updated Spec target exists.
+For `UPDATED` with `READY`, confirm the Updated Spec target exists.
 
 Record the completed generation and Fixer Report path in `PROGRESS.md`.
 
@@ -66,7 +68,7 @@ For `FAILED`, read the available Fixer Report.
 
 When Updated Spec generation remains executable, use the failed-child replacement procedure for the same assignment and Report path. Provide both Amendment stages' complete current inputs and accumulated correction sources.
 
-Otherwise, stop and retire the failed Fixer. Present the assignment failure to the Human.
+Otherwise, retire the failed Fixer. Present the assignment failure to the Human.
 
 ## Exit
 

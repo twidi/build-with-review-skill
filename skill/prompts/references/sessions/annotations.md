@@ -43,8 +43,6 @@ Use this mapping:
 
 Terminal values are `done`, `failed`, `cancelled`, and `superseded`.
 
-BWR has no `paused` or `stopped` status.
-
 ## Common keys
 
 Every session covered by this Reference receives:
@@ -65,10 +63,10 @@ Add only the keys that identify the session's actual assignment.
 | `bwr.lot` | The exact Lot identifier, including the `lot-` prefix |
 | `bwr.task` | The exact Task identifier |
 | `bwr.attempt` | The exact Attempt identifier |
-| `bwr.round` | The exact Round identifier |
-| `bwr.pass` | The exact Pass identifier |
+| `bwr.round` | The exact complete Round identifier declared by the current Workflow |
+| `bwr.pass` | The exact `pass-<number>` identifier |
 | `bwr.mandate` | The assigned stable lowercase mandate |
-| `bwr.correction` | The exact Correction Round identifier |
+| `bwr.correction` | The exact `correction-<number>` identifier |
 
 Keep identifiers as strings. For example, use `lot-1.10`, never `1.10`.
 

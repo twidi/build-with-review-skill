@@ -18,7 +18,9 @@ Use these mandates for the first full round:
 
 Add `ripple` to every later full round.
 
-Assign one Full Round identifier. Keep the candidate Current Spec unchanged until every assignment has a settled result.
+Assign `full-round-<next sequential number>` as the fresh Full Round identifier.
+
+Keep the candidate Current Spec unchanged until every assignment has a settled result.
 
 Update `PROGRESS.md` with the Full Round identifier, exact Spec path, and expected mandates.
 
@@ -29,7 +31,7 @@ Use the `Document reviewers` provider group and the preset assigned to the manda
 Use this Report path:
 
 ```text
-<BWR_WORKSPACE>/reports/spec/full-round-<number>/<mandate>.md
+<BWR_WORKSPACE>/reports/spec/<ROUND>/<mandate>.md
 ```
 
 Set these annotations:
@@ -67,20 +69,20 @@ Require each `READY` Handoff summary to state the Report verdict: `CLEAN` or `FI
 
 A `BLOCKED` or `FAILED` Handoff summary states its exact obstacle or failure.
 
-Do not read the Reviewer Reports during collection. Keep every exact Report path for later routing.
+For `CLEAN` or `FINDINGS`, do not read the Reviewer Report. Keep every exact Report path for the round record.
 
-For `BLOCKED`, resolve the obstacle and follow up with the same reviewer.
+For `BLOCKED`, read the available Report. Resolve the obstacle and follow up with the same reviewer.
 
 For `FAILED`, read the available Report. When the unchanged mandate remains executable, use the failed-child replacement procedure for the same assignment and Report path.
 
-Otherwise, stop and retire the failed reviewer. Present the assignment failure to the Human.
+Otherwise, retire the failed reviewer. Present the assignment failure to the Human.
 
-Settle the Full Round only after every expected mandate returns an accepted `READY` Handoff.
+Settle the Full Round only after every expected mandate has an accepted `READY` Handoff.
 
-Update `PROGRESS.md` with the settled verdicts and Report paths.
+Update `PROGRESS.md` with every settled verdict and Report path.
 
 ## Exit
 
 - Every mandate reports `CLEAN` → read and execute `<BWR_SKILL>/prompts/workflows/spec/human-approval.md`.
-- One or more mandates report `FINDINGS` → pass every Full Round Report path to `<BWR_SKILL>/prompts/workflows/spec/correction-loop.md`, then read and execute it.
+- One or more mandates report `FINDINGS` → pass only the `FINDINGS` Report paths to `<BWR_SKILL>/prompts/workflows/spec/correction-loop.md`, then read and execute it.
 - The Spec changes before settlement → supersede the affected reviewers and restart this Workflow with a fresh Full Round identifier.

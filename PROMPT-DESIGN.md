@@ -157,16 +157,17 @@ If you are the Orchestrator, read:
 
 <BWR_SKILL>/prompts/common/workflow.md
 <BWR_SKILL>/prompts/common/parent.md
-
-Then read and execute:
-
 <BWR_SKILL>/prompts/roles/orchestrator.md
+
+Then read and execute the assigned Startup Workflow.
 
 If your assignment gives another BWR Role, read `workflow.md` and `child.md`.
 
 If that Role creates child sessions, also read `parent.md`.
 
-Then read and execute the assigned pure Role prompt.
+Then read the assigned pure Role prompt.
+
+Read and execute the starting Workflow named by the Role or assignment.
 ```
 
 ### Role files
@@ -260,19 +261,21 @@ The Contract uses neutral language. Their Workflows define the actions.
 ```md
 # Session Handoff Contract
 
-A valid handoff contains:
+A valid Handoff message contains:
 
-1. the assigned Report;
-2. a return message.
+1. the result;
+2. the exact assigned Report path;
+3. a short summary;
+4. the expected parent action.
 
-The return message contains the result, Report path, short summary, and expected parent action.
+The Report is a separate file produced before the Handoff.
 ```
 
 A Contract requires useful information. It does not require machine-oriented structure without a real machine consumer.
 
 Do not add JSON, checksums, proof tokens, empty fields, or parser-oriented syntax.
 
-One Handoff Contract owns the common Report and return-message interface. A specialized Report Contract can add content required by its producer and consumer. It does not repeat the return-message format.
+One Handoff Contract owns the common return-message interface. A specialized Report Contract owns content required by its producer and consumer. It does not repeat the Handoff format.
 
 All ordinary review roles use one common Review Report Contract. Role-specific mandates do not create copies of the same output shape.
 

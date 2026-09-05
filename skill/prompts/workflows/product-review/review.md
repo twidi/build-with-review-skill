@@ -41,6 +41,8 @@ For every `UNVERIFIABLE` result, use its concrete check and observation to revis
 
 Add sufficient evidence, correct the Finding, or remove it when the claim cannot be supported.
 
+Keep every surviving Finding identifier unchanged. Do not reuse a removed identifier. Give any new Finding the next never-used identifier.
+
 Keep every unaffected Finding and the complete mandate coverage in the overwritten Reviewer Report.
 
 Execute the Reviewer completion procedure again for the complete revised result.

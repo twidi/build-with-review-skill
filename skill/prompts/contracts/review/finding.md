@@ -58,4 +58,6 @@ Finding identifiers start at `F1` and are local to one Review Report.
 
 The stable identity is `<report-path>#F<number>`.
 
+When the same assignment overwrites its Report, every surviving Finding keeps its identifier. Never reuse a removed identifier. Give each new Finding the next identifier never used in that Report.
+
 A public Finding never contains its private Probability assessment or rejected review observations.

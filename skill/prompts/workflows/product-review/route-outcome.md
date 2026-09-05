@@ -18,6 +18,14 @@ Read each Verification Report that contains a `CONFIRMED` verdict.
 
 Read the corresponding Reviewer Reports. Keep every confirmed Finding identity with its verification path.
 
+Keep confirmed ordinary Findings and confirmed `DECISION` Findings as separate sets.
+
+When accepted Amendment paths return to this Workflow, read each Amendment. Match its exact source Finding identities to the confirmed `DECISION` set.
+
+Mark each matched `DECISION` as resolved by that Amendment. Keep the Finding-to-Amendment mapping in `PROGRESS.md`.
+
+Do not start another Amendment for a resolved source Finding identity.
+
 Group duplicate Findings into one correction obligation when they describe the same required outcome.
 
 Split a compound Finding into traceable obligations when its corrections have different outcomes.
@@ -26,13 +34,13 @@ Preserve every source `<reviewer-report-path>#F<number>` in the resulting obliga
 
 ## Route a clean Pass
 
-When no confirmed Finding remains, record the Pass as `CLEAN` in `PROGRESS.md`.
+When the source set contains no confirmed Finding, record the Pass as `CLEAN` in `PROGRESS.md`.
 
 Execute the Lot closure Workflow.
 
 ## Resolve confirmed decisions
 
-Before correction planning, resolve every confirmed `DECISION` through the Orchestrator Human-decision procedure.
+Before correction planning, resolve every pending confirmed `DECISION` through the Orchestrator Human-decision procedure.
 
 Present the complete verified context and options. The Human must not need to read either source Report.
 
@@ -44,7 +52,9 @@ Keep all confirmed ordinary Findings pending while the Amendments run.
 
 After every required Amendment becomes part of the Current Spec, continue this Workflow with the Updated Spec and accepted Amendment paths.
 
-Include the implementation obligations created by those Amendments in the complete correction set.
+Add the implementation obligations created by those Amendments to the complete correction set. Preserve their Amendment paths and source Finding identities.
+
+When the accepted Amendments create no implementation obligation and no confirmed ordinary Finding remains, record the old Pass as historical. Start a fresh complete Pass against the Updated Spec and current commit.
 
 ## Select one correction route
 
@@ -60,7 +70,32 @@ Finding count and Severity do not select the route.
 
 ## Start planning
 
-Assign the next sequential Correction Round or Sub-lot identifier.
+Assign the next sequential identifier for the selected route.
+
+Use `correction-<number>` for a Correction Round. Its number is sequential within the root Lot.
+
+Use the Sub-lot identifier format from the Sub-lot Plan Contract.
+
+For a Correction Round, replace your complete applicable annotation set with:
+
+```text
+bwr.role: orchestrator
+bwr.status: working
+bwr.feature: <FEATURE>
+bwr.phase: planning
+bwr.lot: <root LOT>
+bwr.correction: <CORRECTION>
+```
+
+For a Sub-lot, replace your complete applicable annotation set with:
+
+```text
+bwr.role: orchestrator
+bwr.status: working
+bwr.feature: <FEATURE>
+bwr.phase: planning
+bwr.lot: <SUB_LOT>
+```
 
 Update `PROGRESS.md` with:
 
@@ -75,6 +110,7 @@ Provide those inputs, the Current Spec, the parent Plan, and the reviewed commit
 ## Exit
 
 - No confirmed Finding → execute `<BWR_SKILL>/prompts/workflows/delivery/close-lot.md`.
-- Confirmed `DECISION` remains → execute `<BWR_SKILL>/prompts/workflows/amendments/write.md`.
+- Pending confirmed `DECISION` remains → execute `<BWR_SKILL>/prompts/workflows/amendments/write.md`.
+- Every `DECISION` resolved and no correction obligation remains → execute `<BWR_SKILL>/prompts/workflows/product-review/pass.md` with the Updated Spec.
 - Correction Round selected → execute `<BWR_SKILL>/prompts/workflows/planning/write.md` for a Correction Round Plan.
 - Sub-lot selected → execute `<BWR_SKILL>/prompts/workflows/planning/write.md` for a Sub-lot Plan.

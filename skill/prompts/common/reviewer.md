@@ -20,11 +20,12 @@ Read once; reread as needed:
 
 ## Reviewer completion procedure
 
-Execute this procedure after completing the full Role mandate.
+Execute this procedure when the review is complete, blocked, or failed.
 
 Before writing the Report, confirm that:
 
-- the complete Role mandate received coverage;
+- a complete result covers the full Role mandate;
+- a blocked or failed result records its completed coverage and exact cause;
 - each public Finding is checkable and supported by evidence;
 - each public Finding has the correct Severity or `DECISION` classification;
 - the Report verdict matches its contents.
@@ -40,7 +41,10 @@ Use this Handoff mapping:
 | `CLEAN` | `READY` | `CLEAN` |
 | `FINDINGS` | `READY` | `FINDINGS` |
 | `BLOCKED` | `BLOCKED` | `BLOCKED` |
+| `FAILED` | `FAILED` | `FAILED` |
 
-Add a short Finding count or blocker after the summary verdict.
+Use `FAILED` only when this assignment cannot complete or resume a valid review. Record the exact terminal failure and completed coverage in the Report.
+
+Add a short Finding count, blocker, or failure after the summary verdict.
 
 Complete the Child Handoff procedure. Then wait for your parent.

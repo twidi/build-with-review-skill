@@ -45,7 +45,7 @@ Preserve unrelated working-tree changes.
 
 Write the complete Task Design inside the assigned tracked `Design` section.
 
-During this Workflow, change only that Design section.
+Within tracked product files, change only that Design section.
 
 Trace every proposed behavior to the Task, parent Plan, or Current Spec.
 

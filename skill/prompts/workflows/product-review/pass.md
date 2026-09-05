@@ -1,6 +1,22 @@
 # Run a Product Review Pass
 
-Execute this Workflow after construction completes for a root Lot, Sub-lot, or Correction Round.
+Execute this Workflow after construction completes or when an accepted Amendment requires a fresh Pass without implementation.
+
+## Confirm Gate coverage
+
+Identify the most recent passing complete Gate and the commit it covered.
+
+Compare that commit with the current commit.
+
+When no later change can affect an included Gate command, continue to the Pass subject.
+
+When a later change can affect an included Gate command, tell the Human that you will run the complete Gate before Product Review. Then run the complete Gate from `<BWR_WORKSPACE>/GUIDE.md`.
+
+When it passes, record `PASSED`, the covered commit, and a concise command-result summary in `PROGRESS.md`. Then continue this Workflow.
+
+When it fails, give the Human the failed commands and a concise useful result summary. Return control to the Human.
+
+The Human owns the next action. Re-evaluate Gate coverage after the Human asks you to continue.
 
 ## Freeze the Pass subject
 
@@ -9,7 +25,7 @@ Read once; reread as needed:
 - `<BWR_SKILL>/prompts/references/review/concurrency.md`;
 - `<BWR_SKILL>/prompts/references/review/frozen-subject.md`.
 
-Assign the next sequential Pass identifier for the root Lot.
+Assign the next sequential `pass-<number>` identifier for the root Lot.
 
 Freeze:
 
@@ -29,7 +45,17 @@ Use these five lenses:
 
 Update `PROGRESS.md` with the Pass identifier, frozen inputs, expected lenses, and current Review Concurrency.
 
-Set your `bwr.phase` annotation to `product-review`. Keep the root Lot annotation.
+Replace your complete applicable annotation set with:
+
+```text
+bwr.role: orchestrator
+bwr.status: working
+bwr.feature: <FEATURE>
+bwr.phase: product-review
+bwr.lot: <root LOT>
+```
+
+This removes assignment keys from completed Correction Round or Sub-lot work.
 
 ## Assign a lens reviewer
 

@@ -34,11 +34,20 @@ When the Human explicitly approves the candidate:
 2. Read once; reread as needed: `<BWR_SKILL>/prompts/references/git/commit.md`.
 3. Commit only the approved Current Spec through that procedure.
 4. Confirm the created commit and working-tree state.
-5. Update `PROGRESS.md` with the approval, Current Spec path, created commit, and first Lot.
-6. Set your `bwr.phase` annotation to `planning` and add the first `bwr.lot` value.
+5. Select the first root Lot in the Current Spec's execution order.
+6. Update `PROGRESS.md` with the approval, Current Spec path, created commit, and selected Lot.
+7. Set your `bwr.phase` annotation to `planning` and add the selected `bwr.lot` value.
+8. Prepare this exact Planning assignment:
+
+```text
+PLAN TYPE: Lot
+LOT: <selected root Lot identifier>
+CURRENT SPEC: <Current Spec path>
+CONTROLLING OBLIGATIONS: <every Current Spec heading path assigned to this Lot>
+```
 
 ## Exit
 
-- Approved and committed Current Spec → read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md`.
+- Approved and committed Current Spec → read and execute `<BWR_SKILL>/prompts/workflows/planning/write.md` with the prepared Planning assignment.
 - Human-requested changes → read and execute `<BWR_SKILL>/prompts/workflows/spec/correction-loop.md` with the exact request.
 - Commit blocker → remain in this Workflow and resolve it before planning.

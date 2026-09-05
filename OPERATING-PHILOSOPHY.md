@@ -91,7 +91,7 @@ It contains:
 
 The BWR workspace remains the same across all lots in the run.
 
-Its path is `<ACTIVE_PROJECT_ROOT>/bwr_workspace/<FEATURE>`.
+Its path is `<active checkout>/bwr_workspace/<FEATURE>`.
 
 ### TwiCC
 
@@ -160,7 +160,7 @@ The parent:
 - sets identity annotations;
 - receives and accepts the handoff;
 - sends follow-up work when required;
-- archives and hides the child after final acceptance.
+- archives and hides the child when the owning workflow declares its session lifecycle complete.
 
 The child:
 
@@ -228,9 +228,9 @@ This applies to:
 
 A replacement session uses the same logical assignment only when the original session is unusable.
 
-The parent stops the old writer before creating its replacement.
+The parent retires the old writer before creating its replacement.
 
-The replacement inherits the same Report path. Recovery uses a fresh Report path for unfinished work.
+The replacement inherits the same Report path.
 
 ## 8. Session creation and retirement
 
@@ -240,7 +240,7 @@ The prefix applies at every level of the session tree.
 
 It never applies to an Orchestrator.
 
-Initial, successor, and Recovery Orchestrators use normal master-session titles.
+Initial and successor Orchestrators use normal master-session titles.
 
 Every child starts in the exact TwiCC project used by its parent.
 
@@ -260,11 +260,13 @@ Every non-Orchestrator child starts with the Human question widget disabled.
 
 Every Orchestrator keeps the Human question widget enabled.
 
-After final acceptance of a non-Orchestrator child, the parent performs this sequence:
+When the owning workflow declares a non-Orchestrator child's session lifecycle complete, the parent performs this sequence:
 
 1. Set the correct terminal status.
 2. Archive the child session.
 3. Hide the child session.
+
+Archiving the child stops its live process. BWR does not stop it separately before retirement.
 
 Archiving removes completed work from ordinary live views.
 
@@ -298,7 +300,7 @@ The Human can tell any agent to stop and continue later.
 
 The parent sets identity annotations when it creates the child.
 
-The child maintains its own status during work.
+The child updates its status before each Handoff. The parent updates it for follow-up and retirement.
 
 The parent can correct a stale status after it observes the real state.
 
@@ -323,6 +325,8 @@ The available BWR annotation keys are:
 - `bwr.correction`.
 
 Every BWR session receives only the keys that apply to its assignment.
+
+When an assignment changes, its complete applicable annotation set replaces the earlier set.
 
 The common keys are:
 
@@ -397,6 +401,8 @@ Status around a handoff follows this model:
 - `FAILED`: `failed`;
 - final acceptance: `done`, then archive and hide.
 
+The child sets its result status before sending the handoff. It waits after that message.
+
 ## 12. Reports
 
 Reports are durable working memory for the BWR run.
@@ -412,10 +418,10 @@ It does not use a session identifier, checksum, inode, or generation identifier.
 Examples include:
 
 ```text
-<BWR_WORKSPACE>/reports/spec/round-1/reviewer-enumerator.md
-<BWR_WORKSPACE>/reports/spec/round-2/reviewer-scoped.md
+<BWR_WORKSPACE>/reports/spec/full-round-1/enumerator.md
+<BWR_WORKSPACE>/reports/spec/scoped-round-1.md
 <BWR_WORKSPACE>/reports/spec/fixer.md
-<BWR_WORKSPACE>/reports/construction/lot-2/plan-check-round-1.md
+<BWR_WORKSPACE>/reports/planning/lot-2/check-round-1.md
 <BWR_WORKSPACE>/reports/construction/lot-2/task-3/attempt-1/implementer.md
 <BWR_WORKSPACE>/reports/construction/lot-2/task-3/attempt-1/design-check-round-1.md
 <BWR_WORKSPACE>/reports/construction/lot-2/task-3/attempt-1/code-check-round-1.md
@@ -463,10 +469,6 @@ Its structure is:
 ## Amendments
 
 ## Durable Log
-
-## Blockers
-
-## Final Result
 ```
 
 `PROGRESS.md` does not duplicate the active session tree.
@@ -497,21 +499,25 @@ The workflow commits:
 - an incorporated Amendment;
 - a validated lot plan;
 - each completed task;
-- each completed failed Attempt;
+- useful assigned state from a failed Attempt, when tracked changes exist;
 - the plan that routes the next Attempt;
 - committed correction obligations.
 
 BWR never rewrites a failed Attempt out of history.
 
-It uses this sequence:
+When a failed Attempt has assigned tracked changes, it uses this sequence:
 
 1. Commit the complete failed Attempt state.
-2. Write the failure report in the BWR workspace.
+2. Finish the failure report in the BWR workspace with that commit.
 3. Start the next commit with `git revert --no-commit` for the failed Attempt.
-4. Update the tracked plan with the new Design or route.
-5. Commit the revert and updated plan together.
+4. Commit the revert alone when the selected route does not revise a Plan.
+5. When the selected route revises a Plan, commit the revert with that validated revision.
 
 This sequence preserves both the failure and the response.
+
+Without assigned tracked changes, BWR writes the failure report and creates no preservation or revert commit.
+
+BWR applies one failed Attempt's revert at most once. A later route selection preserves its pending or committed state.
 
 BWR does not reset to an old commit.
 
@@ -557,6 +563,8 @@ BWR needs no checksum protocol around it.
 
 ## 17. Spec Review
 
+The Current Spec lists root Lots in execution order. Each root Lot depends only on earlier root Lots.
+
 Spec Review uses independent mandates.
 
 The mandate set includes:
@@ -572,9 +580,9 @@ The mandate set includes:
 
 The role prompts implement them.
 
-Each reviewer writes one separate report.
+Each reviewer writes one separate report. The Orchestrator records every verdict and report path.
 
-The Orchestrator gives all report paths to one Spec fixer.
+The Orchestrator gives only reports with findings to one Spec fixer.
 
 The same Spec fixer remains available through the correction loop.
 
@@ -666,9 +674,16 @@ The Implementer later writes the Design into that section.
 
 The Plan completeness checker receives:
 
-- the current spec;
-- the current lot plan;
-- parent plans when the lot is a sub-lot.
+- the Current Spec;
+- the candidate Plan;
+- every controlling source.
+
+For a Sub-lot or Correction Round, those sources include:
+
+- the parent Plan;
+- confirmed Findings and their Verification Reports;
+- accepted Amendments that create correction obligations;
+- the reviewed commit.
 
 If the checker finds a problem, the Orchestrator:
 
@@ -793,11 +808,15 @@ A Finding verifier returns one verdict for each finding:
 
 `unverifiable` means that the report lacks enough precise evidence for a verdict.
 
-The Orchestrator returns that report to the same Product reviewer.
+The Orchestrator sends the Verification Report path to the same Product reviewer.
 
 The reviewer overwrites its existing report.
 
+Every surviving finding keeps its identifier. A removed identifier is never reused.
+
 The same Finding verifier then checks the revised report.
+
+If the revised report is clean, the lens settles without another verification.
 
 The verifier overwrites its existing verification report.
 
@@ -829,6 +848,8 @@ If confirmed findings remain, the Orchestrator writes correction obligations int
 
 Each obligation includes its source finding identifiers.
 
+Both corrective Plan types record the corresponding Verification Reports. They also record each accepted Amendment that creates one of their obligations.
+
 The plan routes the work through:
 
 - a Correction Round for bounded local work;
@@ -853,6 +874,10 @@ The verifier checks:
 - whether a real product choice remains.
 
 Only a verified product choice reaches the Human.
+
+An accepted Amendment resolves the exact Product Review decision identities recorded in it.
+
+Those identities do not open another Amendment. Its implementation obligations keep the same source traceability.
 
 Outside Product Review, the Orchestrator performs the same examination before asking the Human.
 
@@ -962,6 +987,8 @@ The Human can change any provider choice during the run.
 
 The Orchestrator then updates `PROGRESS.md`.
 
+When the `Implementer checkers` provider changes, the Orchestrator sends the new choice to every active Implementer that can still create checkers. Those Implementers use it for future checker sessions.
+
 The initial setup does not ask for the current Orchestrator's provider.
 
 When the current Orchestrator creates a successor, it asks which provider to use.
@@ -1010,7 +1037,9 @@ The Human can still give a live instruction that overrides a normal choice.
 
 ## 30. Review concurrency
 
-The Human selects one review concurrency limit at run start.
+The Human selects one review concurrency limit at run start. It is an integer of `1` or more.
+
+A value above the available review units is valid. Only existing units start.
 
 The Orchestrator records it in `PROGRESS.md`.
 
@@ -1094,7 +1123,7 @@ BWR has only this one additional instruction file.
 
 It does not recreate a per-role additional prompt system.
 
-An Initial or Recovery Orchestrator starts directly through `SKILL.md`. The skill routes it to the applicable Startup Workflow.
+An Initial Orchestrator starts directly through `SKILL.md`. The skill routes it to the Initial Startup Workflow.
 
 A current Orchestrator creates its successor with the Orchestrator entry prompt.
 
@@ -1116,19 +1145,13 @@ The Watchdog entry contains only its self-contained Watchdog prompt.
 
 One BWR run uses one BWR workspace.
 
-Its path is `<ACTIVE_PROJECT_ROOT>/bwr_workspace/<FEATURE>`.
+Its path is `<active checkout>/bwr_workspace/<FEATURE>`.
 
 All lots in that run share it.
 
 The BWR workspace contains operational evidence only.
 
 It does not contain a copied BWR skill.
-
-A Recovery Orchestrator uses a Human-supplied BWR workspace path when available.
-
-Otherwise, it discovers candidates below the active project's `bwr_workspace/` directory and asks the Human to confirm one.
-
-It reads the selected BWR workspace's Human-owned additional instructions when they exist.
 
 At feature completion, the Orchestrator asks the Human whether to keep or delete it.
 
@@ -1156,9 +1179,11 @@ It receives:
 - the current spec;
 - the previous operating choices as recommended defaults.
 
-The old watchdog stops before succession.
+The old watchdog remains active while the successor prepares ownership.
 
-The successor starts its own watchdog.
+It retires after the successor sends `ACCEPTED`. Archiving it stops its process.
+
+The successor confirms its own watchdog and records ownership before sending `ACCEPTED`.
 
 ## 34. Watchdog
 
@@ -1170,15 +1195,19 @@ Its provider is always `claude_code`. Its preset is always `Minimal`.
 
 It does not decide workflow transitions.
 
-It reports the state of the Orchestrator's direct children at regular intervals.
+It reads one Orchestrator subtree at regular intervals.
 
-It helps the Orchestrator notice:
+It always reports the Orchestrator's direct children to that Orchestrator.
+
+It reports another parent's direct children to that parent only when at least one remains open.
+
+It helps each notified parent notice:
 
 - a child that remains quiet for too long;
 - a child with no live process;
 - a stale annotation status;
 - completed work that still needs acceptance;
-- an Orchestrator that stopped progressing.
+- its own stalled work.
 
 The watchdog includes hidden sessions.
 
@@ -1191,11 +1220,25 @@ It also excludes terminal statuses:
 - `cancelled`;
 - `superseded`.
 
-It preserves the proven behavior of the old watchdog.
+It preserves the proven observation and filtering behavior of the old watchdog.
 
-The rewrite removes only the former provider-subagent support.
+The rewrite removes the former provider-subagent support and adds parent-local delivery inside the current Orchestrator subtree.
 
 The watchdog observes, informs, and reminds.
+
+Its script sends every snapshot directly to the parent responsible for those children. The Watchdog session relays only script errors.
+
+A failed delivery does not prevent attempts to deliver the other snapshots.
+
+A quiet child or absent live process is a signal, not proof of failure. Each parent uses its judgment against the assignment and expected work.
+
+When an expected Handoff is missing, the parent asks that child to resume its current assignment and return the Handoff when ready.
+
+Otherwise, the parent can ask for the current step, blocker, and next action.
+
+This request changes no assignment, Report, or annotation status.
+
+Startup completes only after the watchdog confirms its recurring cron job.
 
 It never repairs state automatically.
 
@@ -1217,6 +1260,14 @@ It presents the discovered commands to the Human.
 
 The Human decides which commands belong to the Gate.
 
+The first Orchestrator completes the provider, Review Concurrency, Feature, and Spec-path questions before running the Gate.
+
+It then announces and runs the complete approved Gate before creating the BWR workspace.
+
+When it passes, startup continues. When it fails, the Orchestrator gives the Human a concise failure summary and returns control.
+
+The Human owns diagnosis, correction, and disposition of that starting-state failure. The Orchestrator reruns the complete Gate after the Human asks it to continue.
+
 The Orchestrator records every discovered command in `GUIDE.md`.
 
 It records both included and excluded commands.
@@ -1231,15 +1282,19 @@ A preexisting command discovered later becomes a new Human choice.
 
 A validation command created by an Implementer automatically joins the Gate.
 
-The Implementer reports the new command in its handoff report.
+The Implementer records the new command in its Implementer Report.
 
-The Orchestrator adds it to `GUIDE.md`.
+The Implementer recommends an execution group. The Orchestrator adds the command to `GUIDE.md`.
 
-A simple command rename replaces the old command automatically.
+When that group is missing or its parallel safety is uncertain, the Orchestrator uses a new sequential group.
+
+A simple command rename replaces the old command automatically in the current final Gate and `GUIDE.md`.
+
+The Implementer records the exact old-to-new replacement and confirms equivalent validation coverage. The replacement keeps the existing execution group.
 
 Removing a Gate command without replacement requires a Human decision.
 
-Reducing validation coverage also requires a Human decision.
+Any validation coverage change requires a Human decision.
 
 BWR keeps no separate Gate version history.
 
@@ -1282,7 +1337,13 @@ The parent trusts the declaration.
 
 The final task Gate validates all accumulated work.
 
-No duplicate Gate is required before Product Review when tracked files remain unchanged.
+Before Product Review, the Orchestrator compares the current commit with the commit covered by the most recent passing complete Gate.
+
+When a later change can affect an included Gate command, the Orchestrator announces and runs the complete Gate. Otherwise, Product Review needs no duplicate Gate.
+
+When that Gate fails, the Orchestrator gives the Human a concise failure summary and returns control. The Human owns the next action.
+
+When that Gate passes, the Orchestrator records its covered commit and concise result in `PROGRESS.md` for later Lot closure. The initial baseline Gate remains unrecorded.
 
 ## 38. Human interaction
 
@@ -1338,8 +1399,8 @@ No additional checksum is required.
 After delivery, the Orchestrator:
 
 1. records the final result in `PROGRESS.md`;
-2. stops the watchdog;
-3. archives and hides remaining non-Orchestrator child sessions;
+2. retires the watchdog;
+3. archives and hides its remaining direct non-Orchestrator child sessions;
 4. presents the delivered commits and Gate result to the Human;
 5. asks whether to keep or delete the BWR workspace.
 

@@ -12,12 +12,6 @@ Use the `Controller` preset.
 
 Update `PROGRESS.md` with the selected provider, next Lot, and pending succession.
 
-## Stop the current Watchdog
-
-Load TwiCC's current process-stop and session-update instructions when needed.
-
-Stop the current Watchdog process. Then set its `bwr.status` to `done`, archive it, and hide it.
-
 ## Create the successor
 
 Read once; reread as needed:
@@ -39,6 +33,8 @@ BWR_WORKSPACE: <absolute path>
 REPOSITORY: <absolute checkout path>
 LOT: <new Lot identifier>
 CURRENT_SPEC: <absolute path>
+PLAN_TYPE: Lot
+CONTROLLING_OBLIGATIONS: <every Current Spec heading path assigned to the new Lot>
 GIT_COMMIT: <current commit>
 PROGRESS: <absolute path>
 GUIDE: <absolute path>
@@ -69,7 +65,11 @@ Keep the returned successor `session_id`. Wait for its Orchestrator acceptance m
 
 For `BLOCKED`, resolve the exact missing or contradictory context. Send a follow-up to the same successor.
 
-For `ACCEPTED`, ownership transfers to the successor.
+For `ACCEPTED`, ownership transfers to the successor. Its confirmed Watchdog now owns monitoring.
+
+Load TwiCC's current session-update instructions when needed.
+
+Set the current Watchdog's `bwr.status` to `done`. Then archive and hide it.
 
 Set your own `bwr.status` to `done`.
 

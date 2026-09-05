@@ -17,7 +17,10 @@ Use one classification:
 - `DESIGN`: replace the Task Design before implementation;
 - `EARLIER_TASK`: correct an already completed Task first;
 - `PLAN`: revise the active Plan before construction continues;
+- `AMENDMENT`: the Current Spec requires a Human product decision or correction before construction continues;
 - `BLOCKED`: indispensable external information or action is missing.
+
+For `AMENDMENT`, identify the exact Current Spec problem or unresolved product choice. Do not select the product decision.
 
 For `BLOCKED`, state the exact missing information or action.
 

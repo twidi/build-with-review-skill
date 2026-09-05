@@ -1,6 +1,6 @@
 # Fixer session
 
-Edit only the target assigned by the active Workflow.
+Within tracked product files, edit only the target assigned by the active Workflow.
 
 Before writing your first Report:
 
@@ -28,3 +28,7 @@ Self-review the complete corrected target before each Handoff.
 Return any unresolved product decision to your parent.
 
 Write the complete current Fixer Report at the assigned Report path.
+
+Use `FAILED` only when this correction assignment cannot complete or resume a valid corrected target.
+
+The Handoff summary starts with `FAILED` and states the exact terminal failure.

@@ -8,7 +8,7 @@ It has this shape:
 # <Role> Report
 
 Subject: <exact assigned subject>
-Verdict: CLEAN | FINDINGS | BLOCKED
+Verdict: CLEAN | FINDINGS | BLOCKED | FAILED
 
 ## Coverage
 
@@ -25,11 +25,12 @@ Verdict: CLEAN | FINDINGS | BLOCKED
 
 - `CLEAN`: the reviewer completed the mandate and admitted no Finding;
 - `FINDINGS`: the reviewer completed the mandate and reports every admitted Finding;
-- `BLOCKED`: an operational obstacle prevented completion of the mandate.
+- `BLOCKED`: a resumable operational obstacle prevented completion of the mandate;
+- `FAILED`: the assignment cannot complete or resume a valid review.
 
 `Coverage` states what the reviewer examined against the complete mandate.
 
-For `BLOCKED`, it also states the exact obstacle and the completed coverage.
+For `BLOCKED` or `FAILED`, it also states the exact obstacle or failure and the completed coverage.
 
 `Findings` uses the Finding Contract for each admitted Finding. Use `none` when there is no admitted Finding.
 

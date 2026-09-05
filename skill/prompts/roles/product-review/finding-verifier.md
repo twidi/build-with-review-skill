@@ -12,7 +12,9 @@ For each ordinary Finding, check:
 
 For a `DECISION`, verify the claimed Current Spec silence.
 
-Use a concrete verification action. Preserve the source Finding identity and Severity.
+Use a concrete verification action. Preserve the source Finding identity.
+
+For an ordinary Finding, preserve its Severity.
 
 Before verification:
 

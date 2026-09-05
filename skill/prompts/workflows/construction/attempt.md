@@ -68,11 +68,25 @@ Inspect the reported commit and current Git state. Do not rerun the Gate.
 
 Request a correction from the same Implementer when the visible result is incomplete or contradictory.
 
-Add every new Implementer-created validation command to the Gate in `GUIDE.md`. Use its recommended execution group.
+Confirm that every simple Gate command replacement preserves validation coverage.
+
+Present any validation coverage change to the Human before updating the Gate.
+
+Apply every automatic replacement to `GUIDE.md`. Keep its existing execution group.
+
+Add every remaining new Implementer-created validation command to the Gate. Use its recommended execution group.
+
+When that group is missing or its parallel safety is uncertain, use a new sequential group.
 
 After accepting the result, retire the Implementer. Update `PROGRESS.md` with the completed Task, commit, and Gate changes.
 
 ## Route a non-ready Attempt
+
+For a validation coverage decision, present its complete context to the Human.
+
+Update `GUIDE.md` with the exact Human-approved Gate configuration.
+
+Resume the same Implementer with the exact decision and current `GUIDE.md` path.
 
 For a product decision, record the blocker and start the applicable Amendment Workflow.
 

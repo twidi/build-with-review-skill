@@ -12,14 +12,12 @@ A new logical assignment gets a new path.
 
 A follow-up to the same assignment keeps the same path. The child replaces the Report with its current complete result.
 
-A replacement session can inherit that path only after its failed predecessor stops and retires.
+A replacement session can inherit that path only after its failed predecessor retires.
 
-Recovery uses a fresh Report path for unfinished work.
+Keep private-history files at their stable paths.
 
-Use the exact path pattern declared by the current Workflow. Do not invent another pattern.
+An active Report uses the exact path pattern declared by the current Workflow. Do not invent another active pattern.
 
 Use only the directories needed to identify the assignment and prevent collisions.
-
-Do not add a session identifier, checksum, inode, generation identifier, `v2`, or `v3`.
 
 Reports remain available for the complete BWR run. Do not commit them to the product repository.

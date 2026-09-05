@@ -1,8 +1,13 @@
 # Parent session
 
+Use the common lifecycle below for specialist child sessions.
+
+Use `<BWR_SKILL>/prompts/references/sessions/watchdog.md` for a Watchdog.
+Use `<BWR_SKILL>/prompts/workflows/delivery/handoff-successor.md` for a successor Orchestrator.
+
 ## Your responsibility
 
-Manage the complete lifecycle of your direct child sessions.
+Manage the complete lifecycle of your direct specialist child sessions.
 
 One child owns one logical assignment. Reuse that child for follow-ups to the same assignment.
 
@@ -16,7 +21,7 @@ Use the TwiCC MCP operation when available. Discover a deferred MCP operation be
 
 Use TwiCC `whoami` to get your current `project_id`. Pass that project explicitly to every created session.
 
-## Create a child
+## Create a specialist child
 
 Read once; reread as needed:
 
@@ -51,7 +56,7 @@ The `@@` paths must be absolute and resolved. Never put a variable inside an `@@
 
 Keep both `@@` markers before all dynamic values. TwiCC removes the optional marker when its file does not exist.
 
-Pass every value required by the Role. Include only applicable Feature, Lot, Task, Attempt, Round, Pass, and correction identifiers.
+Pass every value required by the Role and current Workflow. Include only applicable identifiers.
 
 Always set:
 
@@ -68,7 +73,23 @@ Create the child. Keep the returned `session_id`.
 
 A successful creation means that work started. It does not mean that work finished.
 
-## Receive a child result
+## Handle a Watchdog snapshot
+
+The Watchdog can send you a snapshot of your direct children.
+
+A quiet child or a child with no live process is a signal, not proof of failure. Use your judgment against its assignment and expected work.
+
+When its state looks abnormal, send that direct child a concise request.
+
+If an expected Handoff is missing, ask the child to resume its current assignment and return the Handoff when ready.
+
+Otherwise, ask for its current step, blocker or none, and next action.
+
+Before the first such request, load and follow TwiCC's current `twicc-send-message` instructions. Later, reload them only when their procedure is no longer clear.
+
+This request changes no assignment, Report, or `bwr.status`. Use the reply and current process state to decide whether another action is necessary.
+
+## Receive a specialist child result
 
 Each child returns two separate outputs:
 
@@ -112,26 +133,22 @@ The child updates the same Report and returns a new Handoff.
 
 Correct a stale `bwr.status` only from observed session state.
 
-## Replace a failed child
+## Replace a failed specialist child
 
 A `FAILED` Handoff ends that child session. Never send it a follow-up.
 
 The current Workflow decides whether the work stops, starts as a new logical assignment, or receives a replacement session.
 
-When the work does not receive a replacement, stop any live process and retire the failed child before continuing.
+When the work does not receive a replacement, retire the failed child before continuing.
 
 For a replacement of the same logical assignment:
 
-1. Load TwiCC's current process-stop instructions when needed.
-2. Stop any live process for the failed child.
-3. Retire that child with `bwr.status: failed`.
-4. Create the replacement with the same assignment and Report path.
+1. Retire that child with `bwr.status: failed`.
+2. Create the replacement with the same assignment and Report path.
 
-Recovery assigns a fresh Report path instead.
+## Retire a specialist child
 
-## Retire a child
-
-Retire a child only when the current Workflow gives its result final acceptance.
+Retire a child when the current Workflow declares that session's lifecycle complete.
 
 If you have not loaded TwiCC's current `twicc-update-session` instructions, load them now.
 
@@ -142,3 +159,5 @@ Then complete these steps in order:
 1. Set the applicable terminal `bwr.status`.
 2. Archive the child.
 3. Hide the child.
+
+Archiving the child stops its live process. Do not stop it separately.

@@ -10,14 +10,14 @@ Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/references/review/frozen-subject.md`.
 
-Assign the next Reach Round identifier. Keep the Amendment unchanged while that reviewer works.
+Assign `round-<next sequential number>-reach` as the Reach Round identifier. Keep the Amendment unchanged while that reviewer works.
 
 Use the `Document reviewers` provider group and the `Reviewer` preset.
 
 Use these paths:
 
 ```text
-REPORT: <BWR_WORKSPACE>/reports/amendments/amendment-<number>/round-<round>-reach.md
+REPORT: <BWR_WORKSPACE>/reports/amendments/amendment-<number>/<ROUND>.md
 PRIVATE_HISTORY: <BWR_WORKSPACE>/reports/amendments/amendment-<number>/risk-filtered-reach.md
 ```
 
@@ -44,7 +44,7 @@ Read once; reread as needed:
 - `<BWR_SKILL>/prompts/contracts/review/report.md`;
 - `<BWR_SKILL>/prompts/contracts/review/finding.md`.
 
-Use the Handoff summary to identify `CLEAN`, `FINDINGS`, or `BLOCKED`.
+Use the Handoff summary to identify `CLEAN`, `FINDINGS`, `BLOCKED`, or `FAILED`.
 
 For `CLEAN`, do not read the Reach Report. Retire the reviewer with `bwr.status: done`.
 
@@ -58,7 +58,7 @@ For `BLOCKED`, read the available Report. Resolve the blocker and follow up with
 
 For `FAILED`, read the available Report. When the same frozen assignment remains executable, use the failed-child replacement procedure for its Report path.
 
-Otherwise, stop and retire the failed reviewer. Present the assignment failure to the Human.
+Otherwise, retire the failed reviewer. Present the assignment failure to the Human.
 
 ## Start or resume the Amendment fixer
 
@@ -93,6 +93,8 @@ Keep the fixer in `idle` while each fresh Reach reviewer works.
 
 ## Receive the fixer
 
+Do not read the Fixer Report for `READY` or a non-decision `BLOCKED` result.
+
 Use the Fixer Handoff summary to route its result:
 
 - `CORRECTED` with `READY` → start a fresh Reach Round;
@@ -102,7 +104,7 @@ Use the Fixer Handoff summary to route its result:
 
 For a failed Fixer, read its available Report. When Amendment correction remains executable, use the failed-child replacement procedure for the same assignment and Report path.
 
-Provide the current Amendment, old Current Spec, current stage, and every accumulated correction source. Otherwise, stop and retire the failed Fixer. Present the assignment failure to the Human.
+Provide the current Amendment, old Current Spec, current stage, and every accumulated correction source. Otherwise, retire the failed Fixer. Present the assignment failure to the Human.
 
 For `DECISION`:
 

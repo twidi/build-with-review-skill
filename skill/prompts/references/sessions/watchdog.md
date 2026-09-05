@@ -21,3 +21,11 @@ BWR_SKILL: <absolute path>
 BWR_WORKSPACE: <absolute path>
 ORCHESTRATOR_SESSION_ID: <current session_id>
 ```
+
+The script sends the Orchestrator a snapshot of its direct children on every tick.
+
+It also sends each descendant parent a snapshot when that parent has an open direct child.
+
+A descendant without an open direct child receives no Watchdog message.
+
+Every recipient handles its snapshot through the Parent-session instructions.

@@ -27,7 +27,7 @@ An admitted public Finding contains Severity only. It never contains Probability
 
 ## Cases without filtering
 
-Always report a direct violation of the Current Spec or Task contract.
+Always report a direct violation of the assigned authoritative contract.
 
 For Design, Code, and Product review, apply Probability only to a new inferred risk beyond an explicit contract.
 

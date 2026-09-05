@@ -18,3 +18,5 @@ The current provider map lives in `PROGRESS.md`.
 When a Role or Workflow names a provider group, use that group's current provider.
 
 The Human can change a group during the run. The Orchestrator records the replacement in `PROGRESS.md`.
+
+When the `Implementer checkers` provider changes, the Orchestrator sends the new choice to every active Implementer that can still create checkers. Those Implementers use it for future checker sessions.

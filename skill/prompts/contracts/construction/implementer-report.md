@@ -11,6 +11,7 @@ It contains:
 - every checker Finding disposition;
 - targeted validation performed;
 - every new validation command and its recommended Gate group;
+- every simple Gate command replacement as `<old command> -> <new command>`;
 - the complete final Gate record;
 - the created commit, when applicable;
 - failure or blocker information, when applicable.
@@ -40,6 +41,8 @@ For unresolved `FAILED`, summarize the blocking failures and useful evidence.
 Do not copy raw command output. A corrected Gate failure does not remain in the final Report.
 
 Record every newly created validation command and its recommended execution group.
+
+Record every simple Gate command replacement as `<old command> -> <new command>` and confirm equivalent validation coverage.
 
 ## Attempt outcome
 

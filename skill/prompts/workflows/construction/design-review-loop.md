@@ -16,21 +16,21 @@ The subject contains:
 - the complete Task Design;
 - the expected base commit and relevant repository state.
 
-Use the next Design Check Round identifier.
+Use `design-check-round-<next sequential number>` as the Design Check Round identifier.
 
 ## Report and private history
 
 For a Lot or Sub-lot Task, use:
 
 ```text
-REPORT: <BWR_WORKSPACE>/reports/construction/<LOT>/<TASK>/<ATTEMPT>/design-check-round-<number>.md
+REPORT: <BWR_WORKSPACE>/reports/construction/<LOT>/<TASK>/<ATTEMPT>/<DESIGN_CHECK_ROUND>.md
 PRIVATE_HISTORY: <BWR_WORKSPACE>/reports/construction/<LOT>/<TASK>/<ATTEMPT>/risk-filtered-design.md
 ```
 
 For a Correction Round Task, use:
 
 ```text
-REPORT: <BWR_WORKSPACE>/reports/construction/<LOT>/<CORRECTION>/<TASK>/<ATTEMPT>/design-check-round-<number>.md
+REPORT: <BWR_WORKSPACE>/reports/construction/<LOT>/<CORRECTION>/<TASK>/<ATTEMPT>/<DESIGN_CHECK_ROUND>.md
 PRIVATE_HISTORY: <BWR_WORKSPACE>/reports/construction/<LOT>/<CORRECTION>/<TASK>/<ATTEMPT>/risk-filtered-design.md
 ```
 
@@ -56,4 +56,5 @@ Add `bwr.correction: <CORRECTION>` for a Correction Round Task.
 - `CLEAN` → read and execute `<BWR_SKILL>/prompts/workflows/construction/implement.md`.
 - `FINDINGS` → pass the checker Report to `<BWR_SKILL>/prompts/workflows/construction/design.md`, then execute it.
 - Unresolved subject or external blocker → read and execute `<BWR_SKILL>/prompts/workflows/construction/report-failure.md`.
-- Failed checker assignment → execute this Workflow again with a fresh Design Check Round.
+- Failed checker replaced → remain in this Workflow with the same Design Check Round.
+- Unresolved checker assignment failure → read and execute `<BWR_SKILL>/prompts/workflows/construction/report-failure.md`.

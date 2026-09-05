@@ -22,7 +22,7 @@ Provide the current Implementer Report in every Round. From the second Round, al
 
 ## Receive a result
 
-Use the Handoff summary to identify `CLEAN`, `FINDINGS`, or `BLOCKED`.
+Use the Handoff summary to identify `CLEAN`, `FINDINGS`, `BLOCKED`, or `FAILED`.
 
 For `CLEAN`, do not read the checker Report. Retire the checker and record its path and verdict in the Implementer Report.
 
@@ -32,7 +32,13 @@ For `BLOCKED`, read the Report. Resolve a checker-only cause and follow up with 
 
 Return an unresolved subject or external blocker to the active Workflow.
 
-For `FAILED`, read the Report and retire the failed checker. Return the failure to the active Workflow.
+For `FAILED`, read the Report.
+
+When the unchanged checker assignment remains executable, use the failed-child replacement procedure for the same assignment, Round identifier, and Report path.
+
+Remain in the current Round and receive the replacement result.
+
+Otherwise, retire the failed checker and return the unresolved assignment failure to the active Workflow.
 
 ## Continue the loop
 

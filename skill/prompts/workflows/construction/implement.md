@@ -39,6 +39,10 @@ Record meaningful targeted validation and its result in the Implementer Report.
 
 Record every new validation command and its recommended Gate group.
 
+Record each simple Gate command rename as `<old command> -> <new command>`.
+
+Confirm that the rename preserves validation coverage. Route a coverage change as a resumable Gate blocker that requires a Human decision.
+
 ## Handle a Design change
 
 When implementation evidence requires a material Design change, stop the affected implementation work.

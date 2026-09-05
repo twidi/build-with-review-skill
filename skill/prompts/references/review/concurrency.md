@@ -4,6 +4,8 @@ This Reference is for an Orchestrator that launches concurrent reviews.
 
 Use the current Human-selected Review Concurrency value from `PROGRESS.md`.
 
+The value must be an integer of `1` or more. A value above the available review units is valid.
+
 The value limits the number of review places that can operate concurrently.
 
 The active Workflow defines:
@@ -20,4 +22,4 @@ Launch a new review unit when the count is below the current value.
 
 The Human can change Review Concurrency during the run.
 
-Record the new value in `PROGRESS.md`. Use it for later launches.
+Require the same valid range. Record the new value in `PROGRESS.md`. Use it for later launches.

@@ -47,7 +47,7 @@ Update current values in place.
 
 Append an entry only for an event needed to understand or resume the run.
 
-Record durable route changes, blockers, recoveries, and accepted outcomes.
+Record durable route changes, blockers, and accepted outcomes.
 
 Use exact artifact or Report paths when an event depends on their details.
 

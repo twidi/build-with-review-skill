@@ -22,6 +22,7 @@ Update `PROGRESS.md` with:
 - the replaced Current Spec commit;
 - the new Current Spec path and commit;
 - the completed Reach and Consolidation result;
+- every source Finding identity resolved by this Amendment;
 - the recorded return Workflow and pending work.
 
 Retire the Amendment fixer with `bwr.status: done`.
@@ -32,7 +33,22 @@ Read the exact return Workflow and pending work recorded when the Amendment star
 
 Evaluate that work against the new Current Spec.
 
-For an active Implementer whose Task objective remains valid, send the Updated Spec and Amendment paths to that same Implementer.
+Before resuming it, replace your complete applicable annotation set. Always use `bwr.role: orchestrator`, `bwr.status: working`, and the current `bwr.feature`.
+
+Restore the remaining values from the recorded return context:
+
+| Return context | Restored assignment annotations |
+|---|---|
+| Active Attempt or failed Attempt routing | `bwr.phase: construction`, its Lot, and its Correction Round when applicable |
+| Planning | `bwr.phase: planning`, its Lot, and its Correction Round when applicable |
+| Product Review routing | `bwr.phase: product-review` and its root Lot |
+| Another origin | its exact phase and applicable Lot or Correction Round |
+
+Omit every assignment key that does not apply to the restored context.
+
+For an active Implementer whose Task objective remains valid, set the Amendment commit as that Attempt's new expected base commit.
+
+Update `PROGRESS.md` with the replacement base. Send the Updated Spec path, Amendment path, and new expected base commit to that same Implementer.
 
 Require it to execute the Task Design Workflow and obtain a fresh clean Design check before implementation continues.
 
@@ -42,9 +58,17 @@ When the Amendment makes the active Task objective false, ask that Implementer t
 
 Resume the suspended Attempt Workflow and receive its failed Handoff.
 
-For planning work, revise and validate the Plan against the new Current Spec.
+For Planning work, rebuild its complete assignment with:
 
-For Product Review work, return every pending confirmed Finding and accepted Amendment path to the Product Review outcome Workflow.
+- the recorded Plan type, identifier, path, and candidate state;
+- the new Current Spec path;
+- every controlling obligation for that Plan from the new Current Spec;
+- the accepted Amendment path as origin evidence;
+- every other recorded controlling source and transferred commit scope.
+
+Revise and validate the Plan against that assignment. The new Current Spec remains authoritative.
+
+For Product Review work, return every pending confirmed Finding, accepted Amendment path, and resolved source Finding identity to the Product Review outcome Workflow.
 
 For a failed Attempt route, return to its recorded restart Workflow with the new Current Spec.
 
@@ -54,7 +78,7 @@ Record any old-Current-Spec Product Review Pass as historical. A later corrected
 
 - Valid active Attempt continues → resume its suspended Attempt Workflow after sending the Design follow-up.
 - Active Task objective became false → resume its suspended Attempt Workflow after requesting the failed Handoff.
-- Planning resumes → execute `<BWR_SKILL>/prompts/workflows/planning/write.md`.
+- Planning resumes → execute `<BWR_SKILL>/prompts/workflows/planning/write.md` with the rebuilt Planning assignment.
 - Product Review routing resumes → execute `<BWR_SKILL>/prompts/workflows/product-review/route-outcome.md`.
 - Failed Attempt routing resumes → execute `<BWR_SKILL>/prompts/workflows/construction/restart-after-failure.md`.
 - Another recorded origin → execute its exact recorded return Workflow.

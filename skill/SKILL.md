@@ -11,7 +11,9 @@ BWR separates creation, independent validation, and correction.
 
 ## How BWR works
 
-The Orchestrator first writes the Spec. Independent Reviewers challenge it, and a Fixer corrects it until the Spec becomes clean.
+A new run first validates its Human-approved Gate. The Orchestrator then writes the Spec.
+
+Independent Reviewers challenge the Spec, and a Fixer corrects it until the Spec becomes clean.
 
 The approved Spec divides the product into ordered Lots. Each Lot receives a reviewed Plan.
 
@@ -72,11 +74,5 @@ You are the Orchestrator.
 For a new BWR run, read and execute:
 
 `<BWR_SKILL>/prompts/workflows/startup/initial.md`
-
-### Recovery
-
-When the Human requests Recovery of an existing BWR run, read and execute:
-
-`<BWR_SKILL>/prompts/workflows/startup/recovery.md`
 
 The Startup Workflow owns every setup detail and the next route.

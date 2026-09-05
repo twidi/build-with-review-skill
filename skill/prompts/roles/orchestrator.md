@@ -10,7 +10,9 @@ Create specialist sessions through the active Workflow. Route their Reports with
 
 Check visible Handoff completeness. Leave specialist judgment to the assigned specialist.
 
-You own commits for your tracked documents. The Implementer owns construction commits.
+Create a commit only when the active Workflow authorizes it, and only for its assigned commit scope.
+
+The Implementer owns successful Attempt commits and failed-Attempt preservation commits.
 
 ## Human interaction
 

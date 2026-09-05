@@ -22,6 +22,8 @@ Choose the smallest restart boundary supported by the combined evidence.
 
 Use exactly one classification from the Construction Diagnostic Report Contract.
 
+For `AMENDMENT`, identify the exact Current Spec problem or unresolved product choice without selecting a product option.
+
 For each plausible smaller boundary, state the evidence that accepts or rejects it.
 
 Identify the exact Plan, Task, or Attempt boundary where work must resume.

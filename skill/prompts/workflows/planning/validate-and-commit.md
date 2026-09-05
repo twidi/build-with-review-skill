@@ -8,20 +8,22 @@ Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/references/review/frozen-subject.md`.
 
-Assign a fresh Check Round identifier. Keep the candidate Plan unchanged while the checker works.
+Assign `check-round-<next sequential number>` as the fresh Check Round identifier.
+
+Keep the candidate Plan unchanged while the checker works.
 
 Use the `Document reviewers` provider group and the `ReviewerMedium` preset.
 
 Use this Report path for a Lot or Sub-lot Plan:
 
 ```text
-<BWR_WORKSPACE>/reports/planning/<LOT>/check-round-<number>.md
+<BWR_WORKSPACE>/reports/planning/<LOT>/<CHECK_ROUND>.md
 ```
 
 For a Correction Round Plan, insert its Correction Round identifier after `<LOT>`.
 
 ```text
-<BWR_WORKSPACE>/reports/planning/<LOT>/<CORRECTION>/check-round-<number>.md
+<BWR_WORKSPACE>/reports/planning/<LOT>/<CORRECTION>/<CHECK_ROUND>.md
 ```
 
 Set these annotations:
@@ -50,7 +52,7 @@ Read once; reread as needed:
 - `<BWR_SKILL>/prompts/contracts/review/report.md`;
 - `<BWR_SKILL>/prompts/contracts/review/finding.md`.
 
-Use the checker Handoff summary to identify `CLEAN`, `FINDINGS`, or `BLOCKED`.
+Use the checker Handoff summary to identify `CLEAN`, `FINDINGS`, `BLOCKED`, or `FAILED`.
 
 For `CLEAN`, do not read the checker Report. Retire the checker.
 
@@ -60,7 +62,7 @@ For `BLOCKED`, read the available Report. Resolve the cause and follow up with t
 
 For `FAILED`, read the available Report. When the unchanged check remains executable, use the failed-child replacement procedure for the same assignment and Report path.
 
-Otherwise, stop and retire the failed checker. Present the assignment failure to the Human.
+Otherwise, retire the failed checker. Present the assignment failure to the Human.
 
 ## Commit a clean Plan
 

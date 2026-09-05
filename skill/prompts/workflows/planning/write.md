@@ -22,9 +22,9 @@ Read the complete Current Spec and relevant repository structure.
 
 For a Lot Plan, read every Current Spec obligation assigned to that Lot.
 
-For a Sub-lot Plan, also read the parent Plan, source Findings, and inherited obligations. Inspect the reviewed commit.
+For a Sub-lot or Correction Round Plan, also read the parent Plan, confirmed source Findings, their Verification Reports, and inherited obligations. Inspect the reviewed commit.
 
-For a Correction Round Plan, also read the parent Plan, confirmed Findings, and their Verification Reports. Inspect the reviewed commit.
+Read every accepted Amendment that creates a correction obligation in this Plan.
 
 When correcting a completeness check, also read its assigned checker Report.
 
@@ -50,6 +50,8 @@ Preserve the exact pending revert as transferred commit scope. Do not alter unre
 ## Write the Plan
 
 Choose the tracked Plan path from applicable repository conventions.
+
+When no clear convention determines that path, present a suitable proposal to the Human. Continue after the Human confirms or replaces it.
 
 Write one thin Plan that completely covers its assigned obligations.
 

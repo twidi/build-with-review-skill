@@ -35,6 +35,8 @@ Update `PROGRESS.md` with the Fixer Report path and current correction sources.
 
 ## Receive the Fixer
 
+Do not read the Fixer Report for `READY` or a non-decision `BLOCKED` result.
+
 Use the Fixer Handoff summary to route its result:
 
 - `CORRECTED` with `READY` → continue to Scoped review;
@@ -44,7 +46,7 @@ Use the Fixer Handoff summary to route its result:
 
 For `FAILED`, read the available Fixer Report. When the correction remains executable, use the failed-child replacement procedure for the same assignment and Report path.
 
-Provide the complete current Spec and every accumulated correction source to that replacement. Otherwise, stop and retire the failed Fixer. Present the assignment failure to the Human.
+Provide the complete current Spec and every accumulated correction source to that replacement. Otherwise, retire the failed Fixer. Present the assignment failure to the Human.
 
 For `DECISION`:
 
@@ -66,14 +68,14 @@ Read once; reread as needed:
 
 - `<BWR_SKILL>/prompts/references/review/frozen-subject.md`.
 
-Assign a fresh Scoped Round identifier. Keep the corrected Current Spec unchanged during this review.
+Assign `scoped-round-<next sequential number>` as the fresh Scoped Round identifier. Keep the corrected Current Spec unchanged during this review.
 
 Use the `Document reviewers` provider group and the `Reviewer` preset.
 
 Use this Report path:
 
 ```text
-<BWR_WORKSPACE>/reports/spec/scoped-round-<number>.md
+<BWR_WORKSPACE>/reports/spec/<SCOPED_ROUND>.md
 ```
 
 Set these annotations:
@@ -100,12 +102,12 @@ Update `PROGRESS.md` with the Scoped Round identifier and assigned paths.
 
 ## Receive the Scoped reviewer
 
-Do not read the Scoped Report. Use its Handoff summary.
+For `CLEAN` or `FINDINGS`, do not read the Scoped Report. Use its Handoff summary.
 
 - `CLEAN` → retire the Scoped reviewer and continue to a fresh full round;
 - `FINDINGS` → retire the Scoped reviewer and send its Report path to the same Spec Fixer;
 - `BLOCKED` → read the available Report, resolve the obstacle, and follow up with the same reviewer;
-- `FAILED` → read the available Report. When the same frozen assignment remains executable, use the failed-child replacement procedure for its Report path. Otherwise, stop and retire the failed reviewer and present the assignment failure to the Human.
+- `FAILED` → read the available Report. When the same frozen assignment remains executable, use the failed-child replacement procedure for its Report path. Otherwise, retire the failed reviewer and present the assignment failure to the Human.
 
 Keep the Spec Fixer `idle` while a reviewer works.
 

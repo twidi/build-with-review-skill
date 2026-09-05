@@ -8,7 +8,13 @@ Read the current `<BWR_WORKSPACE>/GUIDE.md` and applicable project instructions.
 
 Start with every command included in the approved Gate.
 
-Add every validation command created during this Attempt. Use the Gate group recorded in the Implementer Report.
+Treat a recorded replacement as automatic when it preserves validation coverage.
+
+When a replacement changes validation coverage, execute the failed Attempt Workflow with `BLOCKED`. State the exact coverage change and require your parent to obtain the Human Gate decision.
+
+Replace each old command with its automatic replacement. Keep the existing Gate group.
+
+Add every remaining validation command created during this Attempt. Use the Gate group recorded in the Implementer Report.
 
 ## Run the complete final Gate
 
@@ -57,6 +63,7 @@ Update the Implementer Report with:
 - the delivered result;
 - the final Gate state and a concise command-result summary;
 - every new validation command and recommended Gate group;
+- every simple Gate command replacement;
 - the created commit;
 - the complete Design and Code Review history.
 
