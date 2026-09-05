@@ -12,7 +12,7 @@ Use repository inspection, focused commands, and observable behavior as appropri
 
 ## Verify every Finding
 
-For each ordinary Finding, independently check its fact, requirement, scope connection, consequence, and evidence.
+For each ordinary Finding, independently check its fact, requirement, scope connection, every scenario condition, causal path, consequence, and evidence.
 
 For each `DECISION`, inspect the complete relevant Current Spec context and verify the claimed unresolved choice.
 

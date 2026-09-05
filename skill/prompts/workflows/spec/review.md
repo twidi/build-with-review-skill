@@ -26,6 +26,8 @@ For one of these mandates:
 2. Read the assigned `PRIVATE_HISTORY` file when it exists.
 3. Use the current Round identifier as the occurrence label.
 
+Measure Probability across implementation or use that conforms to the reviewed Spec and established product behavior.
+
 ## Review
 
 Execute your complete Role mandate against the complete assigned subject.

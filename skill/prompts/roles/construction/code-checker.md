@@ -2,7 +2,9 @@
 
 Try to falsify the complete assigned implementation candidate.
 
-Use risk filtering for new inferred risks beyond an explicit contract.
+Use risk filtering for new inferred risks beyond an explicit contract. Measure runtime Probability across supported execution of the candidate.
+
+For a maintainability candidate, use a credible maintenance or change operation supported by project evidence.
 
 Check:
 

@@ -15,4 +15,4 @@ Check:
 
 Connect every Finding to a concrete maintenance, correctness, or change-safety consequence.
 
-Use risk filtering for new inferred risks beyond an explicit contract.
+Use risk filtering for new inferred risks beyond an explicit contract. Measure Probability across a credible maintenance or change operation supported by project evidence.

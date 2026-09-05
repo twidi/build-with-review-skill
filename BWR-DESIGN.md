@@ -135,6 +135,14 @@ The Current Spec contains, with flexible headings:
 
 Each Lot states its responsibility, obligations, dependencies, and end state. Root Lots appear in execution order and depend only on earlier root Lots. The approved Current Spec has no necessary unresolved product question. It does not predefine future functions, signatures, commands, tasks, or reports.
 
+The Feature inherits established product behavior from Human decisions, the existing product, repository conventions, platform constraints, and documented guarantees.
+
+The Current Spec states each material boundary introduced or changed by the Feature. A boundary is material when it introduces concurrency, event ordering, persistence, multiple views, retry, recovery, offline behavior, a changed guarantee, or an unresolved user-visible choice.
+
+The out-of-scope section records material boundaries. It is not an exhaustive list of technically possible behavior.
+
+Spec silence alone establishes no supported behavior, forbidden behavior, Finding, or product decision. A technical possibility alone establishes no supported use.
+
 BWR has no global requirement identifier registry. Actors reference an obligation with its heading path and a short exact quote.
 
 ### Lot plan contract
@@ -175,6 +183,10 @@ The Implementer writes the Design inside the tracked Task section. The Design co
 A step states the area, change, and expected result. The Design can define concrete signatures, formats, states, and events. It does not contain full implementation code.
 
 It does not invent a product decision. A material Design change during coding stops the affected work. The Implementer updates the Design, self-reviews it, and starts a fresh Design checker.
+
+The Design uses the smallest complete mechanism that satisfies its authoritative obligations and remains coherent with the existing architecture. Every new state, abstraction, persistent field, version, lock, retry, synchronization mechanism, service, or compatibility layer traces to an exact obligation or admitted scenario. The Design explains why a simpler solution is insufficient.
+
+`Smallest` means the least added mechanism that fully satisfies the contract. It does not mean the shortest patch. Implementation cost alone does not create a product decision.
 
 Coding resumes only after a clean Design check.
 
@@ -667,34 +679,95 @@ The complete review subject remains frozen while the reviewer works. A changed s
 
 ## 13. Finding model
 
+### Reviewer judgment
+
+Review mandates define search directions. They create no Finding quota and provide no evidence by themselves.
+
+Each reviewer performs two passes in the same session:
+
+1. Search the complete mandate across the supported domain. Derive candidates from concrete subject evidence.
+2. Try to eliminate each candidate through a skeptical admission review.
+
+A candidate becomes a public Finding only when it has a supported scenario, a checkable contract failure, a direct credible consequence, sufficient evidence, the correct Severity, and admission under the applicable matrix.
+
+The reviewer reports all admitted Findings currently known in one Report. A complete review can legitimately return `CLEAN`. A filtered or resolved candidate returns only after a material change to its evidence, conditions, authoritative contract, or observed behavior.
+
 ### Severity
 
-Severity measures consequence only. It uses three values. **CRITICAL** means one of these consequences:
+Severity measures how seriously a Finding prevents the reviewed subject from fulfilling its assigned authoritative contract. Assess the result if the subject is accepted unchanged.
 
-- data loss;
-- destructive action;
-- serious security failure;
-- silent wrong delivery;
-- loss of an authoritative decision.
+Use the direct credible causal consequence after existing protections and normal recovery. Do not add another independent failure or the worst imaginable downstream result.
 
-**IMPORTANT** means one of these consequences:
+**CRITICAL** means one of these effects:
 
-- incorrect behavior;
-- blocked work;
-- broken recovery;
-- a false result that remains detectable or recoverable.
+- a required principal outcome becomes impossible;
+- a required flow has no valid continuation;
+- the subject cannot fulfill its central responsibility;
+- authoritative data or a decision is silently lost or corrupted;
+- an important destructive action occurs;
+- a serious security failure occurs;
+- the result appears valid while the central purpose fails.
 
-**MINOR** means limited friction, clarity, diagnostics, or maintainability impact. It has no credible wrong product result. Probability never lowers Severity.
+**IMPORTANT** means one of these effects while the subject can still fulfill its central responsibility:
 
-A concrete incorrect behavior is at least IMPORTANT unless it is CRITICAL. DECISION is separate from Severity. Every confirmed finding requires correction.
+- significant behavior or an obligation is incorrect or incomplete;
+- a secondary path is blocked;
+- an obligation is only partially fulfilled;
+- a reasonable workaround remains;
+- the error is detectable or recoverable;
+- a maintainability defect creates a concrete future-error risk.
+
+**MINOR** means the result remains correct, with limited friction, clarity, diagnostics, local divergence, or maintenance cost. It has no credible incorrect result.
+
+Use this decision order:
+
+1. If the subject cannot fulfill its central responsibility, use `CRITICAL`.
+2. If significant behavior, an obligation, or a result is wrong, use `IMPORTANT`.
+3. If the result remains correct with limited impact, use `MINOR`.
+
+Probability never changes Severity. `DECISION` is separate from Severity. Every confirmed Finding requires resolution.
 
 ### Probability
 
-Probability describes the concrete scenario frequency. It does not describe reviewer confidence. It uses four values.
+Probability describes the complete concrete scenario across real-world opportunities relevant to the assigned role. It does not describe reviewer confidence.
 
-**FREQUENT** means repeated occurrence on a normal path. **PLAUSIBLE** means ordinary use, common mistakes, common failures, or common configuration. **RARE** means an unusual but supported environment, timing, or combination.
+Before classifying it, the reviewer:
 
-**EXCEPTIONAL** means deliberate internal manipulation, unsupported corruption, or several independent exceptional conditions. An adversarial action is not automatically exceptional.
+1. states the complete minimal scenario;
+2. lists every necessary condition;
+3. identifies dependent causal steps;
+4. identifies independent coincidences;
+5. evaluates the complete chain;
+6. limits the class to the least-frequent necessary condition;
+7. reduces it further when independent conditions must coincide.
+
+Dependent causal steps are not separate coincidences.
+
+Use these values:
+
+- **FREQUENT:** the scenario repeats on a normal path without an unusual precondition;
+- **PLAUSIBLE:** ordinary use can reach the scenario without special coordination, precise timing, internal manipulation, or multiple independent events;
+- **RARE:** a realistic supported scenario needs one unusual but credible condition, without precise timing or multiple independent coincidences;
+- **EXCEPTIONAL:** the scenario needs one exceptional condition, multiple independent unusual conditions, deliberate coordination, precise timing, internal manipulation, unsupported corruption, or a speculative chain without real exposure evidence.
+
+An adversarial action is not automatically `EXCEPTIONAL`.
+
+The reviewer needs positive evidence to choose a more frequent class. When evidence cannot distinguish two classes, it chooses the less frequent class.
+
+Valid evidence includes a product flow, a reproducible sequence without artificial coordination, a durable reachable code state, a supported configuration, documented behavior, a normal platform failure, or established project use. Language, scheduler, or network possibility alone is insufficient.
+
+The reference frame depends on the role:
+
+| Role | Real opportunity |
+|---|---|
+| Spec review | implementation or use conforming to the Spec |
+| Amendment Reach | application across affected behavior |
+| Design check | implementation or execution following the Design |
+| Code check | supported execution |
+| Product `user` | supported user flow |
+| Product `meaning` | a concept crossing a real boundary |
+| Product `quality` | a credible maintenance or change operation |
+| Product `unlooked` | a real interaction with an uncovered boundary |
 
 ### Admission matrix
 
@@ -708,11 +781,19 @@ The reviewer uses Probability privately. The public finding contains Severity on
 
 ### Cases without Probability filtering
 
-The Spec Feasibility reviewer reports every infeasible written contract. The Product `coverage` reviewer reports every concrete missing obligation. A direct violation of the assigned authoritative contract is always reported.
+The Spec Feasibility reviewer reports every infeasible written contract. The Product `coverage` reviewer reports every concrete missing obligation. Plan completeness and Consolidation compare explicit contracts or states and do not use Probability.
 
-This rule applies to Design, Code, and Product review. Probability applies only to a new inferred risk beyond an explicit contract. Plan completeness and Consolidation do not use Probability.
+A direct violation bypasses Probability only when the reviewer:
+
+1. cites the exact authoritative obligation;
+2. demonstrates that the complete scenario is inside its stated scope;
+3. demonstrates the contradiction without adding an implicit guarantee.
+
+Any added or inferred guarantee uses Probability filtering. For example, an obligation that saving updates the displayed item does not imply atomic live synchronization between browser tabs.
 
 The Finding verifier never uses Probability.
+
+BWR has no general Risk adjudicator. Existing correction and verification loops challenge public Finding evidence without receiving Probability.
 
 ### Public finding
 
@@ -725,21 +806,33 @@ Where: <file and lines, user path, or document passage>
 
 Scope edge: <direct connection with the reviewed subject>
 
+Scenario: <complete minimal scenario, or direct inspection>
+
 Observed: <observable fact>
 
-Expected: <required behavior or property>
+Expected: <required behavior or property and its authoritative source>
 
 Consequence: <what can go wrong>
 
 Evidence: <reproduction, citation, or absence search>
 ```
 
-The heading states a verifiable claim. The finding includes a direct scope link and concrete consequence. Evidence uses one of these forms:
+The heading states a verifiable claim. A conditional Finding identifies its initial state, necessary actions or events, their order, and independent conditions. `Evidence` establishes every necessary condition and the causal path to the direct consequence.
+
+A direct fact uses `Scenario: direct inspection`. The Finding states the required outcome rather than prescribing an implementation mechanism.
+
+One Finding normally represents one correction obligation. Group occurrences that share the same cause, expected outcome, consequence, and correction logic. Split them when behavior, cause, Severity, owner, consequence, correction logic, or validation differs.
+
+Each Finding remains coherent to fix, independently verifiable, and traceable. Evidence uses one of these forms:
 
 - reproduction;
 - citation;
 - absence;
 - spec silence for a DECISION.
+
+A Fixer can `DECLINE` a Finding, and an Implementer can mark it `DISAGREED`, only with contradictory evidence. That evidence can address the scenario, necessary conditions, scope, obligation, observed behavior, causal path, consequence, or evidence.
+
+Correction difficulty, provider preference, architecture preference, or cost alone is not contradictory evidence. Cost alone does not create a Human decision.
 
 Finding identifiers are local to one report. The stable identity is `<report-path>#F<number>`.
 
@@ -755,6 +848,8 @@ A DECISION uses:
 Where: <where the question appears>
 
 Scope edge: <connection with the reviewed subject>
+
+Scenario: <supported use that requires the decision>
 
 Spec silence: <what the Current Spec does not decide>
 
@@ -777,6 +872,7 @@ The file uses:
 ## <occurrence>
 
 - MINOR × PLAUSIBLE — <candidate>
+  Scenario: <complete minimal scenario>
   Probability basis: <conditions>
 ```
 
@@ -800,6 +896,8 @@ For each finding, it checks:
 - the observed fact;
 - the expected requirement;
 - the scope connection;
+- every stated scenario condition;
+- the causal path;
 - the consequence;
 - the evidence.
 

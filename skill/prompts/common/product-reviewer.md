@@ -18,6 +18,10 @@ Judge:
 
 The Current Spec controls product intent. Plans describe the delivered decomposition.
 
+Determine the supported domain from Human decisions, the Current Spec, established product behavior, repository conventions, platform constraints, and documented guarantees.
+
+A technical possibility alone does not establish supported use.
+
 Treat an obligation explicitly assigned to a future Lot as future scope.
 
 Start with:

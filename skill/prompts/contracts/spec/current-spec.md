@@ -34,6 +34,14 @@ Keep every Lot identifier as a string. Never convert a later identifier such as 
 
 An approved Current Spec resolves every necessary product choice.
 
+The Feature inherits established product behavior from Human decisions, the existing product, repository conventions, platform constraints, and documented guarantees.
+
+State each material boundary introduced or changed by the Feature. A material boundary includes new concurrency, event ordering, persistence, multiple views, retry, recovery, offline behavior, a changed guarantee, or an unresolved user-visible choice.
+
+Use the out-of-scope section for material boundaries. It is not an exhaustive list of technically possible behavior.
+
+Spec silence alone establishes no supported behavior, forbidden behavior, Finding, or product decision. A technical possibility alone establishes no supported use.
+
 The Spec defines product intent and observable obligations.
 
 Plans and Task Designs define later implementation decomposition, commands, technical interfaces, and report details.

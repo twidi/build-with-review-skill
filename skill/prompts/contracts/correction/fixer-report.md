@@ -22,6 +22,10 @@ Use one disposition:
 - `APPLIED`: state the correction and its location;
 - `DECLINED`: state the contradictory evidence.
 
+Contradictory evidence can address the Finding's scenario, necessary conditions, scope, obligation, observed behavior, causal path, consequence, or evidence.
+
+A valid `DECLINED` disposition shows that at least one of those elements is false. Correction difficulty or architecture preference does not contradict a Finding.
+
 Every input Finding appears exactly once.
 
 For each processed Human correction or decision, state its applied result and location.

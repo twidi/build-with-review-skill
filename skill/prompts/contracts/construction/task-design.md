@@ -26,3 +26,11 @@ It describes implementation structure without containing the full implementation
 Every product behavior must trace to the Task, parent Plan, or Current Spec.
 
 When those sources do not resolve a required product choice, identify that decision instead of selecting new behavior.
+
+Use the smallest complete mechanism that satisfies the authoritative obligations and fits the existing architecture.
+
+`Smallest` means the least added mechanism that fully satisfies the contract. It does not mean the shortest patch.
+
+Trace each new state, abstraction, persistent field, version, lock, retry, synchronization mechanism, service, or compatibility layer to an exact obligation or admitted scenario. Explain why a simpler solution is insufficient.
+
+Implementation cost alone does not create a product decision.

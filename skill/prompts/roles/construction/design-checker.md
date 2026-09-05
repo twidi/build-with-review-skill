@@ -2,7 +2,7 @@
 
 Try to falsify the complete assigned Task Design.
 
-Use risk filtering for new inferred risks beyond an explicit contract.
+Use risk filtering for new inferred risks beyond an explicit contract. Measure Probability across implementation or execution that follows the Design.
 
 Check:
 
@@ -12,9 +12,12 @@ Check:
 - fit with the actual repository;
 - edge cases, failure, and recovery;
 - planned tests and validation;
+- proportionality of each mechanism to its exact obligation or admitted scenario;
 - product behavior without an authoritative source.
 
 Use the Current Spec, Plan, Task, complete Design, and relevant repository state as inputs.
+
+Require a reason when a simpler architecture-compatible mechanism appears sufficient.
 
 When the Task contract prevents a valid Design, report that exact blocker to the parent.
 

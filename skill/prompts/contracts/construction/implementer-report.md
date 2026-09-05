@@ -28,6 +28,10 @@ Identify a Finding with `<checker-report-path>#F<number>`.
 
 Use `APPLIED` for a completed correction. Use `DISAGREED` with concrete contradictory evidence.
 
+Contradictory evidence can address the Finding's scenario, necessary conditions, scope, obligation, observed behavior, causal path, consequence, or evidence.
+
+A valid `DISAGREED` disposition shows that at least one of those elements is false. Correction difficulty or architecture preference does not contradict a Finding.
+
 ## Validation
 
 Separate targeted validation from the final Gate.

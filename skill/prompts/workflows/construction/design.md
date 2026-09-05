@@ -65,7 +65,8 @@ Review the complete Design against:
 - interfaces, formats, state, and events;
 - edge cases, errors, and recovery;
 - planned tests and other validation;
-- the boundary between product intent and implementation design.
+- the boundary between product intent and implementation design;
+- the proportionality of each proposed mechanism to its exact obligation or admitted scenario.
 
 Correct every issue found.
 

@@ -17,4 +17,4 @@ Cover applicable paths for:
 
 Check both the immediate response and the durable state left after each path.
 
-Use risk filtering for new inferred risks beyond an explicit contract.
+Use risk filtering for new inferred risks beyond an explicit contract. Measure Probability across supported user flows.

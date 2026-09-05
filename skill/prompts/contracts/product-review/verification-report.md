@@ -26,7 +26,7 @@ Use `DISPROVED` when the verification contradicts that claim.
 
 Use `UNVERIFIABLE` when the source Finding lacks enough precise evidence for either verdict.
 
-For an ordinary Finding, the verification addresses its observed fact, requirement, scope connection, consequence, and evidence.
+For an ordinary Finding, the verification addresses its observed fact, requirement, scope connection, every scenario condition, causal path, consequence, and evidence.
 
 For a `DECISION`, it verifies the claimed Current Spec silence.
 

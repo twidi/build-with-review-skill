@@ -1,42 +1,47 @@
 # Finding Severity
 
-This Reference is for reviewers that classify public Findings.
+Use this Reference when a reviewer classifies public Findings.
 
-Severity measures consequence only.
+Severity measures how seriously a Finding prevents the reviewed subject from fulfilling its assigned authoritative contract.
 
-Use one value:
+Assess the subject as accepted unchanged. Use the direct credible causal consequence after existing protections and normal recovery.
 
 ## CRITICAL
 
-Use `CRITICAL` when the problem can cause:
+Use `CRITICAL` when:
 
-- data loss;
-- a destructive action;
-- a serious security failure;
-- silent wrong delivery;
-- loss of an authoritative decision.
+- a required principal outcome becomes impossible;
+- a required flow has no valid continuation;
+- the subject cannot fulfill its central responsibility;
+- authoritative data or a decision is silently lost or corrupted;
+- an important destructive action occurs;
+- a serious security failure occurs;
+- the result appears valid while the central purpose fails.
 
 ## IMPORTANT
 
-Use `IMPORTANT` when the problem can cause:
+Use `IMPORTANT` when significant behavior, an obligation, or a result is wrong, but the central responsibility remains possible.
 
-- incorrect behavior;
-- blocked work;
-- broken recovery;
-- a false result that remains detectable or recoverable.
+Examples include:
 
-A concrete incorrect behavior is at least `IMPORTANT`, unless it is `CRITICAL`.
+- a secondary path is blocked;
+- an obligation is partially fulfilled;
+- a reasonable workaround remains;
+- the error is detectable or recoverable;
+- a maintainability defect creates a concrete future-error risk.
 
 ## MINOR
 
-Use `MINOR` for limited friction, clarity, diagnostics, or maintainability impact.
+Use `MINOR` when the result remains correct. The impact is limited to friction, clarity, diagnostics, local divergence, or maintenance cost.
 
-A `MINOR` Finding has no credible wrong product result.
+## Decision order
 
-## Separate concepts
+1. Can the subject fulfill its central responsibility? If not, use `CRITICAL`.
+2. Is significant behavior, an obligation, or a result wrong? If yes, use `IMPORTANT`.
+3. Does the result remain correct with limited impact? If yes, use `MINOR`.
 
-Probability never changes Severity.
+Use the direct consequence. Do not add another independent failure or the worst imaginable downstream result.
 
-`DECISION` is not a Severity. It identifies an unresolved product choice.
+Probability never changes Severity. `DECISION` identifies an unresolved product choice instead of a Severity.
 
-Every confirmed public Finding requires resolution, including a `MINOR` Finding.
+Every confirmed public Finding requires resolution.

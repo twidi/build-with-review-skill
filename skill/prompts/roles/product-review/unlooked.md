@@ -6,9 +6,9 @@ Inspect:
 
 - behaviors that passing tests do not prove;
 - seams between Tasks;
-- unspecified behavior exposed by the delivered product;
+- supported behavior exposed at uncovered boundaries;
 - responsibilities that fall between components or roles.
 
 Follow each suspected blind spot to an observable product consequence.
 
-Use risk filtering for new inferred risks beyond an explicit contract.
+Use risk filtering for new inferred risks beyond an explicit contract. Measure Probability across real interactions with the uncovered boundary.

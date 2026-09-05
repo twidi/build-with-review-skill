@@ -541,7 +541,9 @@ BWR never resets unrelated Human changes.
 
 If existing changes overlap the requested work, the responsible agent must preserve them or ask for direction.
 
-## 16. Frozen review subjects
+## 16. Review integrity
+
+### Frozen review subjects
 
 Every independent review examines a stable subject.
 
@@ -560,6 +562,34 @@ A fresh session reviews the new subject.
 The stable Git state or unchanged file is sufficient evidence.
 
 BWR needs no checksum protocol around it.
+
+### Reviewer judgment
+
+A reviewer searches its complete mandate across the supported domain. Concrete subject evidence produces candidates.
+
+The mandate gives search directions, not Finding quotas.
+
+The reviewer then applies a skeptical admission pass to every candidate. It publishes only problems with a supported scenario, a checkable contract failure, a direct credible consequence, and sufficient evidence.
+
+Severity measures how seriously the problem prevents the reviewed subject from fulfilling its assigned authoritative contract. Probability measures the complete scenario across real opportunities relevant to the role.
+
+The reviewer evaluates every necessary condition together. Independent coincidences make the complete scenario less probable. Uncertainty never makes it more probable.
+
+A direct contract violation bypasses Probability only when the exact obligation covers the complete demonstrated scenario. An inferred guarantee remains subject to risk filtering.
+
+The supported domain comes from Human decisions, the existing product, repository conventions, platform constraints, and documented guarantees.
+
+The Spec states material boundaries introduced or changed by the Feature. It does not enumerate every technically possible non-goal.
+
+Spec silence and technical possibility do not expand the supported domain.
+
+A public conditional Finding states its complete minimal scenario. Probability and rejected candidates remain private.
+
+A complete review can return `CLEAN`. The reviewer reports every admitted Finding currently known instead of reserving candidates for later rounds.
+
+One Finding normally represents one correction obligation. It groups occurrences that share the same cause, expected outcome, consequence, and correction logic.
+
+A correction uses the smallest complete mechanism that satisfies the authoritative contract and fits the existing architecture. Each additional mechanism needs a traceable obligation and a reason that a simpler solution is insufficient.
 
 ## 17. Spec Review
 

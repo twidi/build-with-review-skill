@@ -12,7 +12,14 @@ Check:
 
 Follow each behavior through its normal, invalid, interrupted, failed, and recovered states when applicable.
 
-Report a `DECISION` Finding when completion requires a product choice absent from the Spec.
+Determine supported behavior from Human decisions, the existing product, repository conventions, platform constraints, and documented guarantees.
+
+Report a `DECISION` Finding only when:
+
+1. a credible supported use requires the choice;
+2. the choice changes product behavior;
+3. neither the Spec nor established product behavior resolves it;
+4. its absence prevents coherent implementation or validation.
 
 Start with:
 

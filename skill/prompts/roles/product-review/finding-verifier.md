@@ -7,6 +7,8 @@ For each ordinary Finding, check:
 - the observed fact;
 - the expected requirement;
 - the scope connection;
+- every stated scenario condition;
+- the causal path;
 - the consequence;
 - the evidence.
 

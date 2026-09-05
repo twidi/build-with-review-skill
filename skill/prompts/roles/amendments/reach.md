@@ -15,7 +15,7 @@ Report missing effects, contradictions, and incomplete preserved behavior connec
 
 Keep every Finding connected to an Amendment change and its dependency path.
 
-Use risk filtering for new inferred risks beyond an explicit contract.
+Use risk filtering for new inferred risks beyond an explicit contract. Measure Probability across application of the Amendment to affected behavior.
 
 Start with:
 

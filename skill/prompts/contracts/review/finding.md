@@ -13,9 +13,11 @@ Where: <file and lines, user path, or document passage>
 
 Scope edge: <direct connection with the reviewed subject>
 
+Scenario: <complete minimal scenario, or direct inspection>
+
 Observed: <observable fact>
 
-Expected: <required behavior or property>
+Expected: <required behavior or property and its authoritative source>
 
 Consequence: <what can go wrong>
 
@@ -26,9 +28,19 @@ The heading states a claim that another session can verify.
 
 `Where` identifies the affected location. `Scope edge` explains why the Finding belongs to this review.
 
-`Observed`, `Expected`, and `Consequence` separate fact, requirement, and impact.
+For a conditional Finding, `Scenario` states the initial state, necessary actions or events, their order, and independent conditions.
 
-`Evidence` uses a reproduction, a citation, or an explicit absence search.
+For a direct fact, use `Scenario: direct inspection`.
+
+`Observed`, `Expected`, and `Consequence` separate fact, requirement, and direct impact.
+
+`Evidence` establishes every necessary scenario condition and the causal path. It uses a reproduction, citation, or explicit absence search.
+
+State the required outcome. Do not prescribe an implementation mechanism.
+
+One Finding normally represents one correction obligation. Group occurrences with the same cause, expected outcome, consequence, and correction logic.
+
+Split occurrences when their behavior, cause, Severity, owner, consequence, correction logic, or validation differs. Keep each Finding independently verifiable and traceable.
 
 ## DECISION Finding
 
@@ -40,6 +52,8 @@ Use this shape when the Current Spec does not resolve a required product choice:
 Where: <where the question appears>
 
 Scope edge: <connection with the reviewed subject>
+
+Scenario: <supported use that requires the decision>
 
 Spec silence: <what the Current Spec does not decide>
 
@@ -59,5 +73,3 @@ Finding identifiers start at `F1` and are local to one Review Report.
 The stable identity is `<report-path>#F<number>`.
 
 When the same assignment overwrites its Report, every surviving Finding keeps its identifier. Never reuse a removed identifier. Give each new Finding the next identifier never used in that Report.
-
-A public Finding never contains its private Probability assessment or rejected review observations.

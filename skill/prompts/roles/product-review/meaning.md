@@ -20,4 +20,4 @@ Find:
 - distinct states collapsed into one state;
 - incorrect `null`, empty, missing, or default behavior.
 
-Use risk filtering for new inferred risks beyond an explicit contract.
+Use risk filtering for new inferred risks beyond an explicit contract. Measure Probability when the concept crosses a real supported boundary.
